@@ -11,6 +11,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     [
         new("Choose a worktree or branch", "Browse versions and preview their changed files before deploying anything."),
         new("Refresh deployment status", "Reload the active version and its automatic-update status."),
+        new("Open solution", "Open a worktree or local branch in Visual Studio; branches without a checkout get a new worktree."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
         new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
         new("Open logs", "Open Cultivate's diagnostic logs in File Explorer."),
@@ -114,6 +115,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         Updater.Restart();
                         break;
                     case "Choose a worktree or branch": await Choose(state); break;
+                    case "Open solution": await OpenSolution(state); break;
                     case "Restore original webfarm files":
                         if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))
                         {
@@ -153,12 +155,22 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     case "Exit": return;
                 }
             }
-            catch (Exception exception) when (exception is IOException or InvalidOperationException or System.Xml.XmlException or System.Text.Json.JsonException)
+            catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
+                System.Xml.XmlException or System.Text.Json.JsonException)
             {
                 ShowError(exception);
                 Pause();
             }
         }
+    }
+
+    private async Task OpenSolution(DeploymentState? state)
+    {
+        var targets = await AnsiConsole.Status().StartAsync("Finding worktrees and local branches...", _ => git.Targets());
+        var target = new VersionPicker(targets, state, openSolution: true).Show();
+        if (target is null) return;
+        var solution = await AnsiConsole.Status().StartAsync("Locating the solution...", _ => git.Solution(target));
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(solution) { UseShellExecute = true });
     }
 
     private async Task Choose(DeploymentState? state)

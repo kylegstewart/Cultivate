@@ -8,6 +8,29 @@ internal sealed class GitRepository(Settings settings)
     public Task<string> Git(string root, params string[] arguments) =>
         Commands.Run("git.exe", new[] { "-c", "core.quotepath=false", "-C", root }.Concat(arguments));
 
+    public async Task<string> Solution(Target target)
+    {
+        if (target.Remote) throw new InvalidOperationException("Choose a worktree or local branch to open its solution.");
+        var root = target.Worktree;
+        if (root is null)
+        {
+            if (!target.Ref.StartsWith("refs/heads/", StringComparison.Ordinal))
+                throw new InvalidOperationException("Choose a local branch to open its solution.");
+            root = (await Targets()).FirstOrDefault(x => x.Worktree is not null && x.Ref == target.Ref)?.Worktree;
+            if (root is null)
+            {
+                if (await Git(settings.RepositoryRoot, "ls-tree", "--name-only", target.Ref, "--", "MyMeyer.sln") != "MyMeyer.sln")
+                    throw new InvalidOperationException($"Branch '{target.Branch}' does not contain MyMeyer.sln.");
+                root = Path.Combine(Files.Home, "Worktrees", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(Path.GetDirectoryName(root)!);
+                await Git(settings.RepositoryRoot, "worktree", "add", root, target.Ref["refs/heads/".Length..]);
+            }
+        }
+        var solution = Path.Combine(root, "MyMeyer.sln");
+        if (!File.Exists(solution)) throw new FileNotFoundException($"No MyMeyer.sln was found in {root}.", solution);
+        return solution;
+    }
+
     public async Task<List<Target>> Targets()
     {
         var result = new List<Target>();
