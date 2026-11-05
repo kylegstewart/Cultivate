@@ -64,6 +64,15 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 Files = files.Select(x => new { x.Source, x.RelativePath, x.Delete, Hash = x.Delete ? null : Files.Hash(x.Source) }).ToList()
             });
             var state = result.Deserialize<DeploymentState>(Files.Json) ?? throw new InvalidDataException("Deployment did not return its state.");
+            var deployed = new HashSet<string>(files.Select(file => file.RelativePath), StringComparer.OrdinalIgnoreCase);
+            state.Updated = files.Select(file => new UpdatedFile(file.RelativePath,
+                    file.Delete ? UpdatedFile.Deleted :
+                    runtimeFiles.Any(x => Files.Comparer.Equals(x.RelativePath, file.RelativePath)) ? (reuse ? UpdatedFile.Reused : UpdatedFile.Built) :
+                    UpdatedFile.Synced))
+                // The bridge restores the previous version's files that this one no longer deploys.
+                .Concat((previous?.Active == true ? previous.Files : []).Where(file => !deployed.Contains(file.RelativePath))
+                    .Select(file => new UpdatedFile(file.RelativePath, UpdatedFile.Restored)))
+                .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase).ToList();
             if (watch)
             {
                 progress("Starting automatic saved-file updates");

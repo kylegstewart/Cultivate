@@ -181,8 +181,12 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 $"[{TerminalStyle.Muted}]{actionable.Count} changed files   /   {plan.Frontend.Count} frontend   /   {plan.Projects.Count} DLL builds[/]");
             var changes = new Table().Border(TableBorder.Rounded).BorderColor(Color.FromHex(TerminalStyle.Border)).Expand()
                 .AddColumn($"[{TerminalStyle.Accent}]CHANGED FILES[/]").AddColumn($"[{TerminalStyle.Accent}]ACTION[/]");
+            // Each project builds once however many of its files changed; later rows say so instead of repeating the action.
+            var shown = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var (change, description) in actionable)
-                changes.AddRow(Escape((change.Deleted ? "DELETE " : "") + change.Path), Escape(description));
+                changes.AddRow(Escape((change.Deleted ? "DELETE " : "") + change.Path),
+                    description.StartsWith("Build ", StringComparison.Ordinal) && !shown.Add(description)
+                        ? $"[{TerminalStyle.Muted}]{Escape(description[6..])} (same build)[/]" : Escape(description));
             if (actionable.Count == 0) changes.AddRow("[grey]No files have a deployment action[/]", "");
             AnsiConsole.Write(changes);
             AnsiConsole.Write(TerminalStyle.Card(new Markup(plan.Projects.Count == 0 ? $"[{TerminalStyle.Muted}]Frontend only. No DLL builds needed.[/]" :
@@ -200,17 +204,28 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             }
             if (!AnsiConsole.Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", false)) continue;
             var watch = action == "Activate and automatically update saved changes";
-            await AnsiConsole.Status().StartAsync("Preparing activation...", async context =>
-            {
-                await new Pipeline(settings, git, bridge).Activate(plan, message => context.Status(Escape(message)), watch);
-            });
+            var activated = await AnsiConsole.Status().StartAsync("Preparing activation...", context =>
+                new Pipeline(settings, git, bridge).Activate(plan, message => context.Status(Escape(message)), watch));
             AnsiConsole.Write(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]VERSION ACTIVATED[/]\nRefresh your development site to use the selected version."),
                 "DEPLOYMENT COMPLETE", TerminalStyle.Accent));
+            AnsiConsole.Write(UpdatedFiles(activated, settings.WebfarmRoot));
             AnsiConsole.MarkupLine(watch ? "[grey]Saved changes update automatically after successful builds; closing this menu keeps updates running.[/]" :
                 "[grey]This is a one-time deployment. Later saves will not be published.[/]");
             Pause();
             return;
         }
+    }
+
+    /// <summary>Every webfarm file the activation wrote, deleted, or restored, with what happened to it.</summary>
+    internal static IRenderable UpdatedFiles(DeploymentState state, string webfarmRoot)
+    {
+        var table = new Table().Border(TableBorder.Rounded).BorderColor(Color.FromHex(TerminalStyle.Border)).Expand()
+            .AddColumn($"[{TerminalStyle.Accent}]UPDATED ON {Escape(webfarmRoot.ToUpperInvariant())}[/]")
+            .AddColumn($"[{TerminalStyle.Accent}]CHANGE[/]");
+        foreach (var file in state.Updated)
+            table.AddRow(Escape(file.RelativePath), $"[{(file.Change == UpdatedFile.Restored ? TerminalStyle.Gold : TerminalStyle.Muted)}]{Escape(file.Change)}[/]");
+        if (state.Updated.Count == 0) table.AddRow("[grey]No webfarm files changed[/]", "");
+        return table;
     }
 
     // Lines below the cards on the home screen: a blank line, the menu title, its actions, the highlighted help, the cursor.

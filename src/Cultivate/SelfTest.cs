@@ -239,6 +239,9 @@ internal static class SelfTest
             var coreTime = File.GetLastWriteTimeUtc(coreDestination);
             var progress = new List<string>();
             var state = await pipeline.Activate(plan, progress.Add, watch: false);
+            Check(state.Updated.Select(file => (file.RelativePath, file.Change)).SequenceEqual(
+                [(@"bin\Page.dll", UpdatedFile.Built), (@"modules\View.ascx", UpdatedFile.Synced)]),
+                "activation lists every webfarm file it updated and how");
             Check(state.Active && !state.WatchEnabled && state.RuntimeFiles.Select(x => x.RelativePath).SequenceEqual([@"bin\Page.dll"]),
                 "activation publishes exactly the changed project's own DLL");
             var deployed = (await bridge.Call("Status")).GetProperty("Files").EnumerateArray()
@@ -270,6 +273,8 @@ internal static class SelfTest
             state = await pipeline.Activate(markupUpdate, progress.Add, watch: false, workerUpdate: true);
             Check(progress.Any(x => x.StartsWith("Frontend-only update")) && !progress.Any(x => x.StartsWith("Building ")),
                 "frontend-only updates reuse the target-only cache without rebuilding");
+            Check(state.Updated.Any(file => file.RelativePath == @"bin\Page.dll" && file.Change == UpdatedFile.Reused),
+                "frontend-only updates list the reused DLL as copied, not built");
             Check(File.ReadAllText(frontendDestination) == "second saved markup" && File.GetLastWriteTimeUtc(pageDestination) == pageTime,
                 "frontend saves copy without recopying the target DLL");
             Save(@"Page\Value.cs", "this changed project deliberately cannot compile;");
@@ -672,6 +677,22 @@ internal static class SelfTest
             [@"Sync DesktopModules\Order\ucOrder.ascx", "Build OrderingSystem.dll"]),
             "default rows show the exact frontend destination and owning DLL build");
         Check(preview.Changes.Count == 7, "filtered previews preserve all changes for Show every changed file");
+        var multiFile = new ProjectInfo
+        {
+            RelativePath = project.RelativePath, Assembly = project.Assembly,
+            Inputs = [@"OrderingSystem\Order\ucOrder.ascx.cs", @"OrderingSystem\Order\FreightProgramBreakdown.cs"]
+        };
+        Check(Planner.BuildOrder([multiFile], [new(@"OrderingSystem\Order\ucOrder.ascx.cs", false),
+                new(@"OrderingSystem\Order\FreightProgramBreakdown.cs", false), new(project.RelativePath, false)], []).Count == 1,
+            "a project with several changed files is scheduled to build once");
+        var updatedScreen = Capture(Terminal.UpdatedFiles(new DeploymentState
+        {
+            Updated = [new(@"bin\OrderingSystem.dll", UpdatedFile.Built), new(@"DesktopModules\Order\ucOrder.ascx", UpdatedFile.Synced),
+                new(@"DesktopModules\Old\Old.ascx", UpdatedFile.Restored)]
+        }, @"\\webfarm-dev02\C$\inetpub\MyMeyer"), 120, 30);
+        Check(updatedScreen.Contains(@"bin\OrderingSystem.dll") && updatedScreen.Contains(UpdatedFile.Built) &&
+            updatedScreen.Contains(@"DesktopModules\Old\Old.ascx") && updatedScreen.Contains(UpdatedFile.Restored),
+            "the deployment summary lists every updated webfarm file");
         preview.Changes.Add(new(@"OrderingSystem\Order\Removed.cs", true));
         preview.Changes.Add(new(project.RelativePath, false));
         Check(Terminal.ActionableChanges(preview).Any(item => item.Change.Path.EndsWith("Removed.cs") && item.Action == "Build OrderingSystem.dll"),
