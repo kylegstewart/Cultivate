@@ -1,0 +1,45 @@
+name: Release
+
+# Push a tag that matches <Version> in src/Cultivate/Cultivate.csproj, e.g. v1.1.0.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Check the tag matches the project version
+        shell: pwsh
+        run: |
+          $version = (dotnet msbuild src/Cultivate/Cultivate.csproj -nologo -getProperty:Version).Trim()
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match project version $version." }
+
+      - name: Build and package
+        shell: pwsh
+        run: ./scripts/build.ps1 -Package
+
+      - name: Self-test (fixtures only)
+        shell: pwsh
+        env:
+          CULTIVATE_HOME: ${{ runner.temp }}\cultivate-home
+        run: |
+          ./artifacts/publish/install.ps1 -InstallDir "$env:RUNNER_TEMP\cultivate" -NoDesktopShortcut -NoPath
+          & "$env:RUNNER_TEMP\cultivate\Cultivate.exe" self-test
+
+      - name: Publish the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = (Get-ChildItem artifacts/*.zip).FullName
+          gh release create $env:GITHUB_REF_NAME $zip --title "Cultivate $env:GITHUB_REF_NAME" --generate-notes

@@ -1,0 +1,145 @@
+# How Cultivate works
+
+## The workflow
+
+The version library separates **Worktrees**, **Local**, and **Remote** sources. The home screen,
+version library, and deployment preview always distinguish the **active deployment** from the
+version you are **previewing**. Highlight a menu action to see its explanation below the choices.
+Typing filters actions, the arrow keys move the highlight, and Enter selects.
+
+1. **Choose a version.** Pick an existing worktree, which includes saved uncommitted changes, or a
+   local or cached remote branch, which uses committed contents only. Remote branches are cached
+   refs and are not fetched. Nothing is checked out or switched.
+2. **Review the preview.** It lists actionable changed files, exact frontend destinations, and the
+   projects that own changed compiled files. Files with no deployment action, such as generated
+   DLLs, stay hidden unless you choose **Show every changed file**.
+3. **Confirm the destination.** Cultivate takes an isolated snapshot, prepares references, builds
+   only the changed projects, then syncs the mapped frontend files and each changed project's
+   own DLL.
+4. **Choose automatic updates or a one-time activation.** Automatic updates keep running after
+   the menu closes. Frontend saves copy without a rebuild, and compiled changes rebuild only
+   their owning projects. A failed build leaves the last successful deployment in place.
+5. **Restore original webfarm files** stops updates and restores the journaled originals.
+
+Only files saved to disk are seen; Cultivate cannot read unsaved editor buffers. It does not
+commit, push, run SQL, deploy site configuration, or modify project source. Frontend mappings are
+added through Code Release Manager. These all produce explicit errors instead of being guessed:
+unmapped frontend files, unowned compiled files, ambiguous destinations, missing build inputs,
+conflicting output destinations, and changed server files.
+
+## What counts as a change
+
+The baseline is the selected commit's merge-base with `BaseBranch` (normally `master`), plus
+staged, unstaged, and untracked (not ignored) worktree files. Merge-conflicted worktrees are
+blocked. Deployments of the baseline branch itself are refused.
+
+**Frontend** extensions: `.ascx`, `.aspx`, `.css`, `.js`, `.html`, `.htm`, common images
+(`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`), and fonts (`.woff`, `.woff2`, `.ttf`,
+`.eot`). Every one needs an unambiguous mapping in Code Release Manager
+(`MEYER..MY_CodeRelease_WebfarmFiles`). `bin`, `obj`, `packages`, `.git`, and `Backup` folders are
+excluded.
+
+**Compiled** inputs are `.cs`, `.resx`, `.csproj`, `.props`, `.targets`, and `packages.config`.
+They identify their owning projects, and only those owners are built. If two changed projects
+reference each other, the references decide the build order. Unchanged dependencies or consumers
+are never added. A changed build file that no project owns needs clarification; it never triggers
+a site-wide build. Solution files, tracked generated DLLs, documentation, SQL, and site
+configuration are shown but not copied.
+
+For example, changes to `MiscApps\MiscApps\PriceGroupMatrix.ascx` and its code-behind produce
+exactly these actions:
+
+- Sync the markup to `DesktopModules\PriceGroupMatrix\PriceGroupMatrix.ascx`.
+- Build `MiscApps\MiscApps\MiscApps.csproj` in Debug and publish `bin\MiscApps.dll`.
+
+`MeyerObjects`, other consumers, and third-party dependency DLLs are not built or published. The
+existing compiled references are used to compile the changed project. Cultivate does not audit or
+reconcile the host's entire runtime dependency graph. A markup-only activation builds and copies
+no DLLs.
+
+## Builds
+
+Builds use Visual Studio MSBuild in Debug, with `BuildProjectReferences=false`, isolated writable
+outputs, and each project's existing configuration. There is no solution build.
+
+- Package directories are copied from the selected worktree or the normal checkout when available.
+  Missing packages for a changed project trigger a project-level NuGet restore, using the existing
+  feeds and their local authentication. The restore uses the snapshot as `SolutionDir`, so legacy
+  `packages.config` projects restore into the snapshot's own `packages` folder.
+- After the restore, every literal package `HintPath` must exist. A missing or stale one stops the
+  build with an explicit error. Visual Studio, GAC, or machine-installed DLLs are never
+  substituted.
+- Literal `HintPath`s are tried in the snapshot, the selected worktree, and the normal checkout
+  before generic `bin` caches. This keeps sibling-repository references (such as
+  `Warehouse--PickTickets`) working even when a worktree is relocated. Each seeded reference's
+  source is recorded in `build.log`.
+- Existing compiled references are copied in privately when needed. Unchanged reference projects
+  are not restored or built. If their DLL is missing, Cultivate reports it rather than silently
+  rebuilding.
+- Build inputs never enter the deployment payload. The webfarm must already contain the APIs the
+  newly built project uses.
+
+Each project's existing `CopyBuildOutputToWebfarm` target still runs, but Cultivate's MSBuild hook
+redirects its copy to a private local folder. `Capture.targets` records the project's own DLL,
+which is checked for the expected assembly identity and published through the journal.
+Copy-local dependencies and whole `bin` folders are never published. A frontend-only saved update
+reuses the active project DLLs without rebuilding. Project-specific custom external deployment
+tasks are not supported.
+
+Build and restore logs, per-project MSBuild binary logs, and saved plans are kept in
+`%LOCALAPPDATA%\Meyer\Cultivate\Runs\<run-id>`. Temporary Git worktrees are removed after each run.
+
+## How Visual Studio builds are protected
+
+`install.ps1` adds one per-user MSBuild import, in two places:
+
+```
+%LOCALAPPDATA%\Microsoft\MSBuild\Current\Microsoft.Common.targets\ImportAfter\Meyer.Cultivate.targets
+%LOCALAPPDATA%\Microsoft\MSBuild\15.0\Microsoft.Common.targets\ImportAfter\Meyer.Cultivate.targets
+```
+
+It affects only **Debug** builds of projects under a `MyMeyer.sln` that define
+`CopyBuildOutputToWebfarm`. Before that target runs, its destination is redirected to a local
+staging folder, which is deleted afterwards. As a result, a normal Visual Studio build from **any**
+worktree can't overwrite the version Cultivate deployed. To put a build on the webfarm, deploy it
+with Cultivate. Release builds are unaffected. No project or system-wide MSBuild files are
+modified.
+
+`WebfarmPath` must be an environment variable, not a global `/p:WebfarmPath` property. Global
+overrides are rejected rather than allowed to bypass the redirect. Reload Visual Studio
+solutions after installing or uninstalling so they pick up the change.
+
+## Visual Studio reference warnings
+
+Cultivate runs MSBuild independently of Visual Studio. You don't need to open a reference's
+Properties or build the solution before activating. Warning icons on first load don't show
+whether a reference is really missing or whether the IDE simply hasn't refreshed its design-time
+state.
+
+Keep each package's `packages.config` entry, assembly identity, and `HintPath` consistent.
+Restore downloads declared packages; it doesn't repair incorrect references. To repair a
+reference, reinstall the declared package through NuGet for the affected project. An intentional
+version upgrade must update the manifest and references together. Don't compensate with a global
+`ReferencePath` or a Visual Studio-installed DLL; that can hide incorrect inputs on one machine.
+
+## Safety and recovery
+
+- Each webfarm destination has an exclusive lock, a journal, SHA-256 verified copies, and backups of
+  every file before it is overwritten or deleted. Existing backups are never discarded.
+- Builds and verification finish before the live version is switched. If a deployment copy fails,
+  newly copied files are restored where possible, and the journal is kept if recovery is blocked.
+- A webfarm file changed by anything other than Cultivate blocks restoring that file. It is never
+  overwritten.
+- Cultivate refuses to activate while the old `WebfarmFileSync` watcher is running against the
+  configured farm. Close that watcher first.
+- A multi-file SMB/IIS deployment is **not atomic**. Requests can see intermediate files, and DLL
+  copies can recycle IIS. Use a dev farm, never production.
+- After an interruption or failure, check `cultivate status` and the logs, then use Restore.
+  Don't delete the `StateRoot` folders.
+- Always use the same canonical UNC path. Drive aliases or alternate shares don't share
+  destination ownership. This is per-user, per-machine protection, not a shared deployment
+  service.
+
+The journal format is shared with the original WebfarmWorkspace utility, so `cultivate restore`
+also restores deployments that utility made. Don't run two different publishing tools against one
+destination.

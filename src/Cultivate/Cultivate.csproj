@@ -6,14 +6,21 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>Cultivate</AssemblyName>
-    <ApplicationIcon>..\Assets\Cultivate.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
+    <RootNamespace>Cultivate</RootNamespace>
+    <ApplicationIcon>..\..\assets\Cultivate.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
+    <Product>Cultivate</Product>
+    <Company>Meyer Distributing</Company>
+    <Description>Preview, build, and activate a MyMeyer development version on your dev webfarm.</Description>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
-    <None Include="..\Bridge.ps1" Link="Bridge.ps1" CopyToOutputDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
-    <None Include="..\Capture.targets" Link="Capture.targets" CopyToOutputDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
-    <None Include="..\Assets\Cultivate.ico" Link="Cultivate.ico" CopyToOutputDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <!-- Runtime support files stay beside Cultivate.exe (not bundled) so PowerShell and MSBuild can load them. -->
+    <None Update="Runtime\*.ps1;Runtime\*.psm1;Runtime\*.targets" Link="%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <None Include="..\..\assets\Cultivate.ico" Link="Cultivate.ico"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 </Project>

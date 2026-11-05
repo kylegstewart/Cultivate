@@ -11,7 +11,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         new("Choose a worktree or branch", "Browse versions and preview their changed files before deploying anything."),
         new("Refresh deployment status", "Reload the active version and its automatic-update status."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
-        new("Settings", "Change the dev webfarm destination and default automatic-update setting."),
+        new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
         new("Open logs", "Open Cultivate's diagnostic logs in File Explorer."),
         new("How it works", "Read the guide to version selection, deployment, and recovery."),
         new("Exit", "Close this menu without stopping active automatic updates.")
@@ -89,12 +89,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         }
                         break;
                     case "Settings":
-                        var root = AnsiConsole.Ask<string>("Webfarm root:", settings.WebfarmRoot);
-                        if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root)) throw new InvalidOperationException("Enter an absolute site-root path.");
-                        if (state?.Active == true) throw new InvalidOperationException("Restore the active deployment before changing its destination.");
-                        settings.WebfarmRoot = Files.Full(root);
-                        settings.WatchSavedFiles = AnsiConsole.Confirm("Automatically deploy later saved changes?", settings.WatchSavedFiles);
-                        Files.WriteJson(Path.Combine(Files.Home, "settings.json"), settings);
+                        await Setup.Interactive(settings, state);
+                        Pause();
                         break;
                     case "Open logs":
                         Directory.CreateDirectory(Path.Combine(Files.Home, "Logs"));

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack are needed by the self-test fixtures.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build and package
+        shell: pwsh
+        run: ./scripts/build.ps1 -Package
+
+      - name: Install into a temporary folder
+        shell: pwsh
+        run: ./artifacts/publish/install.ps1 -InstallDir "$env:RUNNER_TEMP\cultivate" -NoDesktopShortcut -NoPath
+
+      - name: Self-test (fixtures only)
+        shell: pwsh
+        env:
+          CULTIVATE_HOME: ${{ runner.temp }}\cultivate-home
+        run: |
+          & "$env:RUNNER_TEMP\cultivate\Cultivate.exe" --version
+          & "$env:RUNNER_TEMP\cultivate\Cultivate.exe" self-test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cultivate-win-x64
+          path: artifacts/*.zip

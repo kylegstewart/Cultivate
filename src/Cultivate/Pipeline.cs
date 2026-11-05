@@ -101,7 +101,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             using var metadata = JsonDocument.Parse(metadataText);
             var properties = metadata.RootElement.GetProperty("Properties");
             if (properties.GetProperty("_CultivateCaptureReady").GetString() != "true")
-                throw new InvalidOperationException("The per-user Cultivate MSBuild hook was not imported. Reinstall/reload the user hooks before building.");
+                throw new InvalidOperationException("Cultivate's per-user MSBuild hook was not imported. Run install.ps1 again, then check with `cultivate doctor`.");
             var targetPath = properties.GetProperty("TargetPath").GetString() ?? throw new InvalidDataException("Missing TargetPath.");
             Files.Child(snapshot, Path.GetRelativePath(snapshot, targetPath));
             var declared = metadata.RootElement.GetProperty("Items").GetProperty("ProjectReference");

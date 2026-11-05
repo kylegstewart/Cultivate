@@ -10,7 +10,7 @@ internal sealed class Bridge(Settings settings)
         Directory.CreateDirectory(directory);
         var input = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".json");
         var output = input + ".result";
-        Files.WriteJson(input, new { settings.WebfarmRoot, settings.StateRoot, Payload = payload });
+        Files.WriteJson(input, new { settings.WebfarmRoot, settings.StateRoot, settings.MappingAssembly, Payload = payload });
         try
         {
             await Commands.Run(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"),

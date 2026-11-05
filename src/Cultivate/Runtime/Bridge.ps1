@@ -8,14 +8,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module "$PSHOME\Modules\Microsoft.PowerShell.Utility" -Global
 $request = Get-Content -LiteralPath $InputPath -Encoding UTF8 -Raw | ConvertFrom-Json
-$core = Join-Path $env:LOCALAPPDATA 'Meyer\WebfarmWorkspace\App\WebfarmWorkspace.psm1'
-Import-Module $core -Force
-$result = & (Get-Module WebfarmWorkspace) {
+# The journal module ships beside this script in Cultivate's install folder.
+Import-Module (Join-Path $PSScriptRoot 'Cultivate.Journal.psm1') -Force -DisableNameChecking
+$result = & (Get-Module Cultivate.Journal) {
     param($Action, $request)
     if ($Action -eq 'Mappings') {
         $mappings = @{}
         foreach ($name in $request.Payload.Names) {
-            $folder = Get-WorkspaceFileMapping $name
+            $folder = Get-WorkspaceFileMapping $name $request.MappingAssembly
             if ($folder) { $mappings[$name] = $folder }
         }
         return $mappings

@@ -32,7 +32,10 @@ internal static class SelfTest
         try
         {
             CheckTerminal();
-            var settings = await Settings.Load();
+            // Fixtures need only MSBuild; they never read or write the user's saved settings.
+            var settings = await Settings.Read();
+            if (!File.Exists(settings.MSBuild))
+                throw new FileNotFoundException("The self-test needs Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack.", settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
             settings.StateRoot = Path.Combine(home, "state");
