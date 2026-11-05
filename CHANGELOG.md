@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.10 — 2026-11-05
+
 - Fix: opening a solution waits and retries when Visual Studio is busy resolving automation members
   such as the open-document count, including dispatch errors reported by the .NET dynamic binder.
   Genuine missing-member errors still fail immediately, and retries preserve existing document tabs.
