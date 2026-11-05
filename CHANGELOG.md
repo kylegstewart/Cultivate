@@ -5,6 +5,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: opening a solution waits and retries when Visual Studio is busy resolving automation members
+  such as the open-document count, including dispatch errors reported by the .NET dynamic binder.
+  Genuine missing-member errors still fail immediately, and retries preserve existing document tabs.
+
 ## 1.1.9 — 2026-11-05
 
 - Fix: installing Cultivate no longer redirects or blocks ordinary Visual Studio and MSBuild webfarm
