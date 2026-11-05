@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.0 — 2026-11-05
+
 Cultivate is now a standalone project that anyone on the team can install, and it keeps itself up to date.
 
 - **Updates without reinstalling.** `cultivate update` downloads the latest GitHub release, checks its
