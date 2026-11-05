@@ -9,6 +9,7 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   copies. Only Cultivate's own builds use private staging, with validation before their copy target runs.
   Missing runtime files do not break normal builds. Manual webfarm changes and damaged backups are
   detected before Cultivate prepares a deployment and rechecked before it changes the active journal.
+  Status reads share the journal lock with worker updates to avoid intermittent file access failures.
 
 ## 1.1.8 — 2026-11-05
 

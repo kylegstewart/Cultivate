@@ -16,7 +16,7 @@
   </PropertyGroup>
   <Target Name="CultivateStageWebfarmCopy" BeforeTargets="CopyBuildOutputToWebfarm"
           Condition="'$(CultivateRunDirectory)' != '' and '$(_CultivateRepoRoot)' != '' and '$(Configuration)' == 'Debug'">
-    <Error Condition="!$([System.IO.Path]::IsPathRooted('$(CultivateRunDirectory)')) or !$([System.IO.Directory]::Exists('$(CultivateRunDirectory)'))"
+    <Error Condition="!$([System.IO.Path]::IsPathRooted('$(CultivateRunDirectory)')) or !Exists('$(CultivateRunDirectory)\.')"
            Text="Cultivate requires an existing absolute run directory. No webfarm files were copied." />
     <Error Condition="'$(_CultivateCaptureReady)' != 'true'"
            Text="Cultivate's build capture target is missing. Reinstall Cultivate. No webfarm files were copied." />

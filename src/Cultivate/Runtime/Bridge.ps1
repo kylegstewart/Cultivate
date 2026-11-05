@@ -21,7 +21,9 @@ $result = & (Get-Module Cultivate.Journal) {
         return $mappings
     }
     $context = Get-WorkspaceContext $request.WebfarmRoot $request.StateRoot
-    if ($Action -eq 'Status') { return (Read-WorkspaceState $context) }
+    if ($Action -eq 'Status') {
+        return (Invoke-WorkspaceLock $context { Read-WorkspaceState $context })
+    }
     if ($Action -eq 'Restore') {
         Disable-WebfarmWorkspace $context
         return @{ Restored = $true }

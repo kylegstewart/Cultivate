@@ -248,6 +248,12 @@ internal static class SelfTest
                 "activation lists every webfarm file it updated and how");
             Check(state.Active && !state.WatchEnabled && state.RuntimeFiles.Select(x => x.RelativePath).SequenceEqual([@"bin\Page.dll"]),
                 "activation publishes exactly the changed project's own DLL");
+            var concurrentStatus = await Task.WhenAll(Enumerable.Range(0, 4).Select(async _ =>
+            {
+                var pulse = await bridge.Call("Heartbeat", new { Token = state.Token, ProcessId = 0, Error = "" });
+                return pulse.GetProperty("Current").GetBoolean() && (await bridge.Status())?.Token == state.Token;
+            }));
+            Check(concurrentStatus.All(current => current), "concurrent journal reads and heartbeats preserve consistent status");
             var deployed = (await bridge.Call("Status")).GetProperty("Files").EnumerateArray()
                 .Select(file => file.GetProperty("RelativePath").GetString()).Order().ToList();
             Check(deployed.SequenceEqual(new[] { @"bin\Page.dll", @"modules\View.ascx" }.Order()),
@@ -511,6 +517,12 @@ internal static class SelfTest
         managed["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets");
         managed["CultivateRunDirectory"] = Path.Combine(root, "missing run");
         await Reject(() => Build(managed), "a missing run directory stops a Cultivate build before its webfarm copy");
+        managed["CultivateRunDirectory"] = "run";
+        await Reject(() => Build(managed), "an existing relative run directory is rejected before the webfarm copy");
+        var notDirectory = Path.Combine(root, "not a run directory");
+        File.WriteAllText(notDirectory, "fixture file");
+        managed["CultivateRunDirectory"] = notDirectory;
+        await Reject(() => Build(managed), "a file cannot be used as a Cultivate run directory");
         managed["CultivateRunDirectory"] = run;
         await Reject(() => Build(managed, "-p:WebfarmPath=" + farm + "\\"),
             "an immutable destination cannot bypass Cultivate's private staging");
