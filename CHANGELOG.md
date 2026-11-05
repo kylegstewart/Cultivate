@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.1 — 2026-11-05
+
 - Fix: `cultivate update` no longer reports an error after it has replaced the files. A replaced single-file
   executable cannot load more of its own code, so the verified new version now performs the swap while the
   old one only waits. Updating from 1.1.0 itself may still show that error once; the files are updated anyway.
