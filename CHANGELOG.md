@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.7 — 2026-11-05
+
 - Fix: opening a solution finds Visual Studio when a newer SQL Server Management Studio or Build Tools
   installation is also present. Preview editions are included in the IDE search.
 
