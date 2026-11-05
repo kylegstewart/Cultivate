@@ -416,9 +416,22 @@ internal static class SelfTest
         await G("config", "user.email", "cultivate-test@localhost");
         await G("config", "user.name", "Cultivate isolated tests");
         File.WriteAllText(solution, "committed solution");
+        File.WriteAllText(Path.Combine(root, ".gitignore"), "ignored.cs\n");
+        foreach (var name in new[] { "Changed file.cs", "Rename source.cs", "Deleted.cs", "Unchanged.cs" })
+            File.WriteAllText(Path.Combine(root, name), "baseline " + name);
         await G("add", ".");
         await G("commit", "-qm", "solution fixture");
-        await G("branch", "feature/local");
+        await G("checkout", "-qb", "feature/local");
+        File.WriteAllText(Path.Combine(root, "Changed file.cs"), "committed branch change");
+        File.WriteAllText(Path.Combine(root, "Added file.cs"), "committed new file");
+        await G("mv", "Rename source.cs", "Renamed file.cs");
+        await G("rm", "Deleted.cs");
+        await G("add", ".");
+        await G("commit", "-qm", "changed files fixture");
+        await G("checkout", "master");
+        File.WriteAllText(Path.Combine(root, "Unchanged.cs"), "later baseline change");
+        await G("add", ".");
+        await G("commit", "-qm", "advance the baseline independently");
         await G("checkout", "-qb", "no-solution");
         await G("rm", "MyMeyer.sln");
         await G("commit", "-qm", "missing solution fixture");
@@ -432,12 +445,33 @@ internal static class SelfTest
             Check(await git.Solution(worktree) == solution, "opening a worktree resolves its own solution, including paths with spaces");
             Check(await git.Solution(targets.Single(x => x.Branch == "master" && x.Worktree is null)) == solution,
                 "opening a checked-out local branch reuses its worktree");
+            Check((await git.SolutionChanges(solution)).Count == 0,
+                "an unchanged branch opens only the solution, not a duplicate solution document");
             var opened = await git.Solution(branch);
             Check(opened != solution && File.ReadAllText(opened) == "committed solution",
                 "opening a local branch without a checkout creates its own solution worktree");
             var openedRoot = Path.GetDirectoryName(opened)!;
             Check(await git.Git(openedRoot, "symbolic-ref", "HEAD") == branch.Ref,
                 "the new worktree checks out the selected local branch, not a detached snapshot");
+            var changed = await git.SolutionChanges(opened);
+            Check(changed.Select(Path.GetFileName).SequenceEqual(["Added file.cs", "Changed file.cs", "Renamed file.cs"]),
+                "solution documents include committed additions, edits, and rename destinations, excluding deleted and unchanged files");
+            Check(changed.All(path => path.StartsWith(openedRoot + "\\", StringComparison.OrdinalIgnoreCase)),
+                "solution documents come from the selected branch worktree, not the main checkout");
+            Check(!changed.Any(path => Path.GetFileName(path) == "Unchanged.cs"),
+                "solution changes use the merge-base, excluding later changes made only on the baseline branch");
+            File.WriteAllText(Path.Combine(openedRoot, "Unchanged.cs"), "saved worktree edit");
+            File.WriteAllText(Path.Combine(openedRoot, "New local file.cs"), "untracked work");
+            File.WriteAllText(Path.Combine(openedRoot, "Staged file.cs"), "staged work");
+            await git.Git(openedRoot, "add", "Staged file.cs");
+            File.WriteAllText(Path.Combine(openedRoot, "ignored.cs"), "ignored work");
+            changed = await git.SolutionChanges(opened);
+            Check(changed.Select(Path.GetFileName).SequenceEqual(
+                ["Added file.cs", "Changed file.cs", "New local file.cs", "Renamed file.cs", "Staged file.cs", "Unchanged.cs"]),
+                "solution documents include staged, unstaged, and untracked work while excluding ignored files");
+            File.Delete(Path.Combine(openedRoot, "Added file.cs"));
+            Check(!(await git.SolutionChanges(opened)).Any(path => Path.GetFileName(path) == "Added file.cs"),
+                "solution documents skip files deleted in the selected worktree");
             File.WriteAllText(opened, "branch work in progress");
             Check(await git.Solution(branch) == opened && File.ReadAllText(opened) == "branch work in progress",
                 "reopening a branch reuses its checkout and preserves edits");
