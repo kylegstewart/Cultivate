@@ -38,7 +38,7 @@ See [docs/how-it-works.md](docs/how-it-works.md) for the full behavior and safet
 ### From a release (recommended for most people)
 
 1. Download `Cultivate-<version>-win-x64.zip` from this repository's **Releases** page, or run
-   `gh release download --repo <owner>/Cultivate --pattern "*.zip"`.
+   `gh release download --repo kylegstewart/Cultivate --pattern "*.zip"`.
 2. Extract it anywhere, then in PowerShell, from the extracted folder:
 
    ```powershell
@@ -48,7 +48,7 @@ See [docs/how-it-works.md](docs/how-it-works.md) for the full behavior and safet
 ### From source
 
 ```powershell
-git clone <repository-url> Cultivate
+git clone https://github.com/kylegstewart/Cultivate.git
 cd Cultivate
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
