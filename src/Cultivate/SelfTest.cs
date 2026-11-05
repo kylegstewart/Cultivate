@@ -425,6 +425,30 @@ internal static class SelfTest
         for (var until = DateTime.UtcNow.AddSeconds(10); DateTime.UtcNow < until && Directory.GetFiles(install, "*.old").Length != 0; Thread.Sleep(200))
             Updater.CleanupStaleFiles(install);
         Check(Directory.GetFiles(install, "*.old").Length == 0, "replaced executables are cleaned up once they stop running");
+
+        if (Watcher.ExecutableStamp() is null) return;
+        // `cultivate update` hands the swap to the new version's executable through this command.
+        var target = Path.Combine(home, "update-apply-install");
+        var source = Path.Combine(home, "update-apply-package");
+        Directory.CreateDirectory(target);
+        Directory.CreateDirectory(source);
+        File.WriteAllText(Path.Combine(target, "installation.json"), """{ "Hooks": [] }""");
+        File.WriteAllText(Path.Combine(target, "Bridge.ps1"), "old bridge");
+        File.WriteAllText(Path.Combine(source, "Bridge.ps1"), "new bridge");
+        var where = Path.Combine(Environment.SystemDirectory, "where.exe");
+        File.Copy(where, Path.Combine(source, "Cultivate.exe"));
+        using var apply = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            ArgumentList = { "update-apply", source, target }
+        }) ?? throw new InvalidOperationException("Cannot start update-apply.");
+        var errors = apply.StandardError.ReadToEnd();
+        apply.StandardOutput.ReadToEnd();
+        apply.WaitForExit();
+        var recorded = File.ReadAllText(Path.Combine(target, "installation.json"));
+        Check(apply.ExitCode == 0 && File.ReadAllText(Path.Combine(target, "Bridge.ps1")) == "new bridge" && recorded.Contains("UpdatedAt") &&
+              recorded.Contains(System.Diagnostics.FileVersionInfo.GetVersionInfo(where).ProductVersion ?? "?"),
+            "update-apply swaps the files and records the new version" + (apply.ExitCode == 0 ? "" : ": " + errors.Trim()));
     }
 
     private static void CheckTerminal()

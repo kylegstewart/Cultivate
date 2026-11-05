@@ -181,14 +181,22 @@ internal static class Updater
             if (Parse(packaged)?.ToString() != release.Version)
                 throw new InvalidOperationException($"The package contains Cultivate {packaged}, not {release.Version}. Nothing was changed.");
             progress("Replacing program files");
-            Apply(files, InstallDir);
-            RefreshHooks();
-            var manifest = Path.Combine(InstallDir, "installation.json");
-            var installation = JsonNode.Parse(File.ReadAllText(manifest)) as JsonObject ?? [];
-            installation["Version"] = packaged;
-            installation["UpdatedAt"] = DateTime.Now.ToString("o");
-            Files.WriteJson(manifest, installation);
-            File.Delete(Path.Combine(Files.Home, "update-check.json"));
+            // The new version performs the swap. A single-file executable loads parts of itself from its own file on
+            // demand, so once Cultivate.exe is replaced this (old) process must not run anything new: it only waits.
+            var start = new ProcessStartInfo(Path.Combine(files, "Cultivate.exe"))
+            {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
+            };
+            start.ArgumentList.Add("update-apply");
+            start.ArgumentList.Add(files);
+            start.ArgumentList.Add(InstallDir);
+            using var apply = Process.Start(start) ?? throw new InvalidOperationException("Cannot start the new version to install it.");
+            var output = apply.StandardOutput.ReadToEndAsync();
+            var errors = apply.StandardError.ReadToEndAsync();
+            await apply.WaitForExitAsync();
+            if (apply.ExitCode != 0)
+                throw new InvalidOperationException("The installed files could not be replaced, so the previous version was kept.\n" +
+                    ((await errors) + (await output)).Trim());
         }
         catch (HttpRequestException exception) { throw new InvalidOperationException("The download failed: " + exception.Message, exception); }
         finally
@@ -277,16 +285,41 @@ internal static class Updater
             throw new InvalidOperationException($"This copy of Cultivate ({InstallDir}) was not installed with install.ps1, so it can't update itself. Install it first.");
     }
 
-    /// <summary>Keeps this installation's MSBuild hook current; hooks owned by another installation are left alone.</summary>
-    private static void RefreshHooks()
+    /// <summary>
+    /// <c>Cultivate.exe update-apply SOURCE INSTALL</c>, run by <see cref="Install"/> from the verified new version:
+    /// swaps the files, refreshes the MSBuild hook, and records the new version in installation.json.
+    /// </summary>
+    public static int ApplyCommand(string[] args)
     {
-        var targets = Path.Combine(InstallDir, Hooks.TargetsFileName);
+        if (args.Length != 3) throw new InvalidOperationException("Usage: Cultivate update-apply SOURCE INSTALL");
+        var (source, install) = (Files.Full(args[1]), Files.Full(args[2]));
+        var manifest = Path.Combine(install, "installation.json");
+        if (!File.Exists(manifest)) throw new InvalidOperationException($"{install} is not a Cultivate installation.");
+        Apply(source, install);
+        var installation = JsonNode.Parse(File.ReadAllText(manifest)) as JsonObject ?? [];
+        RefreshHooks(install, installation);
+        var executable = Path.Combine(install, "Cultivate.exe");
+        if (File.Exists(executable)) installation["Version"] = FileVersionInfo.GetVersionInfo(executable).ProductVersion;
+        installation["UpdatedAt"] = DateTime.Now.ToString("o");
+        Files.WriteJson(manifest, installation);
+        File.Delete(Path.Combine(Files.Home, "update-check.json"));
+        return 0;
+    }
+
+    /// <summary>
+    /// Keeps this installation's MSBuild hook current. Hooks owned by another installation are left alone, and a
+    /// missing hook is only recreated if install.ps1 recorded it for this installation.
+    /// </summary>
+    private static void RefreshHooks(string install, JsonObject installation)
+    {
+        var targets = Path.Combine(install, Hooks.TargetsFileName);
         var content = "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\r\n" +
             $"  <Import Project=\"{System.Security.SecurityElement.Escape(targets)}\" />\r\n</Project>\r\n";
+        var recorded = (installation["Hooks"] as JsonArray)?.Select(node => node?.GetValue<string>()).OfType<string>().ToHashSet(Files.Comparer) ?? [];
         foreach (var hook in Hooks.Paths(Hooks.FileName))
         {
             var imported = Hooks.ImportedTargets(hook);
-            if (imported is not null && !Files.Comparer.Equals(imported, targets)) continue;
+            if (imported is null ? !recorded.Contains(hook) : !Files.Comparer.Equals(imported, targets)) continue;
             if (File.Exists(hook) && File.ReadAllText(hook) == content) continue;
             Directory.CreateDirectory(Path.GetDirectoryName(hook)!);
             File.WriteAllText(hook, content);

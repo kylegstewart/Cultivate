@@ -52,6 +52,7 @@ internal static class Program
                 case "doctor": return await Doctor.Run();
                 case "setup": return await Setup.Run(args);
                 case "update": return await Updater.Run(args);
+                case "update-apply": return Updater.ApplyCommand(args);
                 case "config":
                     Console.WriteLine(Settings.FilePath);
                     Print(await Settings.Read());
@@ -107,7 +108,8 @@ internal static class Program
             var log = Path.Combine(Files.Home, "Logs", "last-error.log");
             Directory.CreateDirectory(Path.GetDirectoryName(log)!);
             await File.WriteAllTextAsync(log, exception.ToString());
-            if (args.FirstOrDefault() != "watch") Console.Error.WriteLine($"Cultivate: {exception.Message}\nDetails: {log}");
+            var message = exception.Message.Trim().Length != 0 ? exception.Message : exception.ToString().Split('\n')[0].Trim();
+            if (args.FirstOrDefault() != "watch") Console.Error.WriteLine($"Cultivate: {message}\nDetails: {log}");
             if (args.Length == 0 && !Console.IsInputRedirected)
             {
                 Console.Error.WriteLine("Press any key to close.");
