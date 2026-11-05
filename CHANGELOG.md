@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.9 — 2026-11-05
+
 - Fix: installing Cultivate no longer redirects or blocks ordinary Visual Studio and MSBuild webfarm
   copies. Only Cultivate's own builds use private staging, with validation before their copy target runs.
   Missing runtime files do not break normal builds. Manual webfarm changes and damaged backups are
