@@ -5,6 +5,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: opening a solution in a new Visual Studio instance closes the tabs Visual Studio restores from the
+  previous session, such as DLLs and duplicate views, so only the solution's changed files are open.
+  Tabs in a Visual Studio instance that already has the solution open are left alone.
+
 ## 1.1.10 — 2026-11-05
 
 - Fix: opening a solution waits and retries when Visual Studio is busy resolving automation members
