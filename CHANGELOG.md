@@ -5,6 +5,9 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- **Open changed files.** Opening a solution also opens the branch's changed files in the same Visual Studio
+  instance, including saved worktree edits and untracked files. Deleted files are skipped.
+
 ## 1.1.5 — 2026-11-05
 
 - **Open solution.** The homepage can open a worktree or local branch's MyMeyer solution in its associated

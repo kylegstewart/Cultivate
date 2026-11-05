@@ -133,11 +133,17 @@ internal sealed class Settings
         return problems;
     }
 
-    public static async Task<string?> FindMSBuild()
+    public static Task<string?> FindMSBuild() =>
+        FindVisualStudioFile("Microsoft.Component.MSBuild", @"MSBuild\**\Bin\MSBuild.exe");
+
+    public static Task<string?> FindVisualStudio() =>
+        FindVisualStudioFile("Microsoft.VisualStudio.Component.CoreEditor", @"Common7\IDE\devenv.exe");
+
+    private static async Task<string?> FindVisualStudioFile(string component, string pattern)
     {
         var vswhere = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio", "Installer", "vswhere.exe");
         if (!File.Exists(vswhere)) return null;
-        var result = await Commands.Run(vswhere, ["-latest", "-products", "*", "-requires", "Microsoft.Component.MSBuild", "-find", @"MSBuild\**\Bin\MSBuild.exe"]);
+        var result = await Commands.Run(vswhere, ["-latest", "-products", "*", "-requires", component, "-find", pattern]);
         return result.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).FirstOrDefault(File.Exists);
     }
 

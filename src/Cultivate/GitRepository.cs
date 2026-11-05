@@ -31,6 +31,17 @@ internal sealed class GitRepository(Settings settings)
         return solution;
     }
 
+    public async Task<List<string>> SolutionChanges(string solution)
+    {
+        var root = Path.GetDirectoryName(solution)!;
+        var baseline = await Git(root, "merge-base", "HEAD", settings.BaseBranch);
+        var changed = await Git(root, "diff", "--name-only", "--no-renames", "-z", baseline, "--");
+        var untracked = await Git(root, "ls-files", "--others", "--exclude-standard", "-z");
+        return (changed + "\0" + untracked).Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Distinct(Files.Comparer).Order(Files.Comparer).Select(path => Files.Child(root, path))
+            .Where(path => !Files.Comparer.Equals(path, solution) && File.Exists(path)).ToList();
+    }
+
     public async Task<List<Target>> Targets()
     {
         var result = new List<Target>();
