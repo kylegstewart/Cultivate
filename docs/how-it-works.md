@@ -1,5 +1,8 @@
 # How Cultivate works
 
+For the implementation details, see [How Cultivate updates the webfarm](webfarm-pipeline.md): Git snapshots,
+Code Release Manager file mappings, MSBuild interception and DLL capture, saved-file updates, and recovery.
+
 ## The workflow
 
 The version library separates **Worktrees**, **Local**, and **Remote** sources. The home screen,
@@ -66,9 +69,11 @@ outputs, and each project's existing configuration. There is no solution build.
   Missing packages for a changed project trigger a project-level NuGet restore, using the existing
   feeds and their local authentication. The restore uses the snapshot as `SolutionDir`, so legacy
   `packages.config` projects restore into the snapshot's own `packages` folder.
-- After the restore, every literal package `HintPath` must exist. A missing or stale one stops the
-  build with an explicit error. Visual Studio, GAC, or machine-installed DLLs are never
-  substituted.
+- After the restore, literal package `HintPath`s are used directly when they exist. If one is still
+  missing, Cultivate accepts a copy from the selected worktree's or normal checkout's `bin` only
+  when its assembly version exactly matches the reference's declared `Version`. Otherwise it
+  stops with an explicit error. It never substitutes a Visual Studio or GAC DLL for that missing
+  package reference. See [reference preparation](webfarm-pipeline.md#4a-preparing-references-pipelineprepare).
 - Literal `HintPath`s are tried in the snapshot, the selected worktree, and the normal checkout
   before generic `bin` caches. This keeps sibling-repository references (such as
   `Warehouse--PickTickets`) working even when a worktree is relocated. Each seeded reference's
