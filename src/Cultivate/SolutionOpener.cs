@@ -148,14 +148,23 @@ internal static class SolutionOpener
         }
     }
 
-    private static T Retry<T>(Func<T> action)
+    private static bool IsBusy(Exception exception) => exception switch
     {
-        var until = DateTime.UtcNow.AddMinutes(2);
+        COMException => exception.HResult is unchecked((int)0x80010001) or unchecked((int)0x8001010A),
+        // The dynamic COM binder puts GetIDsOfNames failures in the message instead of retaining their HRESULT.
+        MissingMemberException => exception.Message.Contains("0x80010001)", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("0x8001010A)", StringComparison.OrdinalIgnoreCase),
+        _ => false
+    };
+
+    internal static T Retry<T>(Func<T> action, TimeSpan? timeout = null)
+    {
+        var elapsed = Stopwatch.StartNew();
+        var limit = timeout ?? TimeSpan.FromMinutes(2);
         while (true)
         {
             try { return action(); }
-            catch (COMException exception) when (DateTime.UtcNow < until &&
-                exception.HResult is unchecked((int)0x80010001) or unchecked((int)0x8001010A))
+            catch (Exception exception) when (elapsed.Elapsed < limit && IsBusy(exception))
             {
                 Thread.Sleep(250); // Visual Studio rejects automation calls while loading or displaying a modal dialog.
             }

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using Spectre.Console;
 
 namespace Cultivate;
@@ -34,6 +35,7 @@ internal static class SelfTest
             CheckTerminal();
             await CheckVisualStudio();
             CheckSolutionFiles(home);
+            CheckSolutionAutomation(home);
             await CheckSolutions(home);
             CheckUpdater(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
@@ -599,6 +601,68 @@ internal static class SelfTest
         Check(SolutionOpener.MissingDocuments([files[0]], [Path.Combine(home, "another checkout", Path.GetFileName(files[0]))]).Count == 1,
             "documents in another checkout do not hide the selected worktree's file");
     }
+    private static void CheckSolutionAutomation(string home)
+    {
+        Exception[] busy =
+        [
+            new COMException("Call rejected", unchecked((int)0x80010001)),
+            new COMException("Retry later", unchecked((int)0x8001010A)),
+            new MissingMemberException("Could not get dispatch ID for Count (error: 0x80010001))."),
+            new MissingMemberException("Could not get dispatch ID for Item (error: 0x8001010a)).")
+        ];
+        foreach (var failure in busy)
+        {
+            var attempts = 0;
+            var result = SolutionOpener.Retry(() =>
+            {
+                if (++attempts == 1) throw failure;
+                return 42;
+            }, TimeSpan.FromSeconds(2));
+            Check(result == 42 && attempts == 2,
+                $"solution automation retries {failure.GetType().Name}: {failure.Message}");
+
+            attempts = 0;
+            Exception? caught = null;
+            try { SolutionOpener.Retry<int>(() => { attempts++; throw failure; }, TimeSpan.Zero); }
+            catch (Exception exception) { caught = exception; }
+            Check(ReferenceEquals(caught, failure) && attempts == 1,
+                $"solution automation preserves the busy error when its retry deadline expires: {failure.Message}");
+        }
+
+        Exception[] permanent =
+        [
+            new MissingMemberException("Count is not a member"),
+            new MissingMemberException("Could not get dispatch ID for Count (error: 0x80020006))."),
+            new COMException("Unspecified failure", unchecked((int)0x80004005)),
+            new InvalidOperationException("An unrelated failure mentioning 0x80010001)")
+        ];
+        foreach (var failure in permanent)
+        {
+            var attempts = 0;
+            Exception? caught = null;
+            try { SolutionOpener.Retry<int>(() => { attempts++; throw failure; }, TimeSpan.FromSeconds(2)); }
+            catch (Exception exception) { caught = exception; }
+            Check(ReferenceEquals(caught, failure) && attempts == 1,
+                $"solution automation reports non-busy failures immediately: {failure.Message}");
+        }
+
+        var requested = new[] { Path.Combine(home, "First.cs"), Path.Combine(home, "Second.cs") };
+        var opened = new List<string>();
+        var openingAttempts = 0;
+        SolutionOpener.Retry(() =>
+        {
+            openingAttempts++;
+            foreach (var file in SolutionOpener.MissingDocuments(requested, opened))
+            {
+                opened.Add(file);
+                if (openingAttempts == 1) throw busy[2];
+            }
+            return true;
+        }, TimeSpan.FromSeconds(2));
+        Check(openingAttempts == 2 && opened.SequenceEqual(requested, Files.Comparer),
+            "retrying a partially completed solution open preserves documents without opening duplicates");
+    }
+
     private static async Task CheckSolutions(string home)
     {
         var root = Path.Combine(home, "solutions with spaces");
