@@ -168,6 +168,30 @@ internal static class SelfTest
             Check(File.ReadAllText(Path.Combine(relocated, @"Consumer\Consumer.csproj")) == externalProject &&
                 File.ReadAllText(Path.Combine(relocatedRun, "build.log")).Contains(Path.Combine(sibling, "Core.dll")),
                 "reference resolution preserves project files and records the selected DLL path");
+
+            // MyMeyer's HintPaths can name a package version packages.config never restores; Visual Studio then uses bin.
+            var binCore = Path.Combine(relocated, @"bin\Core.dll");
+            var binVersion = System.Reflection.AssemblyName.GetAssemblyName(binCore).Version!;
+            string StaleHint(Version version) => Project("Consumer").Replace("<Reference Include=\"System\" />", $"""
+                <Reference Include="System" />
+                <Reference Include="Core, Version={version}, Culture=neutral, processorArchitecture=MSIL">
+                  <HintPath>..\packages\Core.10.0.2\lib\net471\Core.dll</HintPath>
+                </Reference>
+                """);
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\Value.cs"), "public class ConsumerValue { public static int Value => CoreValue.Value; }");
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\Consumer.csproj"), StaleHint(binVersion));
+            var staleRun = Path.Combine(home, "relocated", "stale-hint");
+            Directory.CreateDirectory(staleRun);
+            Plan Relocated() => new()
+                { Target = externalPlan.Target, Commit = "", Fingerprint = "", Projects = [ProjectInfo.Read(relocated, @"Consumer\Consumer.csproj")] };
+            await pipeline.Build(Relocated(), relocated, staleRun, _ => { });
+            Check(Files.Hash(Path.Combine(staleRun, @"references\Core.dll")) == Files.Hash(binCore),
+                "a package HintPath missing after restore uses the bin DLL carrying the declared version");
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\Consumer.csproj"),
+                StaleHint(new Version(binVersion.Major + 1, 0, 0, 0)));
+            var mismatchRun = Path.Combine(home, "relocated", "stale-mismatch");
+            Directory.CreateDirectory(mismatchRun);
+            await Reject(() => pipeline.Build(Relocated(), relocated, mismatchRun, _ => { }),"a bin DLL with a different version never replaces a missing package");
             Save(@"Core\Core.csproj", coreProject.Replace("<Reference Include=\"System\" />", """
                 <Reference Include="System" />
                 <Reference Include="UnrelatedMissingPackage">

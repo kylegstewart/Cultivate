@@ -13,6 +13,8 @@ internal sealed class ProjectInfo
     public List<string> ProjectReferences { get; init; } = [];
     public List<string> AssemblyReferences { get; init; } = [];
     public List<string> Hints { get; init; } = [];
+    /// <summary>The assembly version each HintPath's Reference declares, for references that declare one.</summary>
+    public Dictionary<string, string> HintVersions { get; init; } = [];
     public List<string> Imports { get; init; } = [];
 
     public static ProjectInfo Read(string root, string path)
@@ -33,8 +35,18 @@ internal sealed class ProjectInfo
                 .Where(x => x is not null).Select(x => Relative(x!)).ToList(),
             AssemblyReferences = Items("Reference").Select(x => (x.Attribute("Include")?.Value ?? "").Split(',')[0]).ToList(),
             Hints = Items("HintPath").Select(x => x.Value).ToList(),
+            HintVersions = Items("HintPath").Select(x => (Hint: x.Value, Version: DeclaredVersion(x.Parent?.Attribute("Include")?.Value)))
+                .Where(x => x.Version is not null).DistinctBy(x => x.Hint, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Hint, x => x.Version!, StringComparer.OrdinalIgnoreCase),
             Imports = Items("Import").Select(x => x.Attribute("Project")?.Value ?? "").Where(x => !x.Contains('$')).ToList()
         };
+    }
+
+    private static string? DeclaredVersion(string? include)
+    {
+        if (include is null || !include.Contains("Version=", StringComparison.OrdinalIgnoreCase)) return null;
+        try { return new System.Reflection.AssemblyName(include).Version?.ToString(); }
+        catch (Exception exception) when (exception is FileLoadException or ArgumentException) { return null; }
     }
 
     public bool Owns(string path)

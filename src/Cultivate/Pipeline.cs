@@ -187,25 +187,42 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             if (internalNames.Contains(Path.GetFileNameWithoutExtension(name))) continue;
             var desired = Path.GetFullPath(Path.Combine(directory, hint));
             var packageRoot = Path.Combine(snapshot, "packages") + "\\";
+            string source;
             if (desired.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase))
             {
-                if (!File.Exists(desired))
-                    throw new FileNotFoundException($"Declared package dependency {hint} for {project.Assembly} is missing after restore. Align the project's HintPath with packages.config; Cultivate will not substitute a Visual Studio or GAC DLL.", desired);
-                continue;
+                if (File.Exists(desired)) continue;
+                // A HintPath can name a package version packages.config never restores. Visual Studio then quietly falls back
+                // to the checkout's bin folder; accept that copy only when it is exactly the version the Reference declares.
+                project.HintVersions.TryGetValue(hint, out var declared);
+                source = new[] { Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name) }
+                    .FirstOrDefault(path => declared is not null && VersionOf(path) == declared) ??
+                    throw new FileNotFoundException($"Declared package dependency {hint} for {project.Assembly} is missing after restore" +
+                        (declared is null ? "" : $", and no bin folder has version {declared}") +
+                        ". Align the project's HintPath with packages.config; Cultivate will not substitute a Visual Studio or GAC DLL.", desired);
             }
-            var source = File.Exists(desired) ? desired : Path.GetFullPath(Path.Combine(originalDirectory, hint));
-            if (!File.Exists(source))
-                source = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(settings.RepositoryRoot, project.RelativePath))!, hint));
-            if (!File.Exists(source)) source = Path.Combine(sourceRoot, "bin", name);
-            if (!File.Exists(source)) source = Path.Combine(settings.RepositoryRoot, "bin", name);
-            if (!File.Exists(source))
-                throw new FileNotFoundException($"Missing dependency {name} for {project.Assembly}. Restore the normal checkout's dependency or correct its reference; Cultivate will not guess another version.", source);
+            else
+            {
+                source = File.Exists(desired) ? desired : Path.GetFullPath(Path.Combine(originalDirectory, hint));
+                if (!File.Exists(source))
+                    source = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(settings.RepositoryRoot, project.RelativePath))!, hint));
+                if (!File.Exists(source)) source = Path.Combine(sourceRoot, "bin", name);
+                if (!File.Exists(source)) source = Path.Combine(settings.RepositoryRoot, "bin", name);
+                if (!File.Exists(source))
+                    throw new FileNotFoundException($"Missing dependency {name} for {project.Assembly}. Restore the normal checkout's dependency or correct its reference; Cultivate will not guess another version.", source);
+            }
             var seeded = Path.Combine(seeds, name);
             if (File.Exists(seeded) && Files.Hash(seeded) != Files.Hash(source))
                 throw new InvalidOperationException($"Incompatible input DLLs named {name}. Resolve references before deploying.");
             File.AppendAllText(Path.Combine(run, "build.log"), $"Reference {name}: {source}\n");
             File.Copy(source, seeded, true);
         }
+    }
+
+    private static string? VersionOf(string path)
+    {
+        if (!File.Exists(path)) return null;
+        try { return AssemblyName.GetAssemblyName(path).Version?.ToString(); }
+        catch (BadImageFormatException) { return null; }
     }
 
     private static void CopyDirectory(string source, string destination)
