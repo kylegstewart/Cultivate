@@ -40,6 +40,7 @@ internal static class SelfTest
             var settings = await Settings.Read();
             if (!File.Exists(settings.MSBuild))
                 throw new FileNotFoundException("The self-test needs Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack.", settings.MSBuild);
+            await CheckBuildHooks(home, settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
             settings.StateRoot = Path.Combine(home, "state");
@@ -286,9 +287,38 @@ internal static class SelfTest
             Check((await bridge.Status())?.Token == state.Token && Files.Hash(pageDestination) == pageHash &&
                 File.ReadAllText(frontendDestination) == "second saved markup", "failed builds preserve the last successful files");
             Save(@"Page\Value.cs", "public class PageValue { public static int Value => CoreValue.Value + 1; }");
+            var deployedBytes = File.ReadAllBytes(pageDestination);
+            File.WriteAllText(pageDestination, "output from a manual build");
+            progress.Clear();
+            await Reject(() => pipeline.Activate(markupUpdate, progress.Add, watch: false),
+                "manual build output is detected before Cultivate prepares another deployment");
+            Check(progress.Count == 0 && (await bridge.Status())?.Token == state.Token &&
+                File.ReadAllText(pageDestination) == "output from a manual build",
+                "preflight conflicts preserve the manual output and the active deployment journal");
+            var conflictSnapshot = Path.Combine(home, "conflict snapshot");
+            Directory.CreateDirectory(conflictSnapshot);
+            await Reject(() => bridge.Call("Deploy", new
+            {
+                Snapshot = conflictSnapshot, SourceRoot = state.SourceRoot, SourceRef = state.SourceRef,
+                state.Branch, state.Fingerprint, ExpectedToken = state.Token, WatchEnabled = false,
+                state.BuildFingerprint, state.RuntimeFiles, WorkerUpdate = false, Files = Array.Empty<object>()
+            }), "publication rechecks external changes after preparation");
+            Check((await bridge.Status())?.Token == state.Token && File.ReadAllText(pageDestination) == "output from a manual build",
+                "publication conflicts do not invalidate the active journal or overwrite manual output");
+            File.WriteAllBytes(pageDestination, deployedBytes);
+            var backup = Directory.EnumerateFiles(settings.StateRoot, "*.backup", SearchOption.AllDirectories).First();
+            var backupBytes = File.ReadAllBytes(backup);
+            File.WriteAllText(backup, "damaged backup");
+            try
+            {
+                await Reject(() => bridge.Call("Check"), "damaged backups stop Cultivate during preflight");
+                Check((await bridge.Status())?.Token == state.Token, "damaged backup validation preserves the active journal");
+            }
+            finally { File.WriteAllBytes(backup, backupBytes); }
             File.WriteAllText(frontendDestination, "foreign edit");
             await Reject(() => bridge.Call("Restore"), "foreign server edits block restoration");
             Check(File.ReadAllText(frontendDestination) == "foreign edit", "foreign content is not overwritten");
+            Check((await bridge.Status())?.Token == state.Token, "a rejected restore preserves the active deployment journal");
             File.WriteAllText(frontendDestination, "second saved markup");
             await bridge.Call("Restore");
             Check(File.ReadAllText(frontendDestination) == "server baseline" && Files.Hash(pageDestination) == originalHashes[@"bin\Page.dll"],
@@ -405,6 +435,86 @@ internal static class SelfTest
                 File.SetAttributes(file, FileAttributes.Normal);
             Directory.Delete(home, recursive: true);
         }
+    }
+
+    private static async Task CheckBuildHooks(string home, string msbuild)
+    {
+        var root = Path.Combine(home, "build hooks");
+        var extensions = Path.Combine(root, "user extensions");
+        var farm = Path.Combine(root, "farm");
+        var run = Path.Combine(root, "run");
+        Directory.CreateDirectory(Path.Combine(root, "bin"));
+        Directory.CreateDirectory(run);
+        File.WriteAllText(Path.Combine(root, "MyMeyer.sln"), "");
+        var source = Path.Combine(root, @"bin\Fixture.dll");
+        File.WriteAllText(source, "fixture output");
+        var project = Path.Combine(root, "Fixture.csproj");
+        File.WriteAllText(project, """
+            <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+              <Import Project="$(MSBuildToolsPath)\Microsoft.Common.targets" />
+              <PropertyGroup><TargetPath>$(MSBuildProjectDirectory)\bin\Fixture.dll</TargetPath></PropertyGroup>
+              <Target Name="Build" />
+              <Target Name="CopyBuildOutputToWebfarm" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+                <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(WebfarmPath)bin" />
+              </Target>
+            </Project>
+            """);
+        var runtime = Path.Combine(AppContext.BaseDirectory, Hooks.TargetsFileName);
+        void Hook(string content)
+        {
+            foreach (var version in new[] { "Current", "15.0" })
+            {
+                var hook = Path.Combine(extensions, version, "Microsoft.Common.targets", "ImportAfter", Hooks.FileName);
+                Directory.CreateDirectory(Path.GetDirectoryName(hook)!);
+                File.WriteAllText(hook, content);
+            }
+        }
+        var environment = new Dictionary<string, string>
+        {
+            ["MSBuildUserExtensionsPath"] = extensions,
+            ["WebfarmPath"] = farm + "\\",
+            ["CultivateRunDirectory"] = "",
+            ["CultivateCaptureTargets"] = ""
+        };
+        Task<string> Build(Dictionary<string, string> variables, params string[] arguments) => Commands.Run(msbuild,
+            [project, "-nologo", "-t:Build", "-p:Configuration=Debug", "-v:minimal", .. arguments], root, variables);
+        var destination = Path.Combine(farm, @"bin\Fixture.dll");
+        Hook(Hooks.Content(runtime));
+        await Build(environment, "-p:WebfarmPath=" + farm + "\\");
+        Check(File.ReadAllText(destination) == "fixture output" && !Directory.Exists(Path.Combine(run, "captured")),
+            "ordinary builds keep their webfarm copy, including a global WebfarmPath");
+        // Older wrappers import the runtime unconditionally; the runtime itself must also leave manual builds alone.
+        Hook($"<Project><Import Project=\"{System.Security.SecurityElement.Escape(runtime)}\" /></Project>");
+        File.WriteAllText(source, "next manual build");
+        await Build(environment, "-p:WebfarmPath=" + farm + "\\");
+        Check(File.ReadAllText(destination) == "next manual build", "a direct runtime import also leaves ordinary builds unchanged");
+        Hook(Hooks.Content(Path.Combine(root, "missing runtime.targets")));
+        await Build(environment);
+        Check(File.ReadAllText(destination) == "next manual build", "missing Cultivate runtime files do not break ordinary builds");
+        var managed = new Dictionary<string, string>(environment)
+        {
+            ["CultivateRunDirectory"] = run,
+            ["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets")
+        };
+        var metadata = await Commands.Run(msbuild, [project, "-nologo", "-getProperty:_CultivateCaptureReady"], root, managed);
+        Check(string.IsNullOrWhiteSpace(metadata), "a missing runtime is detectable before Cultivate starts a build");
+        Hook(Hooks.Content(runtime));
+        File.WriteAllText(source, "Cultivate build");
+        await Build(managed);
+        Check(File.ReadAllText(destination) == "next manual build" &&
+            File.ReadAllText(Path.Combine(run, @"captured\Fixture\Fixture.dll")) == "Cultivate build" &&
+            File.ReadAllLines(Path.Combine(run, @"manifests\Fixture.artifacts")).Length == 1,
+            "Cultivate builds capture their own output without copying to the real webfarm");
+        Check(!Directory.EnumerateDirectories(Path.Combine(run, "intercepted")).Any(), "private build staging is cleaned up");
+        managed["CultivateCaptureTargets"] = Path.Combine(root, "missing capture.targets");
+        await Reject(() => Build(managed), "a missing capture target stops a Cultivate build before its webfarm copy");
+        managed["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets");
+        managed["CultivateRunDirectory"] = Path.Combine(root, "missing run");
+        await Reject(() => Build(managed), "a missing run directory stops a Cultivate build before its webfarm copy");
+        managed["CultivateRunDirectory"] = run;
+        await Reject(() => Build(managed, "-p:WebfarmPath=" + farm + "\\"),
+            "an immutable destination cannot bypass Cultivate's private staging");
+        Check(File.ReadAllText(destination) == "next manual build", "invalid Cultivate builds preserve existing webfarm files");
     }
 
     private static async Task CheckVisualStudio()

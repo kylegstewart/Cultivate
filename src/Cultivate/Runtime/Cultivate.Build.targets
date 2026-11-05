@@ -1,46 +1,38 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <!--
-    Cultivate per-user MSBuild hook. install.ps1 imports this file from
-      %LOCALAPPDATA%\Microsoft\MSBuild\{Current,15.0}\Microsoft.Common.targets\ImportAfter\Meyer.Cultivate.targets
-    It only affects Debug builds of projects under a MyMeyer.sln that already define CopyBuildOutputToWebfarm:
-      * Normal (Visual Studio) builds: the project's webfarm copy is redirected to a local staging folder and
-        discarded, so builds from any worktree cannot overwrite the version Cultivate deployed.
-      * Cultivate builds (CultivateRunDirectory set): Capture.targets records the project's own DLL for Cultivate
-        to verify and publish through its journal.
-  -->
-  <PropertyGroup>
+  <!-- The per-user hook only redirects builds explicitly started by Cultivate.
+       Normal Visual Studio and command-line builds keep their existing webfarm copy behavior. -->
+  <PropertyGroup Condition="'$(CultivateRunDirectory)' != ''">
     <_CultivateRepoRoot>$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'MyMeyer.sln'))</_CultivateRepoRoot>
-    <_CultivateDataRoot Condition="'$(CULTIVATE_HOME)' != ''">$(CULTIVATE_HOME)</_CultivateDataRoot>
-    <_CultivateDataRoot Condition="'$(_CultivateDataRoot)' == ''">$(LOCALAPPDATA)\Meyer\Cultivate</_CultivateDataRoot>
   </PropertyGroup>
   <Import Project="$(CultivateCaptureTargets)"
-          Condition="'$(CultivateCaptureTargets)' != '' and Exists('$(CultivateCaptureTargets)')" />
-  <!-- Detect an immutable global /p:WebfarmPath, which would bypass the redirect below. -->
-  <PropertyGroup Condition="'$(_CultivateRepoRoot)' != ''">
+          Condition="'$(CultivateRunDirectory)' != '' and '$(CultivateCaptureTargets)' != '' and Exists('$(CultivateCaptureTargets)')" />
+  <!-- An immutable global /p:WebfarmPath would bypass Cultivate's private build destination. -->
+  <PropertyGroup Condition="'$(CultivateRunDirectory)' != '' and '$(_CultivateRepoRoot)' != ''">
     <_CultivateInitialWebfarmPath>$(WebfarmPath)</_CultivateInitialWebfarmPath>
-    <_CultivatePropertyProbe>$(_CultivateDataRoot)\PropertyProbe\</_CultivatePropertyProbe>
+    <_CultivatePropertyProbe>$(CultivateRunDirectory)\PropertyProbe\</_CultivatePropertyProbe>
     <WebfarmPath>$(_CultivatePropertyProbe)</WebfarmPath>
     <_CultivateImmutableWebfarmPath Condition="'$(WebfarmPath)' != '$(_CultivatePropertyProbe)'">true</_CultivateImmutableWebfarmPath>
     <WebfarmPath>$(_CultivateInitialWebfarmPath)</WebfarmPath>
   </PropertyGroup>
-  <!-- Existing project targets are declared after user imports. Redirect their copy, not their definition. -->
   <Target Name="CultivateStageWebfarmCopy" BeforeTargets="CopyBuildOutputToWebfarm"
-          Condition="'$(_CultivateRepoRoot)' != '' and '$(Configuration)' == 'Debug'">
+          Condition="'$(CultivateRunDirectory)' != '' and '$(_CultivateRepoRoot)' != '' and '$(Configuration)' == 'Debug'">
+    <Error Condition="!$([System.IO.Path]::IsPathRooted('$(CultivateRunDirectory)')) or !$([System.IO.Directory]::Exists('$(CultivateRunDirectory)'))"
+           Text="Cultivate requires an existing absolute run directory. No webfarm files were copied." />
+    <Error Condition="'$(_CultivateCaptureReady)' != 'true'"
+           Text="Cultivate's build capture target is missing. Reinstall Cultivate. No webfarm files were copied." />
     <PropertyGroup>
       <_CultivateOriginalWebfarmPath>$(WebfarmPath)</_CultivateOriginalWebfarmPath>
-      <_CultivateStage>$(_CultivateDataRoot)\Staging\$([System.Guid]::NewGuid())\</_CultivateStage>
+      <_CultivateStage>$(CultivateRunDirectory)\intercepted\$([System.Guid]::NewGuid())\</_CultivateStage>
       <WebfarmPath>$(_CultivateStage)</WebfarmPath>
     </PropertyGroup>
     <Error Condition="'$(_CultivateImmutableWebfarmPath)' == 'true' or '$(WebfarmPath)' != '$(_CultivateStage)'"
-           Text="WebfarmPath cannot be a global /p: property while Cultivate's build hook is installed. Set it as an environment variable instead." />
-    <Message Condition="'$(CultivateRunDirectory)' == ''" Importance="high"
-             Text="Cultivate: this build's webfarm copy was kept local. Deploy to the webfarm with the 'cultivate' command." />
+           Text="Cultivate cannot redirect a global /p:WebfarmPath. Use the WebfarmPath environment variable for Cultivate builds." />
   </Target>
   <Target Name="CultivateDiscardWebfarmCopy" AfterTargets="CopyBuildOutputToWebfarm"
           Condition="'$(_CultivateStage)' != ''">
     <PropertyGroup>
       <WebfarmPath>$(_CultivateOriginalWebfarmPath)</WebfarmPath>
     </PropertyGroup>
-    <RemoveDir Directories="$(_CultivateStage)" />
+    <RemoveDir Directories="$(_CultivateStage)" ContinueOnError="WarnAndContinue" />
   </Target>
 </Project>

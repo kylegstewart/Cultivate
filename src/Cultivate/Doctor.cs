@@ -13,6 +13,14 @@ internal static class Hooks
 
     private static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "MSBuild");
 
+    internal static string Content(string targets)
+    {
+        var escaped = System.Security.SecurityElement.Escape(targets);
+        return "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\r\n" +
+            $"  <Import Project=\"{escaped}\"\r\n" +
+            $"          Condition=\"'$(CultivateRunDirectory)' != '' and Exists('{escaped}')\" />\r\n</Project>\r\n";
+    }
+
     public static IEnumerable<string> Paths(string fileName) =>
         new[] { "Current", "15.0" }.Select(version => Path.Combine(Root, version, "Microsoft.Common.targets", "ImportAfter", fileName));
 
