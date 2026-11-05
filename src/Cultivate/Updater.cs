@@ -313,8 +313,7 @@ internal static class Updater
     private static void RefreshHooks(string install, JsonObject installation)
     {
         var targets = Path.Combine(install, Hooks.TargetsFileName);
-        var content = "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\r\n" +
-            $"  <Import Project=\"{System.Security.SecurityElement.Escape(targets)}\" />\r\n</Project>\r\n";
+        var content = Hooks.Content(targets);
         var recorded = (installation["Hooks"] as JsonArray)?.Select(node => node?.GetValue<string>()).OfType<string>().ToHashSet(Files.Comparer) ?? [];
         foreach (var hook in Hooks.Paths(Hooks.FileName))
         {

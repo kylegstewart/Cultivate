@@ -80,7 +80,8 @@ try {
 
     # 4. Per-user MSBuild hook.
     $targets = [Security.SecurityElement]::Escape((Join-Path $InstallDir 'Cultivate.Build.targets'))
-    $hookContent = "<Project xmlns=`"http://schemas.microsoft.com/developer/msbuild/2003`">`r`n  <Import Project=`"$targets`" />`r`n</Project>`r`n"
+    $hookContent = "<Project xmlns=`"http://schemas.microsoft.com/developer/msbuild/2003`">`r`n  <Import Project=`"$targets`"`r`n" +
+        "          Condition=`"'`$(CultivateRunDirectory)' != '' and Exists('$targets')`" />`r`n</Project>`r`n"
     $hooks = @()
     foreach ($directory in $hookDirectories) {
         New-Item -ItemType Directory -Force -Path $directory | Out-Null

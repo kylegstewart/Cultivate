@@ -154,18 +154,22 @@ function Copy-WorkspaceFile($Context, $State, [string]$Source, [string]$Relative
     }
 }
 
-function Restore-WorkspaceFiles($Context, $State, $Entries = $State.Files) {
+function Assert-WorkspaceFiles($Context, $Entries) {
     foreach ($entry in $Entries) {
         $destination = Assert-WorkspaceChildPath (Join-Path $Context.Root $entry.RelativePath) $Context.Root
         $hash = Get-WorkspaceHash $destination
         if ($hash -ne $entry.DeployedHash -and $hash -ne $entry.OriginalHash) {
-            throw "Cannot restore externally changed file '$destination'. Backups are retained in '$($Context.Directory)'."
+            throw "Webfarm file changed outside Cultivate: '$destination'. A manual build may have updated it. Resolve it before copying or restoring; backups are retained in '$($Context.Directory)'."
         }
         if ($entry.OriginalHash -and
             (Get-WorkspaceHash (Join-Path $Context.Directory $entry.Backup)) -ne $entry.OriginalHash) {
             throw "Missing or damaged backup for '$destination'."
         }
     }
+}
+
+function Restore-WorkspaceFiles($Context, $State, $Entries = $State.Files) {
+    Assert-WorkspaceFiles $Context $Entries
     foreach ($entry in @($Entries)) {
         $destination = Join-Path $Context.Root $entry.RelativePath
         $backupPath = Join-Path $Context.Directory $entry.Backup
@@ -184,6 +188,7 @@ function Disable-WebfarmWorkspace($Context, [string]$ExpectedToken) {
         $state = Read-WorkspaceState $Context
         if ($null -eq $state) { return }
         if ($ExpectedToken -and $state.Token -ne $ExpectedToken) { return }
+        Assert-WorkspaceFiles $Context $state.Files
         $state.Active = $false
         $state.Token = [Guid]::NewGuid().ToString('N')
         Save-WorkspaceState $Context $state

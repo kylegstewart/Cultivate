@@ -21,7 +21,9 @@ $result = & (Get-Module Cultivate.Journal) {
         return $mappings
     }
     $context = Get-WorkspaceContext $request.WebfarmRoot $request.StateRoot
-    if ($Action -eq 'Status') { return (Read-WorkspaceState $context) }
+    if ($Action -eq 'Status') {
+        return (Invoke-WorkspaceLock $context { Read-WorkspaceState $context })
+    }
     if ($Action -eq 'Restore') {
         Disable-WebfarmWorkspace $context
         return @{ Restored = $true }
@@ -44,13 +46,20 @@ $result = & (Get-Module Cultivate.Journal) {
             Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId })
         if ($legacy.Count) { throw 'Close the old WebfarmFileSync watcher before activating Cultivate. It could overwrite this deployment.' }
     }
-    if ($Action -eq 'Check') { return @{ Ready = $true } }
+    if ($Action -eq 'Check') {
+        return (Invoke-WorkspaceLock $context {
+            $state = Read-WorkspaceState $context
+            if ($null -ne $state) { Assert-WorkspaceFiles $context $state.Files }
+            return @{ Ready = $true }
+        })
+    }
     $payload = $request.Payload
     Invoke-WorkspaceLock $context {
         $previous = Read-WorkspaceState $context
         $actualToken = ''
         if ($null -ne $previous) { $actualToken = $previous.Token }
         if ($actualToken -ne $payload.ExpectedToken) { throw 'The active workspace changed during preparation. Preview again.' }
+        if ($null -ne $previous) { Assert-WorkspaceFiles $context $previous.Files }
         $snapshot = Get-WorkspacePath $payload.Snapshot
         if ($snapshot -eq $context.Root -or $snapshot.StartsWith($context.Root + '\', [StringComparison]::OrdinalIgnoreCase) -or
             $context.Root.StartsWith($snapshot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Source and webfarm cannot overlap.' }
@@ -67,14 +76,6 @@ $result = & (Get-Module Cultivate.Journal) {
             ($previous.PSObject.Properties.Name -contains 'Mode') -and $previous.Mode -eq 'Cultivate' -and
             $previous.SourceRoot -eq $payload.SourceRoot -and $previous.SourceRef -eq $payload.SourceRef -and $previous.Active
         if ($inPlace) {
-            foreach ($entry in $previous.Files) {
-                $destination = Assert-WorkspaceChildPath (Join-Path $context.Root $entry.RelativePath) $context.Root
-                $hash = Get-WorkspaceHash $destination
-                if ($hash -ne $entry.DeployedHash -and $hash -ne $entry.OriginalHash) { throw "Webfarm file changed outside Cultivate: $destination" }
-                if ($entry.OriginalHash -and (Get-WorkspaceHash (Join-Path $context.Directory $entry.Backup)) -ne $entry.OriginalHash) {
-                    throw "Missing or damaged backup for $destination"
-                }
-            }
             $state = $previous
         } elseif ($null -ne $previous) {
             $previous.Active = $false
