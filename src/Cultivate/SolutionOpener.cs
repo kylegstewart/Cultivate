@@ -69,6 +69,8 @@ internal static class SolutionOpener
                 if (dte is null) throw new InvalidOperationException("Visual Studio did not become ready within two minutes. Try again once it finishes starting.");
                 // Open synchronously before reading restored documents, rather than sending files during startup.
                 Retry(() => { dte.Solution.Open(solution); return true; });
+                // A new instance restores the solution's last session tabs, such as DLLs; keep only the changed files.
+                Retry(() => { CloseDocumentWindows(dte); return true; });
             }
             Retry(() =>
             {
@@ -97,6 +99,26 @@ internal static class SolutionOpener
             });
         }
         finally { if (dte is not null) Release(dte); }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void CloseDocumentWindows(dynamic dte)
+    {
+        dynamic windows = dte.Windows;
+        try
+        {
+            for (var index = (int)windows.Count; index >= 1; index--)
+            {
+                if (index > (int)windows.Count) continue; // Closing a document can close its other views too.
+                dynamic window = windows.Item(index);
+                try
+                {
+                    if ((string)window.Kind == "Document") window.Close(3); // vsSaveChangesPrompt
+                }
+                finally { Release(window); }
+            }
+        }
+        finally { Release(windows); }
     }
 
     [SupportedOSPlatform("windows")]
