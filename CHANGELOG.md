@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.6 — 2026-11-05
+
 - **Open changed files.** Opening a solution also opens the branch's changed files in the same Visual Studio
   instance, including saved worktree edits and untracked files. Deleted files are skipped.
 
