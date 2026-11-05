@@ -33,6 +33,7 @@ internal static class SelfTest
         {
             CheckTerminal();
             await CheckVisualStudio();
+            CheckSolutionFiles(home);
             await CheckSolutions(home);
             CheckUpdater(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
@@ -420,12 +421,74 @@ internal static class SelfTest
             "Visual Studio discovery matches installed IDEs even with newer non-IDE products, or returns none on Build Tools-only machines");
     }
 
+    private static void CheckSolutionFiles(string home)
+    {
+        var root = Path.Combine(home, "document selection with spaces");
+        var solution = Path.Combine(root, "MyMeyer.sln");
+        string[] paths =
+        [
+            @"Order\Page.ascx", @"Order\Page.ascx.cs", @"Order\Freight.cs", @"Other\Freight.cs",
+            @"Order\Page.ascx.designer.cs", @"Order\Generated.g.cs", @"Order\Generated.g.i.cs",
+            @"Order\obj\Generated.cs", @"Order\bin\Copy.cs", @"packages\Copy.cs", @"Backup\Copy.cs",
+            @"Order\Order.csproj", @"Order\packages.config", @"Order\Changes.resx",
+            @"Order\style.css", @"Order\script.js", @"Order\image.png", @"bin\ClosedXML.dll",
+            @"Order\obj\Debug\Interop.VBA.dll", "README.md", "schema.sql", "web.config", "Orphan.cs"
+        ];
+        foreach (var path in paths.Append("MyMeyer.sln"))
+        {
+            var full = Path.Combine(root, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, "fixture");
+        }
+        var plan = new Plan
+        {
+            Target = new("fixture", root, "refs/heads/fixture"), Commit = "", Fingerprint = "",
+            Changes = paths.Select(path => new Change(path, false)).ToList(),
+            Projects = [new ProjectInfo
+            {
+                RelativePath = @"Order\Order.csproj", Assembly = "Order",
+                Inputs = paths.Where(path => path.EndsWith(".cs") && path != "Orphan.cs").ToList()
+            }],
+            Frontend = new[] { @"Order\Page.ascx", @"Order\style.css", @"Order\script.js", @"Order\image.png" }
+                .Select(path => new DeployFile(path, path)).ToList()
+        };
+        plan.Changes.Add(new("order/page.ascx.cs", false));
+        plan.Changes.Add(new(@"Order\Deleted.cs", true));
+        plan.Changes.Add(new(@"Order\Missing.cs", false));
+        plan.Projects[0].Inputs.AddRange([@"Order\Deleted.cs", @"Order\Missing.cs"]);
+        var files = SolutionOpener.FilesToOpen(solution, Terminal.ActionableChanges(plan).Select(item => item.Change));
+        var expected = new[]
+        {
+            @"Order\Freight.cs", @"Order\Page.ascx", @"Order\Page.ascx.cs", @"Order\script.js", @"Order\style.css", @"Other\Freight.cs"
+        }.Select(path => Path.Combine(root, path)).Order(Files.Comparer).ToList();
+        Check(files.SequenceEqual(expected, Files.Comparer),
+            "solution documents contain only actionable source and markup, excluding binaries, generated files, metadata, assets, and unowned code");
+        Check(files.Count(path => path.EndsWith("Page.ascx.cs", StringComparison.OrdinalIgnoreCase)) == 1,
+            "solution documents deduplicate case and separator variants after resolving their full paths");
+        Check(files.Count(path => Path.GetFileName(path) == "Freight.cs") == 2,
+            "different source files with the same filename remain distinct documents");
+        var opened = new List<string> { expected[0].ToUpperInvariant().Replace('\\', '/'), "Untitled1" };
+        var missing = SolutionOpener.MissingDocuments(files.Concat([files[0], files[0].ToUpperInvariant()]), opened);
+        Check(missing.SequenceEqual(expected.Skip(1), Files.Comparer),
+            "opening changed files skips existing document tabs and duplicate requests");
+        opened.AddRange(missing);
+        Check(SolutionOpener.MissingDocuments(files, opened).Count == 0,
+            "reopening a solution does not open its changed documents a second time");
+        Check(SolutionOpener.MissingDocuments([files[0]], [Path.Combine(home, "another checkout", Path.GetFileName(files[0]))]).Count == 1,
+            "documents in another checkout do not hide the selected worktree's file");
+    }
     private static async Task CheckSolutions(string home)
     {
         var root = Path.Combine(home, "solutions with spaces");
         Directory.CreateDirectory(root);
         var git = new GitRepository(new Settings { RepositoryRoot = root });
         async Task G(params string[] args) => _ = await git.Git(root, args);
+        async Task<List<string>> ChangedFiles(string selectedSolution)
+        {
+            var selectedRoot = Path.GetDirectoryName(selectedSolution)!;
+            var selected = new Target("fixture", selectedRoot, await git.Git(selectedRoot, "rev-parse", "HEAD"));
+            return SolutionOpener.FilesToOpen(selectedSolution, (await git.Inspect(selected)).Changes);
+        }
         var solution = Path.Combine(root, "MyMeyer.sln");
         await G("init", "-b", "master");
         await G("config", "user.email", "cultivate-test@localhost");
@@ -460,7 +523,7 @@ internal static class SelfTest
             Check(await git.Solution(worktree) == solution, "opening a worktree resolves its own solution, including paths with spaces");
             Check(await git.Solution(targets.Single(x => x.Branch == "master" && x.Worktree is null)) == solution,
                 "opening a checked-out local branch reuses its worktree");
-            Check((await git.SolutionChanges(solution)).Count == 0,
+            Check((await ChangedFiles(solution)).Count == 0,
                 "an unchanged branch opens only the solution, not a duplicate solution document");
             var opened = await git.Solution(branch);
             Check(opened != solution && File.ReadAllText(opened) == "committed solution",
@@ -468,7 +531,7 @@ internal static class SelfTest
             var openedRoot = Path.GetDirectoryName(opened)!;
             Check(await git.Git(openedRoot, "symbolic-ref", "HEAD") == branch.Ref,
                 "the new worktree checks out the selected local branch, not a detached snapshot");
-            var changed = await git.SolutionChanges(opened);
+            var changed = await ChangedFiles(opened);
             Check(changed.Select(Path.GetFileName).SequenceEqual(["Added file.cs", "Changed file.cs", "Renamed file.cs"]),
                 "solution documents include committed additions, edits, and rename destinations, excluding deleted and unchanged files");
             Check(changed.All(path => path.StartsWith(openedRoot + "\\", StringComparison.OrdinalIgnoreCase)),
@@ -480,12 +543,12 @@ internal static class SelfTest
             File.WriteAllText(Path.Combine(openedRoot, "Staged file.cs"), "staged work");
             await git.Git(openedRoot, "add", "Staged file.cs");
             File.WriteAllText(Path.Combine(openedRoot, "ignored.cs"), "ignored work");
-            changed = await git.SolutionChanges(opened);
+            changed = await ChangedFiles(opened);
             Check(changed.Select(Path.GetFileName).SequenceEqual(
                 ["Added file.cs", "Changed file.cs", "New local file.cs", "Renamed file.cs", "Staged file.cs", "Unchanged.cs"]),
                 "solution documents include staged, unstaged, and untracked work while excluding ignored files");
             File.Delete(Path.Combine(openedRoot, "Added file.cs"));
-            Check(!(await git.SolutionChanges(opened)).Any(path => Path.GetFileName(path) == "Added file.cs"),
+            Check(!(await ChangedFiles(opened)).Any(path => Path.GetFileName(path) == "Added file.cs"),
                 "solution documents skip files deleted in the selected worktree");
             File.WriteAllText(opened, "branch work in progress");
             Check(await git.Solution(branch) == opened && File.ReadAllText(opened) == "branch work in progress",

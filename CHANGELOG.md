@@ -5,6 +5,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: opening a solution opens only actionable changed source and markup files. Binaries, generated files,
+  project metadata, and other non-code changes are skipped. Reopening reuses the matching solution and
+  its existing documents instead of opening duplicate tabs.
+
 ## 1.1.7 — 2026-11-05
 
 - Fix: opening a solution finds Visual Studio when a newer SQL Server Management Studio or Build Tools

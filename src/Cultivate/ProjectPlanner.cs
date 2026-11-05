@@ -72,6 +72,8 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
     internal static bool IsCompiledInput(Change change) => CompiledExtensions.Contains(Path.GetExtension(change.Path)) ||
         Path.GetFileName(change.Path).Equals("packages.config", StringComparison.OrdinalIgnoreCase);
 
+    internal static bool IsExcluded(string path) => Excluded().IsMatch(path);
+
     public async Task<Plan> Create(Target target, Func<string, Task<Dictionary<string, string>>>? mapping = null)
     {
         var inspected = await git.Inspect(target);
@@ -79,7 +81,7 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
         if (target.Ref == "refs/heads/" + settings.BaseBranch || target.Branch == settings.BaseBranch ||
             target.Remote && target.Branch.EndsWith("/" + settings.BaseBranch, StringComparison.OrdinalIgnoreCase))
             plan.Errors.Add("The baseline branch is not a test deployment. Select a development branch.");
-        var frontend = plan.Changes.Where(x => FrontendExtensions.Contains(Path.GetExtension(x.Path)) && !Excluded().IsMatch(x.Path)).ToList();
+        var frontend = plan.Changes.Where(x => FrontendExtensions.Contains(Path.GetExtension(x.Path)) && !IsExcluded(x.Path)).ToList();
         if (frontend.Count != 0)
         {
             var names = frontend.Select(x => Path.GetFileName(x.Path)).Distinct(Files.Comparer).ToList();
