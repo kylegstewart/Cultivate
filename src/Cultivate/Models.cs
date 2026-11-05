@@ -66,6 +66,8 @@ internal sealed class Settings
     /// <summary>Assembly providing the Code Release Manager connection string (normally MyMeyer's bin\MeyerObjects.dll).</summary>
     public string MappingAssembly { get; set; } = "";
     public bool WatchSavedFiles { get; set; } = true;
+    /// <summary>Show a notice in the terminal UI when a newer release is published.</summary>
+    public bool CheckForUpdates { get; set; } = true;
     /// <summary>Deployment journal, backups and per-destination locks.</summary>
     public string StateRoot { get; set; } = "";
 

@@ -65,6 +65,21 @@ internal static class Doctor
 
         CheckHooks(install);
 
+        if (!Updater.IsInstalled) Report("warn", "Not an installed copy, so 'cultivate update' is unavailable here.");
+        else
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                var latest = await Updater.Fetch(cancel: timeout.Token);
+                Report(Updater.Parse(latest.Version) > Updater.Current ? "warn" : "ok", Updater.Parse(latest.Version) > Updater.Current
+                    ? $"Cultivate {latest.Version} is available. Run 'cultivate update'."
+                    : $"Up to date with the latest release ({latest.Version}) from {Updater.Repository}");
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or OperationCanceledException)
+            { Report("warn", "Couldn't check for updates: " + exception.Message.Split('\n')[0]); }
+        }
+
         var settings = await Settings.Read();
         if (!File.Exists(Settings.FilePath)) Report("warn", $"No saved settings yet ({Settings.FilePath}). Run 'cultivate setup'.");
         var problems = settings.Problems();

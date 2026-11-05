@@ -160,6 +160,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wP
     Write-Host "Installed Cultivate $version in $InstallDir" -ForegroundColor Green
     if (-not $NoPath) { Write-Host 'Open a new terminal and run:  cultivate' }
     Write-Host 'Check prerequisites with:     cultivate doctor'
+    Write-Host 'Get new versions later with:  cultivate update'
     Write-Host 'Reload open Visual Studio solutions so they load the MSBuild hook.'
 } finally {
     if ($extracted -and (Test-Path -LiteralPath $extracted)) { Remove-Item -LiteralPath $extracted -Recurse -Force }

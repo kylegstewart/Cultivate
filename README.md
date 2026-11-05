@@ -53,7 +53,7 @@ cd Cultivate
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-Either way, the installer:
+Either way, the installer runs once. Later versions install with `cultivate update` ([Updating](#updating)). It:
 
 - copies Cultivate to `%LOCALAPPDATA%\Programs\Cultivate`
 - adds that folder to your **user PATH**, so `cultivate` works in any new terminal
@@ -68,7 +68,7 @@ Installer options: `-InstallDir <path>`, `-NoPath`, `-NoDesktopShortcut`, `-Pack
 Visual Studio solutions, then run:
 
 ```powershell
-cultivate doctor   # checks git, MSBuild, hooks, settings, webfarm, and journal access
+cultivate doctor   # checks git, MSBuild, hooks, settings, webfarm, journal access, and updates
 cultivate          # first run walks you through setup
 ```
 
@@ -85,6 +85,7 @@ cultivate activate --branch origin/feature --yes --once
 cultivate restore --yes                           Stop syncing and restore original webfarm files
 cultivate setup                                   Change settings (interactive or with options)
 cultivate config                                  Show the settings file and values
+cultivate update [--check] [--version X.Y.Z]       Install the latest (or a given) release in place
 cultivate doctor                                  Check the installation
 cultivate self-test                               Fixture-only tests; never touches a real webfarm
 cultivate --version | --help
@@ -113,6 +114,7 @@ cultivate setup --repository "$HOME\Documents\GitHub\MyMeyer" --webfarm "\\webfa
 | `MSBuild` | latest Visual Studio, found with `vswhere` | MSBuild used for project builds. |
 | `MappingAssembly` | `<RepositoryRoot>\bin\MeyerObjects.dll` | Provides the Code Release Manager database connection. |
 | `WatchSavedFiles` | `true` | Whether activation keeps syncing later saves by default. |
+| `CheckForUpdates` | `true` | Whether the terminal UI announces new releases. |
 | `StateRoot` | `%LOCALAPPDATA%\Meyer\WebfarmWorkspace` if it exists, else `...\Meyer\Cultivate\State` | Deployment journal, backups, and locks. **Never delete while a deployment needs restoring.** |
 
 Set the `CULTIVATE_HOME` environment variable to move the whole data folder (useful for CI and testing).
@@ -128,14 +130,39 @@ Set the `CULTIVATE_HOME` environment variable to move the whole data folder (use
 
 Logs contain local paths and build diagnostics. Don't share them publicly.
 
-## Upgrade and uninstall
+## Updating
 
-- **Upgrade:** re-run `install.ps1` from a newer release or an updated clone. Settings, logs, and
-  the journal are kept. If a saved-file worker is running, close it or pass `-Force`. Stopping it
-  leaves the current deployment in place; activate again to resume automatic updates.
-- **Uninstall:** run `cultivate restore --yes`, then
-  `& "$env:LOCALAPPDATA\Programs\Cultivate\uninstall.ps1"`. This removes the program files, PATH
-  entry, MSBuild hook, and shortcuts. Your data folder and journal are kept.
+You only run the installer once. After that, Cultivate updates itself from this repository's GitHub
+Releases:
+
+```powershell
+cultivate update                   # install the latest release (asks first; add --yes to skip)
+cultivate update --check           # just report whether one is available
+cultivate update --version 1.1.0   # install a specific release, e.g. to roll back
+```
+
+The terminal UI also shows **UPDATE AVAILABLE** on its home screen, with an **Update Cultivate**
+action that installs the update and restarts. It checks at most every four hours; set `CheckForUpdates` to
+`false` to turn the notice off. `cultivate doctor` reports it too.
+
+An update downloads `Cultivate-<version>-win-x64.zip`, verifies its published SHA-256, and swaps the
+files in place, rolling everything back if any file can't be replaced. Settings, logs, the journal, the
+PATH entry, and shortcuts are untouched. An active deployment stays live: a running saved-file worker
+switches to the new version by itself between sync cycles.
+
+**Private repository access:** while the repository is private, updates need your GitHub sign-in.
+Cultivate uses, in order, `GH_TOKEN`/`GITHUB_TOKEN`, the [GitHub CLI](https://cli.github.com)
+(`gh auth login`), or the github.com credential Git Credential Manager saved when you cloned.
+Nothing is prompted for, and the token is sent only to `api.github.com`.
+
+Re-running `install.ps1` from a newer package or clone still works. Use it if a copy can't update,
+for example a copy that predates `cultivate update`.
+
+## Uninstall
+
+Run `cultivate restore --yes`, then `& "$env:LOCALAPPDATA\Programs\Cultivate\uninstall.ps1"`.
+This removes the program files, PATH entry, MSBuild hook, and shortcuts. Your data folder and
+journal are kept.
 
 ### Coming from the earlier local install
 
@@ -164,11 +191,11 @@ cultivate self-test                             # end-to-end fixture tests (need
 
 | Path | Purpose |
 | --- | --- |
-| `src/Cultivate/*.cs` | The app: `Program` (commands), `Terminal`/`VersionPicker`/`ActionPicker` (UI), `Planner` and `GitRepository` (what changed and who owns it), `Pipeline` (snapshot, build, verify, deploy), `Watcher` (saved-file worker), `Bridge` (calls the journal), `Setup`, `Doctor`, `SelfTest` |
+| `src/Cultivate/*.cs` | The app: `Program` (commands), `Terminal`/`VersionPicker`/`ActionPicker` (UI), `Planner` and `GitRepository` (what changed and who owns it), `Pipeline` (snapshot, build, verify, deploy), `Watcher` (saved-file worker), `Bridge` (calls the journal), `Updater` (in-place updates from GitHub Releases), `Setup`, `Doctor`, `SelfTest` |
 | `src/Cultivate/Runtime/` | Files that ship beside the exe: `Bridge.ps1`, `Cultivate.Journal.psm1` (lock, journal, backup, verified copy, restore), `Cultivate.Build.targets` (MSBuild hook), `Capture.targets` (captures a project's DLL during Cultivate builds) |
 | `assets/` | Icon sources. `assets\Build-Icon.ps1` regenerates the PNG and ICO from the SVG. |
-| `scripts/` | `build.ps1`, `install.ps1`, `uninstall.ps1` |
-| `.github/workflows/` | CI (build, package, install, self-test) and tag-triggered releases |
+| `scripts/` | `build.ps1` (publish and package), `install.ps1`, `uninstall.ps1`, `new-version.ps1` (release version and changelog bump) |
+| `.github/workflows/` | CI (build, package, install, self-test) and the one-click Release workflow |
 
 `self-test` builds tiny disposable .NET Framework 4.7.1 projects, deploys them to a temporary
 folder, and checks planning, builds, restores, the journal, and the background worker. It never
@@ -176,7 +203,31 @@ touches your settings or a real webfarm.
 
 ### Releasing
 
-1. Update `<Version>` in `src/Cultivate/Cultivate.csproj` and add an entry to `CHANGELOG.md`.
-2. Merge to `main`, then tag and push: `git tag v1.2.0 && git push origin v1.2.0`.
-3. The **Release** workflow checks that the tag matches the version, runs the self-test, and
-   publishes `Cultivate-<version>-win-x64.zip` to GitHub Releases. Users upgrade by installing it.
+Releases are automated. Don't edit `<Version>` by hand.
+
+1. As you merge changes, add a line for each one under `## Unreleased` in `CHANGELOG.md`.
+2. When you're ready to ship, run the **Release** workflow from the GitHub **Actions** tab (choose
+   `patch`, `minor`, or `major`), or from a terminal:
+
+   ```powershell
+   gh workflow run release.yml -f bump=minor
+   ```
+
+3. The workflow:
+   - bumps the version in `src/Cultivate/Cultivate.csproj`
+   - turns the Unreleased notes into that version's changelog entry
+   - builds the package and runs the full self-test against it
+   - pushes a `Release vX.Y.Z` commit and `vX.Y.Z` tag together
+   - publishes the GitHub release with `Cultivate-X.Y.Z-win-x64.zip` and its `.sha256`
+
+   If the self-test fails, nothing is pushed or published.
+4. Everyone's terminal UI announces the release within a few hours. `cultivate update` installs it
+   right away.
+
+The release commit is pushed to `main` by the workflow, so `main` must accept pushes from GitHub
+Actions. If you add branch protection, allow the `github-actions` bot to bypass it.
+
+`scripts/new-version.ps1` does the version and changelog step. You can run it locally to preview a bump,
+but discard those edits afterwards. The release repository is baked into each build (`UpdateRepository`,
+defaulting to the repository CI runs in). Transferring the repository, for example to
+Meyer-Distributing, therefore only needs one new release. GitHub redirects the old name until then.

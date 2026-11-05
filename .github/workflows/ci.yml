@@ -19,7 +19,7 @@ jobs:
 
       - name: Build and package
         shell: pwsh
-        run: ./scripts/build.ps1 -Package
+        run: ./scripts/build.ps1 -Package -UpdateRepository '${{ github.repository }}'
 
       - name: Install into a temporary folder
         shell: pwsh
@@ -36,4 +36,4 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: cultivate-win-x64
-          path: artifacts/*.zip
+          path: artifacts/Cultivate-*

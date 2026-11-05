@@ -8,7 +8,10 @@
     <AssemblyName>Cultivate</AssemblyName>
     <RootNamespace>Cultivate</RootNamespace>
     <ApplicationIcon>..\..\assets\Cultivate.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
+    <!-- The last released version. The Release workflow bumps it; do not edit by hand. -->
+    <Version>1.0.0</Version>
+    <!-- GitHub repository whose releases "cultivate update" installs. CI passes the building repository. -->
+    <UpdateRepository Condition="'$(UpdateRepository)' == ''">kylegstewart/Cultivate</UpdateRepository>
     <Product>Cultivate</Product>
     <Company>Meyer Distributing</Company>
     <Description>Preview, build, and activate a MyMeyer development version on your dev webfarm.</Description>
@@ -16,6 +19,7 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
+    <AssemblyMetadata Include="UpdateRepository" Value="$(UpdateRepository)" />
     <PackageReference Include="Spectre.Console" Version="0.57.2" />
     <!-- Runtime support files stay beside Cultivate.exe (not bundled) so PowerShell and MSBuild can load them. -->
     <None Update="Runtime\*.ps1;Runtime\*.psm1;Runtime\*.targets" Link="%(Filename)%(Extension)"

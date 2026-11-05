@@ -5,13 +5,14 @@
 .EXAMPLE
     .\scripts\build.ps1             # artifacts\publish
 .EXAMPLE
-    .\scripts\build.ps1 -Package    # also artifacts\Cultivate-<version>-win-x64.zip
+    .\scripts\build.ps1 -Package    # also artifacts\Cultivate-<version>-win-x64.zip and its .sha256
 #>
 [CmdletBinding()]
 param(
     [string]$Configuration = 'Release',
     [string]$Runtime = 'win-x64',
-    [string]$Output,  # default: <repository>\artifacts
+    [string]$Output,            # default: <repository>\artifacts
+    [string]$UpdateRepository,  # GitHub owner/name that `cultivate update` reads releases from
     [switch]$Package
 )
 Set-StrictMode -Version Latest
@@ -23,8 +24,9 @@ $project = Join-Path $root 'src\Cultivate\Cultivate.csproj'
 $publish = Join-Path $Output 'publish'
 if (Test-Path -LiteralPath $publish) { Remove-Item -LiteralPath $publish -Recurse -Force }
 
-& dotnet publish $project -nologo -c $Configuration -r $Runtime --self-contained true `
-    -p:PublishSingleFile=true -p:DebugType=none -o $publish
+$properties = @('-p:PublishSingleFile=true', '-p:DebugType=none')
+if ($UpdateRepository) { $properties += "-p:UpdateRepository=$UpdateRepository" }
+& dotnet publish $project -nologo -c $Configuration -r $Runtime --self-contained true @properties -o $publish
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)." }
 
 # The package installs itself: extract it and run install.ps1.
@@ -37,5 +39,8 @@ if ($Package) {
     $zip = Join-Path $Output "Cultivate-$version-$Runtime.zip"
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
     Compress-Archive -Path (Join-Path $publish '*') -DestinationPath $zip
-    Write-Host "Packaged $zip"
+    # `cultivate update` refuses a package whose hash does not match this file.
+    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+    [IO.File]::WriteAllText("$zip.sha256", "$hash  $(Split-Path $zip -Leaf)`n")
+    Write-Host "Packaged $zip (SHA-256 $hash)"
 }

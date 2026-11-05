@@ -6,6 +6,7 @@ namespace Cultivate;
 internal sealed class Terminal(Settings settings, GitRepository git, Bridge bridge)
 {
     private static string Escape(string value) => Markup.Escape(value);
+    private const string UpdateAction = "Update Cultivate";
     internal static IReadOnlyList<MenuAction> HomeActions { get; } =
     [
         new("Choose a worktree or branch", "Browse versions and preview their changed files before deploying anything."),
@@ -54,6 +55,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     {
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
             throw new InvalidOperationException("Open Cultivate in an interactive terminal, or use list / status / plan for JSON output.");
+        // Runs in the background; the notice appears on the first home screen drawn after it finishes.
+        var updateCheck = settings.CheckForUpdates && Updater.IsInstalled ? Updater.CheckQuietly() : Task.FromResult<UpdateInfo?>(null);
         while (true)
         {
             AnsiConsole.Clear();
@@ -73,12 +76,29 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             else AnsiConsole.Write(TerminalStyle.Card(new Markup(
                 $"[{TerminalStyle.Gold}]READY WHEN YOU ARE[/]\n[{TerminalStyle.Muted}]Choose a version to inspect its files and builds. Nothing deploys until you confirm.[/]"),
                 "NO ACTIVE TEST VERSION"));
+            var update = updateCheck.IsCompletedSuccessfully ? updateCheck.Result : null;
+            var actions = HomeActions.ToList();
+            if (update is not null)
+            {
+                AnsiConsole.Write(TerminalStyle.Card(new Markup(
+                    $"[bold {TerminalStyle.Gold}]Cultivate {Escape(update.Version)} is available[/]  [{TerminalStyle.Muted}]you have {Escape(Files.Version)}[/]\n" +
+                    $"[{TerminalStyle.Muted}]Choose Update Cultivate below, or run `cultivate update`.[/]"), "UPDATE AVAILABLE", TerminalStyle.Gold));
+                actions.Insert(actions.Count - 1, new(UpdateAction,
+                    $"Download and install {update.Version}, then restart. Active deployments and automatic updates keep running."));
+            }
             AnsiConsole.WriteLine();
-            var action = Select("What would you like to do?", HomeActions);
+            var action = Select("What would you like to do?", actions);
             try
             {
                 switch (action)
                 {
+                    case UpdateAction when update is not null:
+                        if (!AnsiConsole.Confirm($"Update Cultivate {Escape(Files.Version)} to {Escape(update.Version)}?", true)) break;
+                        var release = await AnsiConsole.Status().StartAsync("Checking the release...", _ => Updater.Fetch(update.Version));
+                        await AnsiConsole.Status().StartAsync("Updating...", context => Updater.Install(release, message => context.Status(Escape(message))));
+                        AnsiConsole.MarkupLine($"[{TerminalStyle.Accent}]Updated to Cultivate {Escape(release.Version)}.[/] Restarting...");
+                        Updater.Restart();
+                        break;
                     case "Choose a worktree or branch": await Choose(state); break;
                     case "Restore original webfarm files":
                         if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))

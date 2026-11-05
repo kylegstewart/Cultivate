@@ -1,15 +1,29 @@
 name: Release
 
-# Push a tag that matches <Version> in src/Cultivate/Cultivate.csproj, e.g. v1.1.0.
+# Publish a new version: Actions > Release > Run workflow, choose patch, minor or major. Or from a terminal:
+#   gh workflow run release.yml -f bump=minor
+# The job bumps <Version>, moves CHANGELOG.md's "Unreleased" notes into the release, builds and self-tests the
+# package, then pushes the release commit and tag together and publishes the GitHub release.
+# Installed copies pick it up with `cultivate update` (the terminal UI also announces it).
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Part of the version to increase
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
+    # Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack are needed by the self-test fixtures.
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
@@ -18,17 +32,22 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Check the tag matches the project version
+      - name: Bump the version and changelog
         shell: pwsh
         run: |
-          $version = (dotnet msbuild src/Cultivate/Cultivate.csproj -nologo -getProperty:Version).Trim()
-          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match project version $version." }
+          if ($env:GITHUB_REF_NAME -ne 'main') { throw 'Run releases from main.' }
+          $version = ./scripts/new-version.ps1 -Bump '${{ inputs.bump }}' -NotesPath "$env:RUNNER_TEMP\notes.md"
+          "VERSION=$version" >> $env:GITHUB_ENV
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am "Release v$version"
+          git tag "v$version"
 
       - name: Build and package
         shell: pwsh
-        run: ./scripts/build.ps1 -Package
+        run: ./scripts/build.ps1 -Package -UpdateRepository '${{ github.repository }}'
 
-      - name: Self-test (fixtures only)
+      - name: Self-test the package
         shell: pwsh
         env:
           CULTIVATE_HOME: ${{ runner.temp }}\cultivate-home
@@ -36,10 +55,19 @@ jobs:
           ./artifacts/publish/install.ps1 -InstallDir "$env:RUNNER_TEMP\cultivate" -NoDesktopShortcut -NoPath
           & "$env:RUNNER_TEMP\cultivate\Cultivate.exe" self-test
 
+      - name: Push the release commit and tag
+        shell: pwsh
+        run: git push --atomic origin HEAD:main "v$env:VERSION"
+
       - name: Publish the GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $zip = (Get-ChildItem artifacts/*.zip).FullName
-          gh release create $env:GITHUB_REF_NAME $zip --title "Cultivate $env:GITHUB_REF_NAME" --generate-notes
+          $assets = @(Get-ChildItem artifacts -File | Where-Object Name -like "Cultivate-$env:VERSION-*" | ForEach-Object FullName)
+          $notes = "$env:RUNNER_TEMP\notes.md"
+          if ([IO.File]::ReadAllText($notes).Trim()) {
+            gh release create "v$env:VERSION" @assets --title "Cultivate $env:VERSION" --notes-file $notes
+          } else {
+            gh release create "v$env:VERSION" @assets --title "Cultivate $env:VERSION" --generate-notes
+          }

@@ -32,6 +32,7 @@ internal static class SelfTest
         try
         {
             CheckTerminal();
+            CheckUpdater(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
             var settings = await Settings.Read();
             if (!File.Exists(settings.MSBuild))
@@ -316,6 +317,41 @@ internal static class SelfTest
             await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
             Check(worker.HasExited, "restore cooperatively stops the known file-sync worker");
 
+            if (Watcher.ExecutableStamp() is not null)
+            {
+                // `cultivate update` replaces Cultivate.exe under a running worker, which must hand over to the new file.
+                var copy = Path.Combine(home, "installed copy");
+                Directory.CreateDirectory(copy);
+                foreach (var file in Directory.GetFiles(AppContext.BaseDirectory).Where(path => !path.EndsWith(".old", StringComparison.OrdinalIgnoreCase)))
+                    File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
+                var oneTime = await pipeline.Activate(await planner.Create(workerTarget), _ => { }, watch: false);
+                var workerFile = Path.Combine(home, "handoff-worker.json");
+                Files.WriteJson(workerFile, settings);
+                using var first = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(copy, "Cultivate.exe"))
+                {
+                    UseShellExecute = false, CreateNoWindow = true, ArgumentList = { "watch", "--token", oneTime.Token, "--settings", workerFile }
+                }) ?? throw new InvalidOperationException("Cannot start the copied worker.");
+                async Task<DeploymentState?> WaitFor(Func<DeploymentState, bool> condition)
+                {
+                    for (var until = DateTime.UtcNow.AddSeconds(45); DateTime.UtcNow < until; await Task.Delay(250))
+                        if (await bridge.Status() is { } current && condition(current)) return current;
+                    return null;
+                }
+                Check(await WaitFor(state => state.WatcherPid == first.Id) is not null, "a worker started from an installed copy reports readiness");
+                var package = Path.Combine(home, "handoff-package");
+                Directory.CreateDirectory(package);
+                File.Copy(Path.Combine(copy, "Cultivate.exe"), Path.Combine(package, "Cultivate.exe"));
+                Updater.Apply(package, copy);
+                var handedOver = await WaitFor(state => state.Active && state.Token == oneTime.Token && state.WatcherPid > 0 && state.WatcherPid != first.Id);
+                await first.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                Check(handedOver is not null && first.HasExited, "an in-place update hands the running worker over to the new executable");
+                using var successor = System.Diagnostics.Process.GetProcessById(handedOver!.WatcherPid);
+                Check(Files.Comparer.Equals(successor.MainModule?.FileName, Path.Combine(copy, "Cultivate.exe")), "the successor worker runs from the updated installation");
+                await bridge.Call("Restore");
+                await successor.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                Check(successor.HasExited, "restore stops the handed-over worker");
+            }
+
             var a = new ProjectInfo { RelativePath = @"A\A.csproj", Assembly = "A", ProjectReferences = [@"B\B.csproj"], Inputs = [@"A\A.cs"] };
             var b = new ProjectInfo { RelativePath = @"B\B.csproj", Assembly = "B", ProjectReferences = [@"A\A.csproj"] };
             Check(Planner.BuildOrder([a, b], [new(@"A\A.cs", false)], []).Select(x => x.Assembly).SequenceEqual(["A"]),
@@ -337,6 +373,58 @@ internal static class SelfTest
                 File.SetAttributes(file, FileAttributes.Normal);
             Directory.Delete(home, recursive: true);
         }
+    }
+
+    private static void CheckUpdater(string home)
+    {
+        Check(Updater.Parse("1.2.3+abc1234") == new Version(1, 2, 3) && Updater.Parse("v1.10") == new Version(1, 10, 0) &&
+              Updater.Parse("1.10.0") > Updater.Parse("1.9.9") && Updater.Parse("not a version") is null && Updater.Parse("1.2.3.4") is null,
+            "release versions parse and compare numerically");
+        var install = Path.Combine(home, "update-install");
+        var package = Path.Combine(home, "update-package");
+        Directory.CreateDirectory(install);
+        Directory.CreateDirectory(package);
+        File.WriteAllText(Path.Combine(install, "Bridge.ps1"), "old bridge");
+        File.WriteAllText(Path.Combine(install, "installation.json"), "{}");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "ping.exe"), Path.Combine(install, "Cultivate.exe"));
+        using var running = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(install, "Cultivate.exe"), "-n 120 127.0.0.1")
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true }) ?? throw new InvalidOperationException("Cannot start the fixture executable.");
+        try
+        {
+            File.WriteAllText(Path.Combine(package, "Bridge.ps1"), "new bridge");
+            File.WriteAllText(Path.Combine(package, "Capture.targets"), "new capture");
+            File.WriteAllText(Path.Combine(package, "install.ps1"), "installer");
+            File.Copy(Path.Combine(Environment.SystemDirectory, "where.exe"), Path.Combine(package, "Cultivate.exe"));
+            Updater.Apply(package, install);
+            Check(File.ReadAllText(Path.Combine(install, "Bridge.ps1")) == "new bridge" && File.Exists(Path.Combine(install, "Capture.targets")) &&
+                  !File.Exists(Path.Combine(install, "install.ps1")) && File.ReadAllText(Path.Combine(install, "installation.json")) == "{}",
+                "updates replace and add program files, keep installation.json, and skip the installer");
+            Check(!running.HasExited && Files.Hash(Path.Combine(install, "Cultivate.exe")) == Files.Hash(Path.Combine(package, "Cultivate.exe")),
+                "a running Cultivate.exe is replaced in place without stopping it");
+            Check(Directory.GetFiles(install, "*.old").Length == 1 && Directory.GetFiles(install, "*.new").Length == 0,
+                "only the still-running executable's replaced copy is left behind");
+
+            File.WriteAllText(Path.Combine(package, "Bridge.ps1"), "newer bridge");
+            File.WriteAllText(Path.Combine(package, "Zzz.targets"), "replacement");
+            File.WriteAllText(Path.Combine(install, "Zzz.targets"), "in use");
+            var rejected = false;
+            using (new FileStream(Path.Combine(install, "Zzz.targets"), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                try { Updater.Apply(package, install); }
+                catch (IOException) { rejected = true; }
+            }
+            Check(rejected && File.ReadAllText(Path.Combine(install, "Bridge.ps1")) == "new bridge" &&
+                  File.ReadAllText(Path.Combine(install, "Zzz.targets")) == "in use" && Directory.GetFiles(install, "*.new").Length == 0,
+                "a failed update rolls every replaced file back");
+        }
+        finally
+        {
+            running.Kill();
+            running.WaitForExit();
+        }
+        for (var until = DateTime.UtcNow.AddSeconds(10); DateTime.UtcNow < until && Directory.GetFiles(install, "*.old").Length != 0; Thread.Sleep(200))
+            Updater.CleanupStaleFiles(install);
+        Check(Directory.GetFiles(install, "*.old").Length == 0, "replaced executables are cleaned up once they stop running");
     }
 
     private static void CheckTerminal()

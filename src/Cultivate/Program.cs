@@ -21,6 +21,8 @@ internal static class Program
           setup                                   Configure interactively, or pass any of:
                 [--repository PATH] [--webfarm PATH] [--base-branch NAME]
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
+          update [--check] [--version X.Y.Z] [--yes]
+                                                  Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
           doctor                                  Check prerequisites, hooks, and settings
           self-test                               Run fixture-only tests (never touches a real webfarm)
@@ -33,6 +35,7 @@ internal static class Program
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         Directory.CreateDirectory(Files.Home);
+        if (Updater.IsInstalled) Updater.CleanupStaleFiles();
         try
         {
             void Print(object? value) => Console.WriteLine(JsonSerializer.Serialize(value, Files.Json));
@@ -48,6 +51,7 @@ internal static class Program
                     return 0;
                 case "doctor": return await Doctor.Run();
                 case "setup": return await Setup.Run(args);
+                case "update": return await Updater.Run(args);
                 case "config":
                     Console.WriteLine(Settings.FilePath);
                     Print(await Settings.Read());
@@ -92,7 +96,7 @@ internal static class Program
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Restoration requires --yes or the interactive menu.");
                     Print(await bridge.Call("Restore"));
                     break;
-                case "watch": await Watcher.Run(settings, Option("--token") ?? throw new InvalidOperationException("Worker token is required.")); break;
+                case "watch": await Watcher.Run(settings, Option("--token") ?? throw new InvalidOperationException("Worker token is required."), settingsPath); break;
                 case null: await new Terminal(settings, git, bridge).Run(); break;
                 default: throw new InvalidOperationException($"Unknown command '{args[0]}'. Run cultivate --help.");
             }
