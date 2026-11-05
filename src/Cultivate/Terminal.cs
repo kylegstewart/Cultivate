@@ -11,7 +11,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     [
         new("Choose a worktree or branch", "Browse versions and preview their changed files before deploying anything."),
         new("Refresh deployment status", "Reload the active version and its automatic-update status."),
-        new("Open solution", "Open a worktree or local branch and its changed files in Visual Studio; create a worktree if needed."),
+        new("Open solution", "Open a worktree or local branch and its actionable source changes in Visual Studio; create a worktree if needed."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
         new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
         new("Open logs", "Open Cultivate's diagnostic logs in File Explorer."),
@@ -172,14 +172,11 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         var visualStudio = await Settings.FindVisualStudio()
             ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution and its changed files.");
         var solution = await AnsiConsole.Status().StartAsync("Locating the solution...", _ => git.Solution(target));
-        var files = await AnsiConsole.Status().StartAsync("Finding changed files to open...", _ => git.SolutionChanges(solution));
-        var start = new System.Diagnostics.ProcessStartInfo(visualStudio)
-        {
-            UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(solution)!
-        };
-        start.ArgumentList.Add(solution);
-        foreach (var file in files) start.ArgumentList.Add(file);
-        using var process = System.Diagnostics.Process.Start(start) ?? throw new InvalidOperationException("Visual Studio could not be started.");
+        var plan = await AnsiConsole.Status().StartAsync("Finding actionable changes to open...", _ =>
+            new Planner(settings, git, bridge).Create(target with { Worktree = Path.GetDirectoryName(solution)! }));
+        var files = SolutionOpener.FilesToOpen(solution, ActionableChanges(plan).Select(item => item.Change));
+        await AnsiConsole.Status().StartAsync("Opening the solution and changed source files...", _ =>
+            SolutionOpener.Open(visualStudio, solution, files));
     }
 
     private async Task Choose(DeploymentState? state)
