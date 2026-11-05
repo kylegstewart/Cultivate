@@ -540,6 +540,24 @@ internal static class SelfTest
         Check(!Render(picker, 100, 30).Contains("Committed files only; uncommitted edits are excluded."),
             "selected branch details omit the redundant committed-files message");
 
+        Check(Banner.Sprite.Length % 2 == 0 && Banner.Sprite.All(row => row.Length == Banner.Sprite[0].Length) &&
+            Banner.Wordmark.All(row => row.Length == Banner.Wordmark[0].Length), "banner art rows are rectangular");
+        var bannerScreen = Capture(new Banner("DEV LAUNCHPAD", "Your code.", 20), 120, 30);
+        var bannerLines = bannerScreen.Split('\n');
+        Check(bannerLines.Length == Banner.Height && bannerLines.All(line => line.Length == 120) &&
+            bannerLines.Any(line => line.Contains(Banner.Wordmark[0].Trim())) && bannerScreen.Contains("DEV LAUNCHPAD") &&
+            bannerScreen.Contains('▀') && !bannerScreen.Contains("LOCAL CODE"), "the banner draws the seedling and wordmark at 120 columns");
+        bannerScreen = Capture(new Banner("DEV LAUNCHPAD", "Your code.", 20), 84, 30);
+        Check(bannerScreen.Contains(Banner.Wordmark[0].Trim()) && !bannerScreen.Contains('▀') &&
+            bannerScreen.Split('\n').All(line => line.Length == 84), "a narrower banner keeps the wordmark and drops the seedling");
+        Check(Capture(new Banner("DEV LAUNCHPAD", "Your code.", 20), 60, 30).Contains("C U L T I V A T E"),
+            "a banner too wide for the terminal falls back to the compact header");
+        Check(Capture(new Banner("DEV LAUNCHPAD", "Your code.", 20), 120, 24).Contains("C U L T I V A T E"),
+            "a banner that would push the screen below it off the terminal falls back to the compact header");
+        Check(Capture(new Banner("[setup]", "folder[green]", 0), 120, 30).Contains("[setup]  ·  folder[green]"),
+            "banner taglines treat markup characters literally");
+        Check(TerminalStyle.Lines(TerminalStyle.Card(new Text("one\ntwo"), "CARD")) == 4, "card line counts include their borders");
+
         var menu = new ActionPicker(Terminal.HomeActions);
         var menuScreen = Capture(menu.Render("Actions", 30), 100, 30);
         Check(menuScreen.Contains(menu.Selected!.Description) && !menuScreen.Contains("Type to filter actions"),

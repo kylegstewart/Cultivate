@@ -57,35 +57,49 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             throw new InvalidOperationException("Open Cultivate in an interactive terminal, or use list / status / plan for JSON output.");
         // Runs in the background; the notice appears on the first home screen drawn after it finishes.
         var updateCheck = settings.CheckForUpdates && Updater.IsInstalled ? Updater.CheckQuietly() : Task.FromResult<UpdateInfo?>(null);
+        const string section = "DEV LAUNCHPAD", tagline = "Your code. Your workspace. Ready for the farm.";
         while (true)
         {
-            AnsiConsole.Clear();
-            AnsiConsole.Write(TerminalStyle.Header("DEV LAUNCHPAD", "Your code. Your workspace. Ready for the farm."));
-            AnsiConsole.Write(TerminalStyle.Card(new Rows(
+            var workspace = TerminalStyle.Card(new Rows(
                 new Markup($"[{TerminalStyle.Muted}]REPOSITORY[/]   {Escape(Path.GetFileName(Files.Full(settings.RepositoryRoot)))}"),
-                new Markup($"[{TerminalStyle.Muted}]DESTINATION[/]  {Escape(settings.WebfarmRoot)}")), "CONNECTED WORKSPACE"));
+                new Markup($"[{TerminalStyle.Muted}]DESTINATION[/]  {Escape(settings.WebfarmRoot)}")), "CONNECTED WORKSPACE");
+            // The banner is drawn while the status loads, so it plans room for a typical screen: an active deployment and the menu.
+            var banner = new Banner(section, tagline, TerminalStyle.Lines(workspace) + 5 + MenuLines(HomeActions.Count));
+            AnsiConsole.Clear();
+            AnsiConsole.Write(banner);
+            AnsiConsole.Write(workspace);
             var state = await bridge.Status();
+            var cards = new List<IRenderable>();
             if (state?.Active == true)
             {
                 var health = !state.WatchEnabled && state.Mode == "Cultivate" ? "[grey]one-time deployment[/]" :
                     state.Mode == "Cultivate" && DateTime.TryParse(state.Heartbeat, out var heartbeat) &&
                     DateTime.UtcNow - heartbeat.ToUniversalTime() < TimeSpan.FromSeconds(20) ? "[green]watching saved files[/]" : "[yellow]no healthy auto-update worker[/]";
-                AnsiConsole.Write(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]LIVE[/]  {Escape(state.Branch)}\n{Escape(state.SourceRoot.Length == 0 ? state.SourceRef : state.SourceRoot)}\n{health}" +
+                cards.Add(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]LIVE[/]  {Escape(state.Branch)}\n{Escape(state.SourceRoot.Length == 0 ? state.SourceRef : state.SourceRoot)}\n{health}" +
                     (string.IsNullOrEmpty(state.LastError) ? "" : $"\n[red]Update blocked:[/] {Escape(state.LastError)}")), "ACTIVE DEPLOYMENT", TerminalStyle.Accent));
             }
-            else AnsiConsole.Write(TerminalStyle.Card(new Markup(
+            else cards.Add(TerminalStyle.Card(new Markup(
                 $"[{TerminalStyle.Gold}]READY WHEN YOU ARE[/]\n[{TerminalStyle.Muted}]Choose a version to inspect its files and builds. Nothing deploys until you confirm.[/]"),
                 "NO ACTIVE TEST VERSION"));
             var update = updateCheck.IsCompletedSuccessfully ? updateCheck.Result : null;
             var actions = HomeActions.ToList();
             if (update is not null)
             {
-                AnsiConsole.Write(TerminalStyle.Card(new Markup(
+                cards.Add(TerminalStyle.Card(new Markup(
                     $"[bold {TerminalStyle.Gold}]Cultivate {Escape(update.Version)} is available[/]  [{TerminalStyle.Muted}]you have {Escape(Files.Version)}[/]\n" +
                     $"[{TerminalStyle.Muted}]Choose Update Cultivate below, or run `cultivate update`.[/]"), "UPDATE AVAILABLE", TerminalStyle.Gold));
                 actions.Insert(actions.Count - 1, new(UpdateAction,
                     $"Download and install {update.Version}, then restart. Active deployments and automatic updates keep running."));
             }
+            // An update notice or a long error can outgrow that plan; switch to the compact header instead of scrolling the banner away.
+            var below = TerminalStyle.Lines(workspace) + cards.Sum(TerminalStyle.Lines) + MenuLines(actions.Count);
+            if (banner.FitsOn(AnsiConsole.Console) && !new Banner(section, tagline, below).FitsOn(AnsiConsole.Console))
+            {
+                AnsiConsole.Clear();
+                AnsiConsole.Write(TerminalStyle.Header(section, tagline));
+                AnsiConsole.Write(workspace);
+            }
+            foreach (var card in cards) AnsiConsole.Write(card);
             AnsiConsole.WriteLine();
             var action = Select("What would you like to do?", actions);
             try
@@ -117,9 +131,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", Path.Combine(Files.Home, "Logs")) { UseShellExecute = true });
                         break;
                     case "How it works":
-                        AnsiConsole.Clear();
-                        AnsiConsole.Write(TerminalStyle.Header("FIELD GUIDE", "A safe route from local code to your development webfarm."));
-                        AnsiConsole.Write(TerminalStyle.Card(new Text(
+                        var guide = TerminalStyle.Card(new Text(
                             "1. Choose a worktree for its saved disk contents, or a branch for committed contents.\n" +
                             "2. Review frontend destinations and affected projects. Nothing is deployed yet.\n" +
                             "3. Confirm activation. Cultivate snapshots and builds only projects owning changed compiled files.\n" +
@@ -131,7 +143,11 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                             "Close the old WebfarmFileSync watcher first. Multiple files cannot be atomically swapped on a live IIS share;\n" +
                             "an interrupted deployment can be recovered with Restore. External webfarm edits block restoration.\n" +
                             "SQL and site configuration are not automatically published. Static assets need Code Release Manager mappings."),
-                            "HOW CULTIVATE WORKS"));
+                            "HOW CULTIVATE WORKS");
+                        AnsiConsole.Clear();
+                        AnsiConsole.Write(new Banner("FIELD GUIDE", "A safe route from local code to your development webfarm.",
+                            TerminalStyle.Lines(guide) + PauseLines));
+                        AnsiConsole.Write(guide);
                         Pause();
                         break;
                     case "Exit": return;
@@ -197,6 +213,11 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         }
     }
 
+    // Lines below the cards on the home screen: a blank line, the menu title, its actions, the highlighted help, the cursor.
+    private static int MenuLines(int actions) => actions + 4;
+    // Pause's blank line and prompt, plus the cursor.
+    private const int PauseLines = 3;
+
     private static void Pause()
     {
         AnsiConsole.MarkupLine($"\n[{TerminalStyle.Gold}]Press any key[/] [{TerminalStyle.Muted}]to continue[/]");
@@ -231,6 +252,11 @@ internal static class TerminalStyle
         new Panel(content).Header($"[{color ?? Muted}]{title}[/]")
             .Border(BoxBorder.Rounded).BorderColor(Color.FromHex(color ?? Border)).Expand();
 
+    /// <summary>Lines <paramref name="renderable"/> takes on the terminal at its current width.</summary>
+    internal static int Lines(IRenderable renderable) =>
+        renderable.GetSegments(AnsiConsole.Console).Count(segment => segment.IsLineBreak);
+
+    /// <summary>The compact screen header, for screens that need their rows and as the <see cref="Banner"/>'s fallback.</summary>
     internal static IRenderable Header(string section, string subtitle) => Card(new Rows(
         new Markup($"[bold {Accent}]C U L T I V A T E[/]    [{Gold}]{section}[/]"),
         new Markup($"[{Muted}]{Markup.Escape(subtitle)}[/]")), "LOCAL CODE / DEV WEBFARM", Accent);

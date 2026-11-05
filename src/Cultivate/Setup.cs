@@ -53,8 +53,9 @@ internal static class Setup
     public static async Task<Settings> Interactive(Settings settings, DeploymentState? active, bool firstRun = false)
     {
         AnsiConsole.Clear();
-        AnsiConsole.Write(TerminalStyle.Header(firstRun ? "WELCOME" : "SETTINGS",
-            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value."));
+        // The prompts below take about 14 lines; on a shorter terminal the compact header leaves them more room.
+        AnsiConsole.Write(new Banner(firstRun ? "WELCOME" : "SETTINGS",
+            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 14));
         AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]Saved to {Escape(Settings.FilePath)}[/]\n");
         var previousFarm = settings.WebfarmRoot;
         var previousRepository = settings.RepositoryRoot;

@@ -5,6 +5,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- A new banner on the home, welcome, settings, and field guide screens: the app icon's seedling as pixel art
+  beside a big CULTIVATE wordmark that ripens from green to gold. Terminals that are too narrow or short for
+  it get the compact header, so the menu never scrolls off screen.
+
 ## 1.1.1 — 2026-11-05
 
 - Fix: `cultivate update` no longer reports an error after it has replaced the files. A replaced single-file
