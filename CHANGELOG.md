@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.5 — 2026-11-05
+
 - **Open solution.** The homepage can open a worktree or local branch's MyMeyer solution in its associated
   application. Branches reuse their existing checkout or get a new worktree without switching your current branch.
 
