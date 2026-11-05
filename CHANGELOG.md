@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.3 — 2026-11-05
+
 - Fix: a project whose HintPath names a package version that `packages.config` never restores (MyMeyer's
   `Microsoft.Bcl.AsyncInterfaces.10.0.2`, for example) no longer blocks activation. Like Visual Studio, Cultivate
   now builds against the checkout's `bin` copy, but only when its assembly version exactly matches the version
