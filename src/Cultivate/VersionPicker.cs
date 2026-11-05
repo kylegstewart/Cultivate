@@ -9,18 +9,23 @@ internal sealed class VersionPicker
 {
     private readonly Target[] targets;
     private readonly DeploymentState? active;
+    private readonly bool openSolution;
+    private readonly VersionKind[] kinds;
     internal VersionKind Kind { get; private set; }
     internal string Query { get; private set; } = "";
     internal IReadOnlyList<Target> Matches { get; private set; } = [];
     internal int Index { get; private set; }
     internal Target? Selected => Matches.Count == 0 ? null : Matches[Index];
 
-    internal VersionPicker(IEnumerable<Target> targets, DeploymentState? active = null)
+    internal VersionPicker(IEnumerable<Target> targets, DeploymentState? active = null, bool openSolution = false)
     {
-        this.targets = targets.OrderBy(x => x.Branch, Files.Comparer).ThenBy(x => x.Worktree, Files.Comparer).ToArray();
+        this.targets = targets.Where(x => !openSolution || !x.Remote)
+            .OrderBy(x => x.Branch, Files.Comparer).ThenBy(x => x.Worktree, Files.Comparer).ToArray();
         this.active = active;
+        this.openSolution = openSolution;
+        kinds = openSolution ? [VersionKind.Worktrees, VersionKind.Local] : Enum.GetValues<VersionKind>();
         Kind = this.targets.Any(x => x.Worktree is not null) ? VersionKind.Worktrees :
-            this.targets.Any(x => !x.Remote) ? VersionKind.Local : VersionKind.Remote;
+            this.targets.Any(x => !x.Remote) || openSolution ? VersionKind.Local : VersionKind.Remote;
         Filter();
         var live = Matches.ToList().FindIndex(IsActive);
         if (live >= 0) Index = live;
@@ -64,7 +69,7 @@ internal sealed class VersionPicker
 
     private void ChangeKind(int direction)
     {
-        Kind = (VersionKind)(((int)Kind + direction + 3) % 3);
+        Kind = kinds[(Array.IndexOf(kinds, Kind) + direction + kinds.Length) % kinds.Length];
         Filter();
     }
 
@@ -91,14 +96,16 @@ internal sealed class VersionPicker
         var pageSize = PageSize(height);
         var start = Index / pageSize * pageSize;
         var end = Math.Min(start + pageSize, Matches.Count);
-        var tabs = string.Join("   ", Enum.GetValues<VersionKind>().Select(kind =>
+        var tabs = string.Join("   ", kinds.Select(kind =>
         {
             var label = kind switch { VersionKind.Worktrees => "WORKTREES", VersionKind.Local => "LOCAL", _ => "REMOTE" };
             var count = targets.Count(x => KindOf(x) == kind);
             return kind == Kind ? $"[bold {TerminalStyle.Accent} on {TerminalStyle.Surface}] {label} {count} [/]" :
                 $"[{TerminalStyle.Muted}]{label} {count}[/]";
         }));
-        var description = Kind == VersionKind.Worktrees ? "Saved files, including uncommitted changes." :
+        var description = openSolution ? Kind == VersionKind.Worktrees ? "Open the solution in this checkout." :
+            "Reuse a checkout, or create a worktree for this branch." :
+            Kind == VersionKind.Worktrees ? "Saved files, including uncommitted changes." :
             Kind == VersionKind.Local ? "Committed local branches. Your checkout stays untouched." :
             "Cached remote branches. No fetch or checkout switch.";
         var available = Math.Max(16, width - 10);
@@ -128,7 +135,8 @@ internal sealed class VersionPicker
                 TerminalStyle.Line(selectedTarget.Branch, new Style(Color.FromHex(TerminalStyle.Accent), decoration: Decoration.Bold)),
                 TerminalStyle.Line(selectedTarget.Worktree is not null ? DisplayPath(selectedTarget.Worktree) : selectedTarget.Ref));
         return new Rows(
-            TerminalStyle.Header("VERSION LIBRARY", "Find your version. Preview before you deploy."),
+            TerminalStyle.Header(openSolution ? "OPEN SOLUTION" : "VERSION LIBRARY",
+                openSolution ? "Choose a worktree or local branch to open." : "Find your version. Preview before you deploy."),
             new Text(""),
             new Markup(tabs),
             new Markup($"[{TerminalStyle.Muted}]{description}[/]"),
@@ -136,9 +144,11 @@ internal sealed class VersionPicker
                 new Style(Color.FromHex(Query.Length == 0 ? TerminalStyle.Muted : TerminalStyle.Accent))),
             new Text(""),
             table,
-            new Markup($"[{TerminalStyle.Muted}]{(Matches.Count == 0 ? "0 matches" : $"{start + 1}-{end} of {Matches.Count}")}   |   Enter opens a preview, not a deployment.[/]"),
+            new Markup($"[{TerminalStyle.Muted}]{(Matches.Count == 0 ? "0 matches" : $"{start + 1}-{end} of {Matches.Count}")}   |   " +
+                (openSolution ? "Enter opens the solution.[/]" : "Enter opens a preview, not a deployment.[/]")),
             TerminalStyle.Card(details, "SELECTED SOURCE"),
-            new Markup($"[{TerminalStyle.Gold}]Tab[/] source   [{TerminalStyle.Gold}]arrows[/] move   [{TerminalStyle.Gold}]Enter[/] preview   [{TerminalStyle.Gold}]Esc[/] back"),
+            new Markup($"[{TerminalStyle.Gold}]Tab[/] source   [{TerminalStyle.Gold}]arrows[/] move   [{TerminalStyle.Gold}]Enter[/] " +
+                $"{(openSolution ? "open" : "preview")}   [{TerminalStyle.Gold}]Esc[/] back"),
             new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
     }
 

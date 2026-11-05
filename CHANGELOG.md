@@ -5,6 +5,9 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- **Open solution.** The homepage can open a worktree or local branch's MyMeyer solution in its associated
+  application. Branches reuse their existing checkout or get a new worktree without switching your current branch.
+
 ## 1.1.4 — 2026-11-05
 
 - **Deployment summary.** After an activation completes, Cultivate lists every webfarm file it updated and how:

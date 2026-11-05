@@ -32,6 +32,7 @@ internal static class SelfTest
         try
         {
             CheckTerminal();
+            await CheckSolutions(home);
             CheckUpdater(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
             var settings = await Settings.Read();
@@ -404,6 +405,63 @@ internal static class SelfTest
         }
     }
 
+    private static async Task CheckSolutions(string home)
+    {
+        var root = Path.Combine(home, "solutions with spaces");
+        Directory.CreateDirectory(root);
+        var git = new GitRepository(new Settings { RepositoryRoot = root });
+        async Task G(params string[] args) => _ = await git.Git(root, args);
+        var solution = Path.Combine(root, "MyMeyer.sln");
+        await G("init", "-b", "master");
+        await G("config", "user.email", "cultivate-test@localhost");
+        await G("config", "user.name", "Cultivate isolated tests");
+        File.WriteAllText(solution, "committed solution");
+        await G("add", ".");
+        await G("commit", "-qm", "solution fixture");
+        await G("branch", "feature/local");
+        await G("checkout", "-qb", "no-solution");
+        await G("rm", "MyMeyer.sln");
+        await G("commit", "-qm", "missing solution fixture");
+        await G("checkout", "master");
+        File.WriteAllText(solution, "unsaved deployment edits");
+        var targets = await git.Targets();
+        var worktree = targets.Single(x => x.Worktree is not null);
+        var branch = targets.Single(x => x.Branch == "feature/local");
+        try
+        {
+            Check(await git.Solution(worktree) == solution, "opening a worktree resolves its own solution, including paths with spaces");
+            Check(await git.Solution(targets.Single(x => x.Branch == "master" && x.Worktree is null)) == solution,
+                "opening a checked-out local branch reuses its worktree");
+            var opened = await git.Solution(branch);
+            Check(opened != solution && File.ReadAllText(opened) == "committed solution",
+                "opening a local branch without a checkout creates its own solution worktree");
+            var openedRoot = Path.GetDirectoryName(opened)!;
+            Check(await git.Git(openedRoot, "symbolic-ref", "HEAD") == branch.Ref,
+                "the new worktree checks out the selected local branch, not a detached snapshot");
+            File.WriteAllText(opened, "branch work in progress");
+            Check(await git.Solution(branch) == opened && File.ReadAllText(opened) == "branch work in progress",
+                "reopening a branch reuses its checkout and preserves edits");
+            Check(await git.Git(root, "branch", "--show-current") == "master" && File.ReadAllText(solution) == "unsaved deployment edits",
+                "opening another branch preserves the current branch and dirty files");
+            Check((await git.Targets()).Any(x => x.Worktree == openedRoot && x.Ref == branch.Ref),
+                "the opened branch remains available as a normal worktree");
+            var before = await git.Git(root, "worktree", "list", "--porcelain");
+            await Reject(() => git.Solution(targets.Single(x => x.Branch == "no-solution")),
+                "a branch without a solution is rejected before creating a worktree");
+            await Reject(() => git.Solution(new("origin/master", null, "refs/remotes/origin/master", true)),
+                "opening a solution rejects remote branches");
+            File.Delete(solution);
+            await Reject(() => git.Solution(worktree), "a missing worktree solution reports an error");
+            Check(await git.Git(root, "worktree", "list", "--porcelain") == before,
+                "failed solution selections leave the worktree list unchanged");
+        }
+        finally
+        {
+            foreach (var target in (await git.Targets()).Where(x => x.Worktree is not null && x.Worktree != root))
+                await G("worktree", "remove", "--force", target.Worktree!);
+        }
+    }
+
     private static void CheckUpdater(string home)
     {
         Check(Updater.Parse("1.2.3+abc1234") == new Version(1, 2, 3) && Updater.Parse("v1.10") == new Version(1, 10, 0) &&
@@ -545,9 +603,26 @@ internal static class SelfTest
         }
         static string Render(VersionPicker model, int width, int height) => Capture(model.Render(width, height), width, height);
         Check(Render(picker, 100, 30).Contains("LIVE  agent-017"), "picker marks the actual deployed source");
+        picker = new VersionPicker(targets, openSolution: true);
+        Key(ConsoleKey.Tab);
+        Check(picker.Kind == VersionKind.Local && picker.Matches.All(x => !x.Remote),
+            "the solution picker offers local branches");
+        Type("ticket-017");
+        Key(ConsoleKey.Tab);
+        Check(picker.Kind == VersionKind.Worktrees && picker.Selected == targets[17] && picker.Query == "ticket-017",
+            "the solution picker skips remote branches while retaining its search");
+        Key(ConsoleKey.Tab, ConsoleModifiers.Shift);
+        Check(picker.Kind == VersionKind.Local, "the solution picker wraps backward between local sources");
+        var solutionScreen = Render(picker, 100, 30);
+        Check(solutionScreen.Contains("OPEN SOLUTION") && solutionScreen.Contains("Enter opens the solution") &&
+            !solutionScreen.Contains("REMOTE") && !solutionScreen.Contains("preview"),
+            "the solution picker shows opening instructions instead of deployment instructions");
         foreach (var width in new[] { 60, 80, 120 })
             foreach (var height in new[] { 24, 35 })
             {
+                var openScreen = Render(new VersionPicker(targets, openSolution: true), width, height).Split('\n');
+                Check(openScreen.Length <= height && openScreen.All(line => line.Length <= width) && openScreen.Any(line => line.Contains("Esc")),
+                    $"the solution picker keeps navigation visible at {width}x{height}");
                 picker = new VersionPicker(targets);
                 var screen = Render(picker, width, height);
                 var lines = screen.Split('\n');
@@ -613,6 +688,7 @@ internal static class SelfTest
             "Escape clears an action search without closing the app");
         Check(Terminal.HomeActions.Concat(Terminal.PreviewActions(true)).All(action => !string.IsNullOrWhiteSpace(action.Description)),
             "every home and preview action has contextual help");
+        Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");
 
