@@ -11,9 +11,9 @@ jobs:
     # Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack are needed by the self-test fixtures.
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
 
@@ -33,7 +33,7 @@ jobs:
           & "$env:RUNNER_TEMP\cultivate\Cultivate.exe" --version
           & "$env:RUNNER_TEMP\cultivate\Cultivate.exe" self-test
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cultivate-win-x64
           path: artifacts/*.zip

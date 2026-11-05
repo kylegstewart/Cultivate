@@ -393,7 +393,9 @@ internal static class SelfTest
             using var output = new StringWriter();
             var console = AnsiConsole.Create(new AnsiConsoleSettings
             {
-                Ansi = AnsiSupport.No, Interactive = InteractionSupport.No, Out = new AnsiConsoleOutput(output)
+                Ansi = AnsiSupport.No, Interactive = InteractionSupport.No, Out = new AnsiConsoleOutput(output),
+                // CI enrichers (e.g. GITHUB_ACTIONS) would otherwise re-enable ANSI and change measured widths.
+                Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
             });
             console.Profile.Width = width;
             console.Profile.Height = height;
@@ -460,7 +462,7 @@ internal static class SelfTest
             var console = AnsiConsole.Create(new AnsiConsoleSettings
             {
                 Ansi = AnsiSupport.Yes, Interactive = InteractionSupport.Yes, ColorSystem = ColorSystemSupport.TrueColor,
-                Out = new AnsiConsoleOutput(output)
+                Out = new AnsiConsoleOutput(output), Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
             });
             console.Profile.Width = 100;
             console.Profile.Height = 30;
