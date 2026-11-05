@@ -134,16 +134,17 @@ internal sealed class Settings
     }
 
     public static Task<string?> FindMSBuild() =>
-        FindVisualStudioFile("Microsoft.Component.MSBuild", @"MSBuild\**\Bin\MSBuild.exe");
+        FindVisualStudioFile(@"MSBuild\**\Bin\MSBuild.exe", "-latest", "-products", "*", "-requires", "Microsoft.Component.MSBuild");
 
+    // Search IDE products so a newer SSMS or Build Tools installation cannot hide Visual Studio.
     public static Task<string?> FindVisualStudio() =>
-        FindVisualStudioFile("Microsoft.VisualStudio.Component.CoreEditor", @"Common7\IDE\devenv.exe");
+        FindVisualStudioFile(@"Common7\IDE\devenv.exe", "-sort", "-prerelease");
 
-    private static async Task<string?> FindVisualStudioFile(string component, string pattern)
+    private static async Task<string?> FindVisualStudioFile(string pattern, params string[] arguments)
     {
         var vswhere = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio", "Installer", "vswhere.exe");
         if (!File.Exists(vswhere)) return null;
-        var result = await Commands.Run(vswhere, ["-latest", "-products", "*", "-requires", component, "-find", pattern]);
+        var result = await Commands.Run(vswhere, arguments.Concat(["-utf8", "-find", pattern]));
         return result.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).FirstOrDefault(File.Exists);
     }
 

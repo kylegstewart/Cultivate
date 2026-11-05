@@ -32,6 +32,7 @@ internal static class SelfTest
         try
         {
             CheckTerminal();
+            await CheckVisualStudio();
             await CheckSolutions(home);
             CheckUpdater(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
@@ -403,6 +404,20 @@ internal static class SelfTest
                 File.SetAttributes(file, FileAttributes.Normal);
             Directory.Delete(home, recursive: true);
         }
+    }
+
+    private static async Task CheckVisualStudio()
+    {
+        var vswhere = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "Microsoft Visual Studio", "Installer", "vswhere.exe");
+        if (!File.Exists(vswhere)) return;
+        // Check product metadata independently of file discovery to catch non-IDE products masking Visual Studio.
+        var products = await Commands.Run(vswhere, ["-prerelease", "-utf8", "-property", "productPath"]);
+        var installed = products.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(path => path.Trim())
+            .Where(path => Files.Comparer.Equals(Path.GetFileName(path), "devenv.exe") && File.Exists(path)).ToList();
+        var found = await Settings.FindVisualStudio();
+        Check(installed.Count == 0 ? found is null : found is not null && installed.Contains(found, Files.Comparer),
+            "Visual Studio discovery matches installed IDEs even with newer non-IDE products, or returns none on Build Tools-only machines");
     }
 
     private static async Task CheckSolutions(string home)
