@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.4 — 2026-11-05
+
 - **Deployment summary.** After an activation completes, Cultivate lists every webfarm file it updated and how:
   built and copied, synced, deleted, or restored to its original.
 - In the deployment preview, a project with several changed files shows its build once; later rows say
