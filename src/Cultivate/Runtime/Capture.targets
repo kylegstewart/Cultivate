@@ -1,0 +1,17 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <_CultivateCaptureReady>true</_CultivateCaptureReady>
+  </PropertyGroup>
+  <Target Name="CultivateCaptureArtifacts" AfterTargets="CopyBuildOutputToWebfarm"
+          Condition="'$(CultivateRunDirectory)' != ''">
+    <MakeDir Directories="$(CultivateRunDirectory)\manifests" />
+    <ItemGroup>
+      <_CultivateProjectArtifact Include="$(TargetPath)" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_CultivateProjectArtifact)"
+          DestinationFiles="@(_CultivateProjectArtifact->'$(CultivateRunDirectory)\captured\$(MSBuildProjectName)\%(Filename)%(Extension)')" />
+    <WriteLinesToFile File="$(CultivateRunDirectory)\manifests\$(MSBuildProjectName).artifacts"
+                      Lines="@(_CultivateProjectArtifact->'$(CultivateRunDirectory)\captured\$(MSBuildProjectName)\%(Filename)%(Extension)')"
+                      Overwrite="true" Encoding="UTF-8" />
+  </Target>
+</Project>

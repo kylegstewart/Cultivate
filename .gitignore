@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+artifacts/
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+*.suo
+.idea/
+Thumbs.db
+desktop.ini
+
+# Local runtime data never belongs in the repo
+settings.json
+installation.json
+Logs/
+Runs/
+Requests/
+Workers/

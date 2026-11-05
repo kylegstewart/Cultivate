@@ -1,0 +1,172 @@
+using Spectre.Console;
+using Spectre.Console.Rendering;
+
+namespace Cultivate;
+
+internal enum VersionKind { Worktrees, Local, Remote }
+
+internal sealed class VersionPicker
+{
+    private readonly Target[] targets;
+    private readonly DeploymentState? active;
+    internal VersionKind Kind { get; private set; }
+    internal string Query { get; private set; } = "";
+    internal IReadOnlyList<Target> Matches { get; private set; } = [];
+    internal int Index { get; private set; }
+    internal Target? Selected => Matches.Count == 0 ? null : Matches[Index];
+
+    internal VersionPicker(IEnumerable<Target> targets, DeploymentState? active = null)
+    {
+        this.targets = targets.OrderBy(x => x.Branch, Files.Comparer).ThenBy(x => x.Worktree, Files.Comparer).ToArray();
+        this.active = active;
+        Kind = this.targets.Any(x => x.Worktree is not null) ? VersionKind.Worktrees :
+            this.targets.Any(x => !x.Remote) ? VersionKind.Local : VersionKind.Remote;
+        Filter();
+        var live = Matches.ToList().FindIndex(IsActive);
+        if (live >= 0) Index = live;
+    }
+
+    internal static int PageSize(int height) => Math.Clamp(height - 18, 3, 18);
+
+    internal void HandleKey(ConsoleKeyInfo key, int pageSize)
+    {
+        var last = Math.Max(0, Matches.Count - 1);
+        switch (key.Key)
+        {
+            case ConsoleKey.Tab:
+                ChangeKind(key.Modifiers.HasFlag(ConsoleModifiers.Shift) ? -1 : 1);
+                break;
+            case ConsoleKey.LeftArrow: ChangeKind(-1); break;
+            case ConsoleKey.RightArrow: ChangeKind(1); break;
+            case ConsoleKey.UpArrow: Index = Index == 0 ? last : Index - 1; break;
+            case ConsoleKey.DownArrow: Index = Index == last ? 0 : Index + 1; break;
+            case ConsoleKey.PageUp: Index = Math.Max(0, Index - pageSize); break;
+            case ConsoleKey.PageDown: Index = Math.Min(last, Index + pageSize); break;
+            case ConsoleKey.Home: Index = 0; break;
+            case ConsoleKey.End: Index = last; break;
+            case ConsoleKey.Backspace:
+                if (Query.Length != 0) { Query = Query[..^1]; Filter(); }
+                break;
+            case ConsoleKey.U when key.Modifiers.HasFlag(ConsoleModifiers.Control):
+                Query = "";
+                Filter();
+                break;
+            default:
+                if (!char.IsControl(key.KeyChar) && !key.Modifiers.HasFlag(ConsoleModifiers.Control) &&
+                    !key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+                {
+                    Query += key.KeyChar;
+                    Filter();
+                }
+                break;
+        }
+    }
+
+    private void ChangeKind(int direction)
+    {
+        Kind = (VersionKind)(((int)Kind + direction + 3) % 3);
+        Filter();
+    }
+
+    private static VersionKind KindOf(Target target) => target.Worktree is not null ? VersionKind.Worktrees :
+        target.Remote ? VersionKind.Remote : VersionKind.Local;
+
+    private void Filter()
+    {
+        var terms = Query.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        Matches = targets.Where(x => KindOf(x) == Kind && terms.All(term =>
+            x.Branch.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+            (x.Worktree?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false) ||
+            x.Ref.Contains(term, StringComparison.OrdinalIgnoreCase))).ToArray();
+        Index = 0;
+    }
+
+    private bool IsActive(Target target) => active?.Active == true &&
+        (target.Worktree is not null
+            ? active.SourceRoot.Length != 0 && Files.Comparer.Equals(Files.Full(target.Worktree), Files.Full(active.SourceRoot))
+            : active.SourceRoot.Length == 0 && target.Ref == active.SourceRef);
+
+    internal IRenderable Render(int width, int height)
+    {
+        var pageSize = PageSize(height);
+        var start = Index / pageSize * pageSize;
+        var end = Math.Min(start + pageSize, Matches.Count);
+        var tabs = string.Join("   ", Enum.GetValues<VersionKind>().Select(kind =>
+        {
+            var label = kind switch { VersionKind.Worktrees => "WORKTREES", VersionKind.Local => "LOCAL", _ => "REMOTE" };
+            var count = targets.Count(x => KindOf(x) == kind);
+            return kind == Kind ? $"[bold {TerminalStyle.Accent} on {TerminalStyle.Surface}] {label} {count} [/]" :
+                $"[{TerminalStyle.Muted}]{label} {count}[/]";
+        }));
+        var description = Kind == VersionKind.Worktrees ? "Saved files, including uncommitted changes." :
+            Kind == VersionKind.Local ? "Committed local branches. Your checkout stays untouched." :
+            "Cached remote branches. No fetch or checkout switch.";
+        var available = Math.Max(16, width - 10);
+        var branchWidth = Math.Max(8, available * 3 / 5);
+        var sourceWidth = Math.Max(8, available - branchWidth);
+        var table = new Table().Border(TableBorder.None).Expand()
+            .AddColumn(new TableColumn("") { Width = 2, NoWrap = true, Padding = new(0, 0, 1, 0) })
+            .AddColumn(new TableColumn($"[{TerminalStyle.Muted}]BRANCH[/]") { Width = branchWidth, NoWrap = true })
+            .AddColumn(new TableColumn($"[{TerminalStyle.Muted}]{(Kind == VersionKind.Worktrees ? "WORKTREE FOLDER" : "SOURCE")}[/]")
+                { Width = sourceWidth, NoWrap = true });
+        for (var row = start; row < start + pageSize; row++)
+        {
+            if (row >= end) { table.AddRow("", "", ""); continue; }
+            var item = Matches[row];
+            var selected = row == Index;
+            var style = selected ? TerminalStyle.Selection : new Style(Color.FromHex(TerminalStyle.Text));
+            var folder = item.Worktree is not null ? Path.GetFileName(Files.Full(item.Worktree)) :
+                item.Remote ? item.Branch.Split('/')[0] + " / committed" : "Local / committed";
+            if (IsActive(item)) folder = "LIVE  " + folder;
+            table.AddRow(TerminalStyle.Line(selected ? ">" : "", style),
+                TerminalStyle.Line(item.Branch, style), TerminalStyle.Line(folder, style));
+        }
+        var selectedTarget = Selected;
+        IRenderable details = selectedTarget is null
+            ? new Markup($"[{TerminalStyle.Muted}]No matches in this source. Change tabs or press Ctrl+U to clear the search.[/]")
+            : new Rows(
+                TerminalStyle.Line(selectedTarget.Branch, new Style(Color.FromHex(TerminalStyle.Accent), decoration: Decoration.Bold)),
+                TerminalStyle.Line(selectedTarget.Worktree is not null ? DisplayPath(selectedTarget.Worktree) : selectedTarget.Ref));
+        return new Rows(
+            TerminalStyle.Header("VERSION LIBRARY", "Find your version. Preview before you deploy."),
+            new Text(""),
+            new Markup(tabs),
+            new Markup($"[{TerminalStyle.Muted}]{description}[/]"),
+            TerminalStyle.Line(Query.Length == 0 ? "/  Type a branch name or any part of a path..." : "/  " + Query,
+                new Style(Color.FromHex(Query.Length == 0 ? TerminalStyle.Muted : TerminalStyle.Accent))),
+            new Text(""),
+            table,
+            new Markup($"[{TerminalStyle.Muted}]{(Matches.Count == 0 ? "0 matches" : $"{start + 1}-{end} of {Matches.Count}")}   |   Enter opens a preview, not a deployment.[/]"),
+            TerminalStyle.Card(details, "SELECTED SOURCE"),
+            new Markup($"[{TerminalStyle.Gold}]Tab[/] source   [{TerminalStyle.Gold}]arrows[/] move   [{TerminalStyle.Gold}]Enter[/] preview   [{TerminalStyle.Gold}]Esc[/] back"),
+            new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
+    }
+
+    private static string DisplayPath(string path)
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\') + "\\";
+        return path.StartsWith(home, StringComparison.OrdinalIgnoreCase) ? "~\\" + path[home.Length..] : path;
+    }
+
+    internal Target? Show() => Show(AnsiConsole.Console, () => Console.ReadKey(true));
+
+    internal Target? Show(IAnsiConsole console, Func<ConsoleKeyInfo> readKey)
+    {
+        console.Clear();
+        return console.Live(Render(console.Profile.Width, console.Profile.Height))
+            .AutoClear(true).Overflow(VerticalOverflow.Crop).Cropping(VerticalOverflowCropping.Bottom)
+            .Start(context =>
+            {
+                context.Refresh();
+                while (true)
+                {
+                    var key = readKey();
+                    if (key.Key == ConsoleKey.Escape) return null;
+                    if (key.Key == ConsoleKey.Enter && Selected is not null) return Selected;
+                    HandleKey(key, PageSize(console.Profile.Height));
+                    context.UpdateTarget(Render(console.Profile.Width, console.Profile.Height));
+                    context.Refresh();
+                }
+            });
+    }
+}

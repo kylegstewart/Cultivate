@@ -1,0 +1,381 @@
+#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$script:Mappings = @{}
+$script:FrontendExtensions = @('.ascx', '.aspx', '.css', '.js', '.html', '.htm')
+
+function Get-LocalWorkspaceSettings {
+    $path = Join-Path $PSScriptRoot 'settings.json'
+    if (-not (Test-Path -LiteralPath $path)) { throw "Run Install-WebfarmWorkspace.ps1 before using this tool." }
+    Get-Content -LiteralPath $path -Encoding UTF8 -Raw | ConvertFrom-Json
+}
+
+function Get-WebfarmRepositoryRoot([string]$ProjectDirectory) {
+    Get-WorkspacePath (Invoke-WorkspaceGit $ProjectDirectory @('rev-parse', '--show-toplevel'))
+}
+
+function Get-WorkspacePath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path) -or
+        [IO.Path]::GetPathRoot($Path).EndsWith(':')) {
+        throw "An absolute path is required: '$Path'."
+    }
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($fullPath -eq [IO.Path]::GetPathRoot($fullPath).TrimEnd('\')) { throw 'Choose a directory below the drive/share root.' }
+    $fullPath
+}
+
+function Get-WorkspaceContext {
+    param([string]$WebfarmRoot, [string]$StateRoot = "$env:LOCALAPPDATA\Meyer\WebfarmWorkspace")
+    $root = Get-WorkspacePath $WebfarmRoot
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToUpperInvariant()))).Replace('-', '') }
+    finally { $sha.Dispose() }
+    $directory = Join-Path (Get-WorkspacePath $StateRoot) $key
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    [pscustomobject]@{ Root = $root; Directory = $directory; StateFile = Join-Path $directory 'workspace.json' }
+}
+
+function Invoke-WorkspaceLock($Context, [scriptblock]$Action) {
+    $lockPath = Join-Path $Context.Directory 'workspace.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $stream = $null
+    while ($null -eq $stream) {
+        try { $stream = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "Workspace is busy. Retry after the current copy or switch completes." }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    try { & $Action } finally { $stream.Dispose() }
+}
+
+function Read-WorkspaceState($Context) {
+    if (Test-Path -LiteralPath $Context.StateFile) {
+        $state = Get-Content -LiteralPath $Context.StateFile -Encoding UTF8 -Raw | ConvertFrom-Json
+        if ($state.Version -ne 1 -or $state.WebfarmRoot -ne $Context.Root) { throw 'Invalid workspace state. Do not delete the deployment backups.' }
+        return $state
+    }
+}
+
+function Save-WorkspaceState($Context, $State) {
+    $temporary = "$($Context.StateFile).tmp"
+    [IO.File]::WriteAllText($temporary, ($State | ConvertTo-Json -Depth 8))
+    if (Test-Path -LiteralPath $Context.StateFile) { [IO.File]::Replace($temporary, $Context.StateFile, [System.Management.Automation.Language.NullString]::Value) }
+    else { [IO.File]::Move($temporary, $Context.StateFile) }
+}
+
+function Invoke-WorkspaceGit([string]$Root, [string[]]$Arguments) {
+    $allArguments = @('-c', 'core.quotepath=false', '-C', (Get-WorkspacePath $Root)) + $Arguments
+    $quoted = @($allArguments | ForEach-Object {
+        $escaped = [regex]::Replace($_, '(\\*)"', '$1$1\"')
+        '"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"'
+    })
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'git.exe'
+    $startInfo.Arguments = $quoted -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try {
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $result = $process.StandardOutput.ReadToEnd()
+        $process.WaitForExit()
+        $errorText = $errorTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw "git $($Arguments -join ' ') failed: $errorText" }
+        if ($errorText) { Write-Warning $errorText.Trim() }
+        $result.TrimEnd("`r", "`n")
+    } finally { $process.Dispose() }
+}
+
+function Get-WorkspaceBranch([string]$Root) {
+    $branch = Invoke-WorkspaceGit $Root @('branch', '--show-current')
+    if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq 'master') {
+        throw 'Select a non-master branch (detached worktrees cannot publish).'
+    }
+    $branch
+}
+
+function Get-WebfarmWorktrees([string]$RepositoryRoot) {
+    $listing = Invoke-WorkspaceGit $RepositoryRoot @('worktree', 'list', '--porcelain', '-z')
+    foreach ($block in $listing -split "`0`0") {
+        $path = $null
+        $branch = '(detached)'
+        foreach ($line in $block -split "`0") {
+            if ($line.StartsWith('worktree ')) { $path = $line.Substring(9).Replace('/', '\') }
+            if ($line.StartsWith('branch refs/heads/')) { $branch = $line.Substring(18) }
+        }
+        if ($path -and (Test-Path -LiteralPath $path -PathType Container)) {
+            [pscustomobject]@{ Path = $path; Branch = $branch; Display = "$branch  |  $path" }
+        }
+    }
+}
+
+function Get-WorkspaceFrontendFiles([string]$Root) {
+    $base = Invoke-WorkspaceGit $Root @('merge-base', 'HEAD', 'master')
+    $tracked = Invoke-WorkspaceGit $Root @('diff', '--name-only', '--no-renames', '-z', $base, '--')
+    $untracked = Invoke-WorkspaceGit $Root @('ls-files', '--others', '--exclude-standard', '-z')
+    @((($tracked + "`0" + $untracked) -split "`0") | Where-Object {
+        $_ -and $_ -notmatch '(^|/)(bin|obj|packages|\.git|Backup)/' -and
+        $script:FrontendExtensions -contains [IO.Path]::GetExtension($_)
+    } | Sort-Object -Unique | ForEach-Object {
+        $path = Join-Path $Root $_.Replace('/', '\')
+        $path
+    })
+}
+
+function Assert-WorkspaceChildPath([string]$Path, [string]$Root) {
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not $fullPath.StartsWith($Root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path escapes its workspace: '$Path'."
+    }
+    $current = $fullPath
+    while ($current.Length -ge $Root.Length) {
+        if ((Test-Path -LiteralPath $current) -and
+            ((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Linked files/directories cannot be deployed: '$current'."
+        }
+        $current = [IO.Path]::GetDirectoryName($current)
+    }
+    $fullPath
+}
+
+function Get-WorkspaceHash([string]$Path) {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
+    return $null
+}
+
+function Get-WorkspaceFileMapping([string]$FileName) {
+    if ($script:Mappings.ContainsKey($FileName)) { return $script:Mappings[$FileName] }
+    $assemblyPath = (Get-LocalWorkspaceSettings).DependencyAssembly
+    if (-not (Test-Path -LiteralPath $assemblyPath)) { throw "Missing mapping dependency '$assemblyPath'. Update settings.json or restore your normal checkout's dependencies." }
+    [Reflection.Assembly]::LoadFrom([IO.Path]::GetFullPath($assemblyPath)) | Out-Null
+    $connection = New-Object Data.SqlClient.SqlConnection ([Meyer.Objects.DataBase.Connection]::MeyerLogicAoConnectionString)
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandText = 'SELECT FilePath FROM MEYER..MY_CodeRelease_WebfarmFiles WITH (NOLOCK) WHERE FileName = @FileName'
+            $command.Parameters.Add('@FileName', [Data.SqlDbType]::VarChar, 260).Value = $FileName
+            $reader = $command.ExecuteReader()
+            try {
+                $folders = @()
+                while ($reader.Read()) { if (-not $reader.IsDBNull(0)) { $folders += $reader.GetString(0) } }
+            } finally { $reader.Dispose() }
+            $folders = @($folders | Sort-Object -Unique)
+            if ($folders.Count -gt 1) { throw "Ambiguous Code Release Manager mapping for '$FileName'." }
+            $folder = $null
+            if ($folders.Count -eq 1) { $folder = $folders[0] }
+            else { Write-Warning "No Code Release Manager mapping for '$FileName'; not deployed." }
+            $script:Mappings[$FileName] = $folder
+            $folder
+        } finally { $command.Dispose() }
+    } finally { $connection.Dispose() }
+}
+
+function Copy-WorkspaceFile($Context, $State, [string]$Source, [string]$RelativePath, [switch]$Delete) {
+    $sourcePath = Assert-WorkspaceChildPath $Source $State.WorkspaceRoot
+    if ([IO.Path]::IsPathRooted($RelativePath)) { throw "A deployment mapping must be relative: '$RelativePath'." }
+    $destination = Assert-WorkspaceChildPath (Join-Path $Context.Root $RelativePath) $Context.Root
+    $relative = $destination.Substring($Context.Root.Length + 1)
+    $entry = @($State.Files | Where-Object { $_.RelativePath -eq $relative })
+    if ($entry.Count -gt 1) { throw "Duplicate deployment journal entry: '$relative'." }
+    $snapshot = Join-Path $Context.Directory ([Guid]::NewGuid().ToString('N') + '.upload')
+    try {
+        $sourceHash = $null
+        if (-not $Delete) {
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Build or source file is missing: '$sourcePath'." }
+            [IO.File]::Copy($sourcePath, $snapshot)
+            $sourceHash = Get-WorkspaceHash $snapshot
+        }
+        $destinationHash = Get-WorkspaceHash $destination
+        if ($entry.Count -eq 1) {
+            $entry = $entry[0]
+            if ($destinationHash -ne $entry.DeployedHash -and $destinationHash -ne $entry.OriginalHash) {
+                throw "Webfarm file changed outside this tool: '$destination'. Resolve it before copying or restoring."
+            }
+            if ($entry.Source -ne $sourcePath) { throw "Multiple source files map to '$destination'." }
+            if ($sourceHash -eq $destinationHash) { return }
+        } else {
+            $backup = [Guid]::NewGuid().ToString('N') + '.backup'
+            if ($destinationHash) { [IO.File]::Copy($destination, (Join-Path $Context.Directory $backup)) }
+            $entry = [pscustomobject]@{
+                RelativePath = $relative; Backup = $backup; OriginalHash = $destinationHash
+                DeployedHash = $null; Source = $sourcePath
+            }
+            $State.Files = @($State.Files) + $entry
+        }
+        $entry.DeployedHash = $sourceHash
+        Save-WorkspaceState $Context $State
+        if ($sourceHash -eq $destinationHash) { return }
+        if ($Delete) { [IO.File]::Delete($destination) }
+        else {
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
+            [IO.File]::Copy($snapshot, $destination, $true)
+        }
+        if ((Get-WorkspaceHash $destination) -ne $sourceHash) { throw "Copy verification failed: '$destination'." }
+        if ($Delete) { Write-Host "[DELETED] $destination" }
+        else { Write-Host "[OK] $sourcePath -> $destination" }
+    } finally {
+        if (Test-Path -LiteralPath $snapshot) { [IO.File]::Delete($snapshot) }
+    }
+}
+
+function Restore-WorkspaceFiles($Context, $State, $Entries = $State.Files) {
+    foreach ($entry in $Entries) {
+        $destination = Assert-WorkspaceChildPath (Join-Path $Context.Root $entry.RelativePath) $Context.Root
+        $hash = Get-WorkspaceHash $destination
+        if ($hash -ne $entry.DeployedHash -and $hash -ne $entry.OriginalHash) {
+            throw "Cannot restore externally changed file '$destination'. Backups are retained in '$($Context.Directory)'."
+        }
+        if ($entry.OriginalHash -and
+            (Get-WorkspaceHash (Join-Path $Context.Directory $entry.Backup)) -ne $entry.OriginalHash) {
+            throw "Missing or damaged backup for '$destination'."
+        }
+    }
+    foreach ($entry in @($Entries)) {
+        $destination = Join-Path $Context.Root $entry.RelativePath
+        $backupPath = Join-Path $Context.Directory $entry.Backup
+        if ($entry.OriginalHash) { [IO.File]::Copy($backupPath, $destination, $true) }
+        elseif (Test-Path -LiteralPath $destination) { [IO.File]::Delete($destination) }
+        if ((Get-WorkspaceHash $destination) -ne $entry.OriginalHash) { throw "Restore verification failed: '$destination'." }
+        $State.Files = @($State.Files | Where-Object { $_.RelativePath -ne $entry.RelativePath })
+        Save-WorkspaceState $Context $State
+        if (Test-Path -LiteralPath $backupPath) { [IO.File]::Delete($backupPath) }
+        Write-Host "[RESTORED] $destination"
+    }
+}
+
+function Sync-WorkspaceFrontend($Context, $State) {
+    $files = @(Get-WorkspaceFrontendFiles $State.WorkspaceRoot)
+    $destinations = @{}
+    foreach ($file in $files) {
+        $folder = Get-WorkspaceFileMapping ([IO.Path]::GetFileName($file))
+        if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+        $relative = Join-Path $folder ([IO.Path]::GetFileName($file))
+        if ($destinations.ContainsKey($relative)) { throw "Multiple frontend sources map to '$relative'." }
+        $destinations[$relative] = $file
+    }
+    foreach ($relative in $destinations.Keys) {
+        $source = $destinations[$relative]
+        Copy-WorkspaceFile $Context $State $source $relative -Delete:(-not (Test-Path -LiteralPath $source -PathType Leaf))
+    }
+    # Undo a deployment when its source is deleted or reverts to the branch baseline.
+    $obsolete = @($State.Files | Where-Object {
+        $script:FrontendExtensions -contains [IO.Path]::GetExtension($_.Source) -and
+        $_.Source -notin $files
+    })
+    if ($obsolete.Count) {
+        Restore-WorkspaceFiles $Context $State $obsolete
+    }
+}
+
+function Enable-WebfarmWorkspace($Context, [string]$WorkspaceRoot) {
+    $root = Get-WorkspacePath $WorkspaceRoot
+    if ($root -eq $Context.Root -or $root.StartsWith($Context.Root + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $Context.Root.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The webfarm destination and source worktree cannot overlap.'
+    }
+    $gitRoot = Get-WorkspacePath (Invoke-WorkspaceGit $root @('rev-parse', '--show-toplevel'))
+    if ($root -ne $gitRoot -or -not (Test-Path -LiteralPath (Join-Path $root 'MyMeyer.sln'))) {
+        throw 'Select the root of a MyMeyer worktree.'
+    }
+    $branch = Get-WorkspaceBranch $root
+    if (-not (Test-Path -LiteralPath $Context.Root -PathType Container)) { throw "Webfarm root is unavailable: '$($Context.Root)'." }
+    Invoke-WorkspaceLock $Context {
+        $state = Read-WorkspaceState $Context
+        if ($null -ne $state) {
+            $state.Active = $false
+            $state.Token = [Guid]::NewGuid().ToString('N')
+            Save-WorkspaceState $Context $state
+            Restore-WorkspaceFiles $Context $state
+        }
+        $state = [pscustomobject]@{
+            Version = 1; WebfarmRoot = $Context.Root; WorkspaceRoot = $root; Branch = $branch
+            Token = [Guid]::NewGuid().ToString('N'); Active = $false; Files = @()
+            WatcherPid = 0; Heartbeat = $null; LastError = $null
+        }
+        Save-WorkspaceState $Context $state
+        try {
+            Sync-WorkspaceFrontend $Context $state
+            $state.Active = $true
+            Save-WorkspaceState $Context $state
+        } catch {
+            $state.LastError = $_.Exception.Message
+            Save-WorkspaceState $Context $state
+            Restore-WorkspaceFiles $Context $state
+            throw
+        }
+        Write-Host "[ACTIVE] $branch | $root -> $($Context.Root)"
+        $state
+    }
+}
+
+function Disable-WebfarmWorkspace($Context, [string]$ExpectedToken) {
+    Invoke-WorkspaceLock $Context {
+        $state = Read-WorkspaceState $Context
+        if ($null -eq $state) { return }
+        if ($ExpectedToken -and $state.Token -ne $ExpectedToken) { return }
+        $state.Active = $false
+        $state.Token = [Guid]::NewGuid().ToString('N')
+        Save-WorkspaceState $Context $state
+        Restore-WorkspaceFiles $Context $state
+        Write-Host '[STOPPED] Previous webfarm files restored.'
+    }
+}
+
+function Copy-WebfarmBuild($Context, [string]$WorkspaceRoot, [string]$Source) {
+    Invoke-WorkspaceLock $Context {
+        $state = Read-WorkspaceState $Context
+        if ($null -eq $state -or -not $state.Active -or $state.WorkspaceRoot -ne (Get-WorkspacePath $WorkspaceRoot)) {
+            Write-Host '[SKIP] This worktree is not the active webfarm workspace.'
+            return
+        }
+        try {
+            if ((Get-WorkspaceBranch $state.WorkspaceRoot) -ne $state.Branch) { throw 'The active worktree changed branches. Reactivate it before publishing.' }
+            if ([IO.Path]::GetExtension($Source) -ne '.dll') { throw 'Only the project DLL can be published by the build target.' }
+            Copy-WorkspaceFile $Context $state $Source (Join-Path 'bin' ([IO.Path]::GetFileName($Source)))
+        } catch {
+            $state.Active = $false
+            $state.LastError = $_.Exception.Message
+            Save-WorkspaceState $Context $state
+            throw
+        }
+    }
+}
+
+function Watch-WebfarmWorkspace($Context, [string]$Token) {
+    while ($true) {
+        $continue = Invoke-WorkspaceLock $Context {
+            $state = Read-WorkspaceState $Context
+            if ($null -eq $state -or -not $state.Active -or $state.Token -ne $Token) { return $false }
+            try {
+                if ((Get-WorkspaceBranch $state.WorkspaceRoot) -ne $state.Branch) { throw 'The active worktree changed branches. Reactivate it.' }
+                Sync-WorkspaceFrontend $Context $state
+                $state.WatcherPid = $PID
+                $state.Heartbeat = [DateTime]::UtcNow.ToString('o')
+                $state.LastError = $null
+                Save-WorkspaceState $Context $state
+            } catch [IO.IOException] {
+                $state.LastError = $_.Exception.Message
+                Save-WorkspaceState $Context $state
+                Write-Warning "[RETRY] Frontend sync failed: $($state.LastError)"
+            } catch {
+                $state.Active = $false
+                $state.LastError = $_.Exception.Message
+                Save-WorkspaceState $Context $state
+                throw
+            }
+            return $true
+        }
+        if (-not $continue) { return }
+        Start-Sleep -Seconds 2
+    }
+}
+
+Export-ModuleMember -Function Get-WorkspaceContext, Get-WebfarmWorktrees, Read-WorkspaceState,
+    Enable-WebfarmWorkspace, Disable-WebfarmWorkspace, Copy-WebfarmBuild, Watch-WebfarmWorkspace,
+    Get-LocalWorkspaceSettings, Get-WebfarmRepositoryRoot

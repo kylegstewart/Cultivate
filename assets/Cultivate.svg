@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Cultivate</title>
+  <desc>An original two-leaf seedling above curved crop rows, with a golden sun on a forest-green tile.</desc>
+  <path d="M 124 24 L 388 24 C 443 24 488 69 488 124 L 488 388 C 488 443 443 488 388 488 L 124 488 C 69 488 24 443 24 388 L 24 124 C 24 69 69 24 124 24 Z" fill="#123E32"/>
+  <circle cx="389" cy="106" r="25" fill="#EBC477"/>
+  <path d="M 252 294 C 252 270 251 252 253 222" fill="none" stroke="#C9E9AC" stroke-width="24" stroke-linecap="round"/>
+  <path d="M 251 237 C 184 241 134 198 138 134 C 202 132 253 173 251 237 Z" fill="#82C68B"/>
+  <path d="M 253 225 C 250 155 291 111 359 113 C 362 181 321 225 253 225 Z" fill="#C9E9AC"/>
+  <path d="M 102 334 C 184 286 294 290 410 322" fill="none" stroke="#E8EFD4" stroke-width="21" stroke-linecap="round"/>
+  <path d="M 112 400 C 195 328 304 324 410 352" fill="none" stroke="#A9D58C" stroke-width="21" stroke-linecap="round"/>
+  <path d="M 192 438 C 264 382 340 366 410 388" fill="none" stroke="#78B97D" stroke-width="21" stroke-linecap="round"/>
+  <path d="M 304 438 C 342 414 378 408 410 420" fill="none" stroke="#EBC477" stroke-width="21" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,566 @@
+using System.IO.Compression;
+using Spectre.Console;
+
+namespace Cultivate;
+
+internal static class SelfTest
+{
+    private static int assertions;
+    private static void Check(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException("TEST FAILED: " + message);
+        assertions++;
+        Console.WriteLine("PASS " + message);
+    }
+
+    private static async Task Reject(Func<Task> action, string message)
+    {
+        try { await action(); }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException)
+        {
+            Check(true, message);
+            return;
+        }
+        throw new InvalidOperationException("TEST FAILED (expected rejection): " + message);
+    }
+
+    public static async Task<int> Run()
+    {
+        var home = Path.Combine(Files.Home, "Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(home);
+        Bridge? cleanupBridge = null;
+        try
+        {
+            CheckTerminal();
+            var settings = await Settings.Load();
+            settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
+            settings.WebfarmRoot = Path.Combine(home, "farm");
+            settings.StateRoot = Path.Combine(home, "state");
+            Directory.CreateDirectory(settings.RepositoryRoot);
+            Directory.CreateDirectory(settings.WebfarmRoot);
+            var git = new GitRepository(settings);
+            var bridge = new Bridge(settings);
+            cleanupBridge = bridge;
+            var planner = new Planner(settings, git, bridge);
+            var pipeline = new Pipeline(settings, git, bridge);
+            async Task G(params string[] args) => _ = await git.Git(settings.RepositoryRoot, args);
+            void Save(string relative, string content)
+            {
+                var path = Files.Child(settings.RepositoryRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, content);
+            }
+            await G("init", "-b", "master");
+            await G("config", "user.email", "cultivate-test@localhost");
+            await G("config", "user.name", "Cultivate isolated tests");
+            Save(".gitignore", "bin/\nobj/\npackages/\n.cultivate-artifacts/\n");
+            Save("MyMeyer.sln", "");
+            var packageId = "Cultivate.RestoreFixture." + Guid.NewGuid().ToString("N");
+            var packageName = packageId + ".1.0.0";
+            var feed = Path.Combine(home, "feed");
+            Directory.CreateDirectory(feed);
+            using (var package = ZipFile.Open(Path.Combine(feed, packageName + ".nupkg"), ZipArchiveMode.Create))
+            {
+                void Entry(string name, string content)
+                {
+                    using var writer = new StreamWriter(package.CreateEntry(name).Open());
+                    writer.Write(content);
+                }
+                Entry(packageId + ".nuspec", $$"""
+                    <?xml version="1.0"?>
+                    <package><metadata><id>{{packageId}}</id><version>1.0.0</version>
+                      <authors>Cultivate tests</authors><description>Offline restore fixture</description>
+                    </metadata></package>
+                    """);
+                Entry("build/Cultivate.RestoreFixture.props", """
+                    <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+                      <PropertyGroup><CultivateRestoreFixtureImported>true</CultivateRestoreFixtureImported></PropertyGroup>
+                    </Project>
+                    """);
+            }
+            Save("NuGet.Config", $$"""
+                <configuration><packageSources><clear />
+                  <add key="fixture" value="{{System.Security.SecurityElement.Escape(feed)}}" />
+                </packageSources></configuration>
+                """);
+            Save(@"Core\packages.config", $$"""
+                <packages><package id="{{packageId}}" version="1.0.0" targetFramework="net471" /></packages>
+                """);
+            var coreProject = Project("Core", restorePackage: packageName);
+            Save(@"Core\Core.csproj", coreProject);
+            Save(@"Core\Value.cs", "public class CoreValue { public static int Value => 1; }");
+            Save(@"Page\Page.csproj", Project("Page", "Core"));
+            Save(@"Page\Value.cs", "public class PageValue { public static int Value => CoreValue.Value; }");
+            Save(@"Consumer\Consumer.csproj", Project("Consumer", "Page"));
+            Save(@"Consumer\Value.cs", "public class ConsumerValue { public static int Value => PageValue.Value; }");
+            foreach (var name in new[] { "Core", "Page", "Consumer" })
+                Save(name + @"\App.config", "<configuration />");
+            Save(@"Page\View.ascx", "original markup");
+
+            var baseline = new Plan
+            {
+                Target = new("baseline fixture", settings.RepositoryRoot, "refs/heads/master"),
+                Commit = "", Fingerprint = "",
+                Projects = new[] { "Core", "Page", "Consumer" }
+                    .Select(name => ProjectInfo.Read(settings.RepositoryRoot, name + @"\" + name + ".csproj")).ToList()
+            };
+            var setup = Path.Combine(home, "baseline-build");
+            Directory.CreateDirectory(setup);
+            var baselineFiles = await pipeline.Build(baseline, settings.RepositoryRoot, setup, _ => { });
+            foreach (var file in baselineFiles)
+            {
+                var destination = Files.Child(settings.WebfarmRoot, file.RelativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file.Source, destination);
+            }
+            var originalHashes = baselineFiles.ToDictionary(file => file.RelativePath, file => Files.Hash(file.Source), Files.Comparer);
+            var sibling = Path.Combine(home, "external-core", "bin");
+            var sdkSnapshot = Path.Combine(home, "new-sdk", "source");
+            var sdkRun = Path.Combine(home, "new-sdk", "build");
+            Directory.CreateDirectory(Path.Combine(sdkSnapshot, "Core"));
+            Directory.CreateDirectory(sdkRun);
+            File.WriteAllText(Path.Combine(sdkSnapshot, "MyMeyer.sln"), "");
+            File.WriteAllText(Path.Combine(sdkSnapshot, @"Core\Core.csproj"), Project("Core"));
+            File.WriteAllText(Path.Combine(sdkSnapshot, @"Core\App.config"), "<configuration />");
+            File.WriteAllText(Path.Combine(sdkSnapshot, @"Core\Value.cs"),
+                "public class CoreValue { public static int Value => 1; public static int NewApi => 2; }");
+            var sdkPlan = new Plan
+            {
+                Target = new("SDK fixture", sdkSnapshot, ""), Commit = "", Fingerprint = "",
+                Projects = [ProjectInfo.Read(sdkSnapshot, @"Core\Core.csproj")]
+            };
+            var newSdk = (await pipeline.Build(sdkPlan, sdkSnapshot, sdkRun, _ => { })).Single();
+            Directory.CreateDirectory(sibling);
+            File.Copy(newSdk.Source, Path.Combine(sibling, "Core.dll"));
+            var relocated = Path.Combine(home, "relocated", "source");
+            var relocatedRun = Path.Combine(home, "relocated", "build");
+            Directory.CreateDirectory(Path.Combine(relocated, "Consumer"));
+            Directory.CreateDirectory(Path.Combine(relocated, "bin"));
+            Directory.CreateDirectory(relocatedRun);
+            File.WriteAllText(Path.Combine(relocated, "MyMeyer.sln"), "");
+            File.Copy(baselineFiles.Single(file => file.RelativePath == @"bin\Core.dll").Source,
+                Path.Combine(relocated, @"bin\Core.dll"));
+            var externalProject = Project("Consumer").Replace("<Reference Include=\"System\" />", """
+                <Reference Include="System" />
+                <Reference Include="Core">
+                  <HintPath>..\..\external-core\bin\Core.dll</HintPath>
+                </Reference>
+                """);
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\Consumer.csproj"), externalProject);
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\App.config"), "<configuration />");
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\Value.cs"),
+                "public class ConsumerValue { public static int Value => CoreValue.NewApi; }");
+            var externalPlan = new Plan
+            {
+                Target = new("relocated fixture", relocated, ""), Commit = "", Fingerprint = "",
+                Projects = [ProjectInfo.Read(relocated, @"Consumer\Consumer.csproj")]
+            };
+            var externalOutputs = await pipeline.Build(externalPlan, relocated, relocatedRun, _ => { });
+            Check(Files.Hash(Path.Combine(relocatedRun, @"references\Core.dll")) == Files.Hash(newSdk.Source),
+                "a relocated worktree uses the declared sibling DLL, not its stale bin cache");
+            Check(externalOutputs.Select(file => file.RelativePath).SequenceEqual([@"bin\Consumer.dll"]) &&
+                Files.Hash(Files.Child(settings.WebfarmRoot, @"bin\Core.dll")) == originalHashes[@"bin\Core.dll"],
+                "external build inputs are never rebuilt or included in the deployment output");
+            Check(File.ReadAllText(Path.Combine(relocated, @"Consumer\Consumer.csproj")) == externalProject &&
+                File.ReadAllText(Path.Combine(relocatedRun, "build.log")).Contains(Path.Combine(sibling, "Core.dll")),
+                "reference resolution preserves project files and records the selected DLL path");
+            Save(@"Core\Core.csproj", coreProject.Replace("<Reference Include=\"System\" />", """
+                <Reference Include="System" />
+                <Reference Include="UnrelatedMissingPackage">
+                  <HintPath>..\packages\UnrelatedMissingPackage.10.0.2\lib\net471\UnrelatedMissingPackage.dll</HintPath>
+                </Reference>
+                """));
+            Save(@"Core\Value.cs", "this unchanged dependency deliberately cannot compile;");
+            await G("add", ".");
+            await G("commit", "-qm", "baseline with existing dependency DLLs");
+            await G("checkout", "-qb", "feature");
+            Save(@"Page\Value.cs", "public class PageValue { public static int Value => CoreValue.Value + 1; }");
+            Save(@"Page\View.ascx", "feature markup");
+            await G("add", ".");
+            await G("commit", "-qm", "page code and markup");
+            await G("branch", "branch-only");
+            var target = new Target("feature", settings.RepositoryRoot, "refs/heads/feature");
+            Task<Dictionary<string, string>> Maps(string _) => Task.FromResult(
+                new Dictionary<string, string>(Files.Comparer) { ["View.ascx"] = "modules" });
+            var targets = await git.Targets();
+            Check(targets.Any(x => x.Branch == "feature" && x.Worktree == settings.RepositoryRoot), "discover saved worktrees");
+            Check(targets.Any(x => x.Branch == "branch-only" && x.Worktree is null), "discover branches without switching a checkout");
+            await Reject(() => Task.Run(() => Files.Child(settings.RepositoryRoot, @"..\escape")), "reject parent path escape");
+            await Reject(() => Task.Run(() => Files.Child(settings.RepositoryRoot, @"C:\escape")), "reject absolute mapping");
+            var plan = await planner.Create(target, Maps);
+            Check(plan.CanDeploy && plan.Projects.Select(x => x.Assembly).SequenceEqual(["Page"]),
+                "changed Page code builds Page only, not its Core dependency or Consumer");
+            Check(plan.Frontend.Single().RelativePath == @"modules\View.ascx", "changed markup has exactly its mapped destination");
+            var noMap = await planner.Create(target, _ => Task.FromResult(new Dictionary<string, string>()));
+            Check(!noMap.CanDeploy, "unmapped frontend blocks an incomplete activation");
+            var branchPlan = await planner.Create(targets.Single(x => x.Branch == "branch-only"), Maps);
+            Check(branchPlan.CanDeploy && branchPlan.Projects.Select(x => x.Assembly).SequenceEqual(["Page"]),
+                "committed branch planning uses only its changed owner");
+            Check(await git.Git(settings.RepositoryRoot, "branch", "--show-current") == "feature", "planning does not switch the checkout");
+            var before = (await git.Inspect(target)).Fingerprint;
+            Save(@"Page\site.css", "body { color: red; }");
+            var dirty = await git.Inspect(target);
+            Check(before != dirty.Fingerprint && dirty.Changes.Any(x => x.Path.EndsWith("site.css")),
+                "nonignored untracked saves participate in change detection");
+            File.Delete(Files.Child(settings.RepositoryRoot, @"Page\site.css"));
+
+            var frontendDestination = Files.Child(settings.WebfarmRoot, @"modules\View.ascx");
+            Directory.CreateDirectory(Path.GetDirectoryName(frontendDestination)!);
+            File.WriteAllText(frontendDestination, "server baseline");
+            var coreDestination = Files.Child(settings.WebfarmRoot, @"bin\Core.dll");
+            var coreTime = File.GetLastWriteTimeUtc(coreDestination);
+            var progress = new List<string>();
+            var state = await pipeline.Activate(plan, progress.Add, watch: false);
+            Check(state.Active && !state.WatchEnabled && state.RuntimeFiles.Select(x => x.RelativePath).SequenceEqual([@"bin\Page.dll"]),
+                "activation publishes exactly the changed project's own DLL");
+            var deployed = (await bridge.Call("Status")).GetProperty("Files").EnumerateArray()
+                .Select(file => file.GetProperty("RelativePath").GetString()).Order().ToList();
+            Check(deployed.SequenceEqual(new[] { @"bin\Page.dll", @"modules\View.ascx" }.Order()),
+                "the complete journaled payload contains exactly one frontend file and one target DLL");
+            Check(progress.Where(x => x.StartsWith("Building ")).SequenceEqual(["Building Page (1/1)"]),
+                "an unchanged dependency with missing packages and invalid source is never built");
+            var run = Path.GetDirectoryName(state.WorkspaceRoot)!;
+            Check(!File.Exists(Path.Combine(run, "restore.log")) && !File.Exists(Path.Combine(run, "Core.binlog")),
+                "unchanged reference projects are not restored or built");
+            Check(File.ReadAllLines(Path.Combine(run, "manifests", "Page.artifacts")).Count(x => !string.IsNullOrWhiteSpace(x)) == 1 &&
+                new FileInfo(Path.Combine(run, "Page.binlog")).Length > 0,
+                "the existing webfarm copy target executes and captures only the project DLL");
+            Check(File.ReadAllText(frontendDestination) == "feature markup", "initial activation automatically synchronizes changed frontend");
+            Check(Files.Hash(coreDestination) == originalHashes[@"bin\Core.dll"] && File.GetLastWriteTimeUtc(coreDestination) == coreTime &&
+                Files.Hash(Files.Child(settings.WebfarmRoot, @"bin\Consumer.dll")) == originalHashes[@"bin\Consumer.dll"],
+                "dependency and consumer DLL contents and timestamps remain untouched");
+            Check((await git.Git(settings.RepositoryRoot, "status", "--porcelain")).Length == 0 && !Directory.Exists(state.WorkspaceRoot),
+                "builds leave the source checkout unchanged and remove their private snapshot");
+
+            var pageDestination = Files.Child(settings.WebfarmRoot, @"bin\Page.dll");
+            var pageHash = Files.Hash(pageDestination);
+            var pageTime = File.GetLastWriteTimeUtc(pageDestination);
+            Save(@"Page\View.ascx", "second saved markup");
+            var markupUpdate = await planner.Create(target, Maps);
+            Check(markupUpdate.BuildFingerprint == plan.BuildFingerprint, "frontend saves preserve the compiled fingerprint");
+            progress.Clear();
+            state = await pipeline.Activate(markupUpdate, progress.Add, watch: false, workerUpdate: true);
+            Check(progress.Any(x => x.StartsWith("Frontend-only update")) && !progress.Any(x => x.StartsWith("Building ")),
+                "frontend-only updates reuse the target-only cache without rebuilding");
+            Check(File.ReadAllText(frontendDestination) == "second saved markup" && File.GetLastWriteTimeUtc(pageDestination) == pageTime,
+                "frontend saves copy without recopying the target DLL");
+            Save(@"Page\Value.cs", "this changed project deliberately cannot compile;");
+            var broken = await planner.Create(target, Maps);
+            await Reject(() => pipeline.Activate(broken, _ => { }, watch: false), "a changed-project compiler failure blocks publication");
+            Check((await bridge.Status())?.Token == state.Token && Files.Hash(pageDestination) == pageHash &&
+                File.ReadAllText(frontendDestination) == "second saved markup", "failed builds preserve the last successful files");
+            Save(@"Page\Value.cs", "public class PageValue { public static int Value => CoreValue.Value + 1; }");
+            File.WriteAllText(frontendDestination, "foreign edit");
+            await Reject(() => bridge.Call("Restore"), "foreign server edits block restoration");
+            Check(File.ReadAllText(frontendDestination) == "foreign edit", "foreign content is not overwritten");
+            File.WriteAllText(frontendDestination, "second saved markup");
+            await bridge.Call("Restore");
+            Check(File.ReadAllText(frontendDestination) == "server baseline" && Files.Hash(pageDestination) == originalHashes[@"bin\Page.dll"],
+                "restore returns original markup and the original target DLL");
+
+            Save(@"Page\View.ascx", "feature markup");
+            await G("checkout", "-qb", "frontend-only", "master");
+            Save(@"Page\View.ascx", "frontend only");
+            var frontendTarget = new Target("frontend-only", settings.RepositoryRoot, "refs/heads/frontend-only");
+            var frontendPlan = await planner.Create(frontendTarget, Maps);
+            Check(frontendPlan.CanDeploy && frontendPlan.Projects.Count == 0, "markup-only selection never schedules compilation");
+            var frontendState = await pipeline.Activate(frontendPlan, _ => { }, watch: false);
+            Check(frontendState.RuntimeFiles.Count == 0 && File.ReadAllText(frontendDestination) == "frontend only" &&
+                Files.Hash(pageDestination) == originalHashes[@"bin\Page.dll"], "markup-only activation builds and copies no DLLs");
+            await bridge.Call("Restore");
+            File.Delete(Files.Child(settings.RepositoryRoot, @"Page\View.ascx"));
+            var deleted = await planner.Create(frontendTarget, Maps);
+            Check(deleted.Frontend.Single().Delete, "frontend deletions are explicitly planned");
+            await pipeline.Activate(deleted, _ => { }, watch: false);
+            Check(!File.Exists(frontendDestination), "frontend deletion is synchronized");
+            await bridge.Call("Restore");
+            Check(File.ReadAllText(frontendDestination) == "server baseline", "deleted frontend can be restored");
+            Save("Unknown.cs", "public class Unknown {}");
+            Check(!(await planner.Create(frontendTarget, Maps)).CanDeploy, "unowned compiled source is not silently ignored");
+            File.Delete(Files.Child(settings.RepositoryRoot, "Unknown.cs"));
+
+            Save(@"Page\View.ascx", "original markup");
+            await G("checkout", "-qb", "worker-code", "master");
+            Save(@"Core\Core.csproj", coreProject);
+            Save(@"Core\Value.cs", "public class CoreValue { public static int Value => 7; }");
+            Directory.Move(Path.Combine(settings.RepositoryRoot, "packages"), Path.Combine(home, "offline-cache"));
+            var workerTarget = new Target("worker-code", settings.RepositoryRoot, "refs/heads/worker-code");
+            var workerPlan = await planner.Create(workerTarget);
+            Check(workerPlan.Projects.Select(x => x.Assembly).SequenceEqual(["Core"]), "a changed Core does not schedule Page or Consumer");
+            var watched = await pipeline.Activate(workerPlan, _ => { }, watch: true);
+            Check(File.ReadAllText(Path.Combine(Path.GetDirectoryName(watched.WorkspaceRoot)!, "restore.log")).Contains(packageId) &&
+                !Directory.Exists(Path.Combine(settings.RepositoryRoot, "packages")),
+                "a changed project's missing packages restore inside its snapshot only");
+            var workerState = await bridge.Status() ?? throw new InvalidDataException("Worker state disappeared.");
+            Check(workerState.WatcherPid > 0 && workerState.WatchEnabled, "built-in saved-file sync reports readiness");
+            using var worker = System.Diagnostics.Process.GetProcessById(workerState.WatcherPid);
+            Save(@"Core\Value.cs", "public class CoreValue { public static int Value => 8; }");
+            var deadline = DateTime.UtcNow.AddSeconds(60);
+            DeploymentState? updated = null;
+            while (DateTime.UtcNow < deadline)
+            {
+                updated = await bridge.Status();
+                if (updated?.Active == true && updated.Token != watched.Token) break;
+                await Task.Delay(500);
+            }
+            Check(updated?.Active == true && updated.Token != watched.Token &&
+                updated.RuntimeFiles.Select(x => x.RelativePath).SequenceEqual([@"bin\Core.dll"]),
+                "saving code automatically rebuilds and publishes only its owning project");
+            Check(Files.Hash(pageDestination) == originalHashes[@"bin\Page.dll"] &&
+                Files.Hash(Files.Child(settings.WebfarmRoot, @"bin\Consumer.dll")) == originalHashes[@"bin\Consumer.dll"],
+                "automatic code saves leave unchanged consumers untouched");
+            await bridge.Call("Restore");
+            await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            Check(worker.HasExited, "restore cooperatively stops the known file-sync worker");
+
+            var a = new ProjectInfo { RelativePath = @"A\A.csproj", Assembly = "A", ProjectReferences = [@"B\B.csproj"], Inputs = [@"A\A.cs"] };
+            var b = new ProjectInfo { RelativePath = @"B\B.csproj", Assembly = "B", ProjectReferences = [@"A\A.csproj"] };
+            Check(Planner.BuildOrder([a, b], [new(@"A\A.cs", false)], []).Select(x => x.Assembly).SequenceEqual(["A"]),
+                "unmodified dependency cycles do not expand or block an owner-only plan");
+            await Reject(() => Task.Run(() => Planner.BuildOrder([a, b], [new(@"A\A.cs", false), new(@"B\B.csproj", false)], [])),
+                "cycles between changed projects are reported");
+            a.ProjectReferences.Clear();
+            var c = new ProjectInfo { RelativePath = @"C\C.csproj", Assembly = "C", AssemblyReferences = ["A"] };
+            Check(Planner.BuildOrder([a, c], [new(@"A\A.cs", false), new(@"C\C.csproj", false)], [])
+                .Select(x => x.Assembly).SequenceEqual(["A", "C"]), "references order only independently changed projects");
+            Console.WriteLine($"\nCultivate: {assertions} assertions passed. Fixtures only; no real webfarm access.");
+            return 0;
+        }
+        finally
+        {
+            if (cleanupBridge is not null && (await cleanupBridge.Status())?.Active == true)
+                await cleanupBridge.Call("Restore");
+            foreach (var file in Directory.EnumerateFiles(home, "*", SearchOption.AllDirectories))
+                File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(home, recursive: true);
+        }
+    }
+
+    private static void CheckTerminal()
+    {
+        var targets = Enumerable.Range(0, 37).Select(index => new Target(
+            $"ticket-{index:000}" + (index == 10 ? "-" + new string('x', 140) : ""),
+            $@"C:\dev\MyMeyer\agent-{index:000}", $"refs/heads/ticket-{index:000}")).ToList();
+        targets.Add(new("ticket-017", null, "refs/heads/ticket-017"));
+        targets.Add(new("origin/ticket-017", null, "refs/remotes/origin/ticket-017", true));
+        var picker = new VersionPicker(targets);
+        void Key(ConsoleKey key, ConsoleModifiers modifiers = 0) =>
+            picker.HandleKey(new('\0', key, modifiers.HasFlag(ConsoleModifiers.Shift),
+                modifiers.HasFlag(ConsoleModifiers.Alt), modifiers.HasFlag(ConsoleModifiers.Control)), 7);
+        void Type(string text)
+        {
+            foreach (var character in text) picker.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
+        }
+        Check(picker.Kind == VersionKind.Worktrees && picker.Matches.Count == 37, "picker starts with saved worktrees");
+        Key(ConsoleKey.End);
+        Check(picker.Index == 36, "picker End reaches the final version");
+        Key(ConsoleKey.PageUp);
+        Check(picker.Index == 29, "picker pages backward by visible rows");
+        Key(ConsoleKey.PageDown);
+        Check(picker.Index == 36, "picker page navigation stays within results");
+        Key(ConsoleKey.DownArrow);
+        Check(picker.Index == 0, "picker down wraps at the end");
+        Key(ConsoleKey.UpArrow);
+        Check(picker.Index == 36, "picker up wraps at the beginning");
+        Type("AGENT-017");
+        Check(picker.Matches.Count == 1 && picker.Selected?.Worktree?.EndsWith("agent-017") == true,
+            "picker searches hidden full paths case-insensitively");
+        Key(ConsoleKey.Backspace);
+        Check(picker.Query == "AGENT-01" && picker.Matches.Count == 10, "picker backspace updates matching results");
+        Key(ConsoleKey.U, ConsoleModifiers.Control);
+        Type("ticket-017");
+        Key(ConsoleKey.Tab);
+        Check(picker.Kind == VersionKind.Local && picker.Query == "ticket-017" && picker.Selected?.Worktree is null &&
+            picker.Selected?.Remote == false, "picker preserves search across source tabs");
+        Key(ConsoleKey.RightArrow);
+        Check(picker.Kind == VersionKind.Remote && picker.Selected?.Remote == true, "picker separates cached remote branches");
+        Key(ConsoleKey.Tab);
+        Check(picker.Kind == VersionKind.Worktrees && picker.Selected?.Worktree is not null, "picker source tabs wrap");
+        Key(ConsoleKey.Tab, ConsoleModifiers.Shift);
+        Check(picker.Kind == VersionKind.Remote, "picker Shift+Tab switches sources backward");
+        Key(ConsoleKey.U, ConsoleModifiers.Control);
+        Type("no-such-version");
+        Key(ConsoleKey.DownArrow);
+        Key(ConsoleKey.PageDown);
+        Check(picker.Matches.Count == 0 && picker.Selected is null && picker.Index == 0, "empty results cannot select a version");
+        picker = new VersionPicker(targets, new DeploymentState { Active = true, SourceRoot = targets[17].Worktree!, SourceRef = targets[17].Ref });
+        Check(picker.Selected == targets[17], "picker initially highlights the active worktree");
+        static string Capture(Spectre.Console.Rendering.IRenderable renderable, int width, int height)
+        {
+            using var output = new StringWriter();
+            var console = AnsiConsole.Create(new AnsiConsoleSettings
+            {
+                Ansi = AnsiSupport.No, Interactive = InteractionSupport.No, Out = new AnsiConsoleOutput(output)
+            });
+            console.Profile.Width = width;
+            console.Profile.Height = height;
+            console.Write(renderable);
+            return output.ToString().Replace("\r", "").TrimEnd('\n');
+        }
+        static string Render(VersionPicker model, int width, int height) => Capture(model.Render(width, height), width, height);
+        Check(Render(picker, 100, 30).Contains("LIVE  agent-017"), "picker marks the actual deployed source");
+        foreach (var width in new[] { 60, 80, 120 })
+            foreach (var height in new[] { 24, 35 })
+            {
+                picker = new VersionPicker(targets);
+                var screen = Render(picker, width, height);
+                var lines = screen.Split('\n');
+                Check(lines.All(line => line.Length <= width), $"picker stays inside {width} columns");
+                Check(lines.Length <= height, $"picker fits {width}x{height}");
+                Check(screen.Contains("Enter") && screen.Contains("Esc") && screen.Contains("SELECTED SOURCE"),
+                    $"picker keeps navigation visible at {width}x{height}");
+                Check(lines.Count(line => line.Contains("agent-000")) == 2, $"picker rows do not wrap at {width}x{height}");
+            }
+        picker = new VersionPicker([new("literal[review]", @"C:\dev\folder[green]", "refs/heads/example")]);
+        Check(Render(picker, 100, 30).Contains("literal[review]"), "picker treats markup characters literally");
+        picker = new VersionPicker([]);
+        Check(Render(picker, 80, 24).Contains("No matches") && picker.Selected is null, "picker renders an empty source safely");
+
+        picker = new VersionPicker(targets);
+        Check(!Render(picker, 100, 30).Contains("Saved files + uncommitted changes. Disk contents only."),
+            "selected worktree details omit the redundant disk-contents message");
+        picker.HandleKey(new('\t', ConsoleKey.Tab, false, false, false), 7);
+        Check(!Render(picker, 100, 30).Contains("Committed files only; uncommitted edits are excluded."),
+            "selected branch details omit the redundant committed-files message");
+
+        var menu = new ActionPicker(Terminal.HomeActions);
+        var menuScreen = Capture(menu.Render("Actions", 30), 100, 30);
+        Check(menuScreen.Contains(menu.Selected!.Description) && !menuScreen.Contains("Type to filter actions"),
+            "action menus show the highlighted explanation instead of generic instructions");
+        menu.HandleKey(new('\0', ConsoleKey.DownArrow, false, false, false), 7);
+        menuScreen = Capture(menu.Render("Actions", 30), 100, 30);
+        Check(menuScreen.Contains("Reload the active version") && !menuScreen.Contains("Browse versions and preview"),
+            "moving the action highlight replaces the footer explanation");
+        foreach (var character in "RESTORE")
+            menu.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
+        Check(menu.Matches.Count == 1 && menu.Selected?.Label == "Restore original webfarm files",
+            "action filtering remains case-insensitive");
+        Check(Capture(menu.Render("Actions", 24), 60, 24).Contains("Stop automatic updates"),
+            "filtered actions retain their own footer explanation");
+        menu.HandleKey(new('\0', ConsoleKey.U, false, false, true), 7);
+        menu.HandleKey(new('\0', ConsoleKey.UpArrow, false, false, false), 7);
+        Check(menu.Selected?.Label == "Exit", "action navigation wraps without losing the selected explanation");
+        foreach (var character in "no-such-action")
+            menu.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
+        Check(menu.Selected is null && Capture(menu.Render("Actions", 24), 60, 24).Contains("No matching actions"),
+            "empty action searches cannot select a hidden action");
+        menu.HandleKey(new('\0', ConsoleKey.Escape, false, false, false), 7);
+        Check(menu.Query.Length == 0 && menu.Matches.Count == Terminal.HomeActions.Count,
+            "Escape clears an action search without closing the app");
+        Check(Terminal.HomeActions.Concat(Terminal.PreviewActions(true)).All(action => !string.IsNullOrWhiteSpace(action.Description)),
+            "every home and preview action has contextual help");
+        Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
+            "blocked previews retain inspection and back actions but cannot activate");
+
+        static IAnsiConsole LiveConsole(StringWriter output)
+        {
+            var console = AnsiConsole.Create(new AnsiConsoleSettings
+            {
+                Ansi = AnsiSupport.Yes, Interactive = InteractionSupport.Yes, ColorSystem = ColorSystemSupport.TrueColor,
+                Out = new AnsiConsoleOutput(output)
+            });
+            console.Profile.Width = 100;
+            console.Profile.Height = 30;
+            return console;
+        }
+        using (var output = new StringWriter())
+        {
+            picker = new VersionPicker([targets[0]]);
+            var selected = picker.Show(LiveConsole(output), () =>
+            {
+                Check(output.ToString().Contains("VERSION LIBRARY") && output.ToString().Contains("ticket-000"),
+                    "the complete version picker renders before waiting for its first key");
+                return new('\r', ConsoleKey.Enter, false, false, false);
+            });
+            Check(selected == targets[0], "the initial version can be selected without an arrow-key redraw");
+        }
+        using (var output = new StringWriter())
+        {
+            menu = new ActionPicker(Terminal.HomeActions);
+            var selected = menu.Show("Actions", LiveConsole(output), () =>
+            {
+                Check(output.ToString().Contains("Browse versions and preview"),
+                    "action menus render the initial explanation before waiting for input");
+                Check(output.ToString().Contains("38;2;179;179;179"),
+                    "contextual action help renders in light grey");
+                return new('\r', ConsoleKey.Enter, false, false, false);
+            });
+            Check(selected == Terminal.HomeActions[0], "the initial action can be selected without a redraw");
+        }
+
+        var project = new ProjectInfo
+        {
+            RelativePath = @"OrderingSystem\OrderingSystem.csproj", Assembly = "OrderingSystem",
+            Inputs = [@"OrderingSystem\Order\ucOrder.ascx.cs"]
+        };
+        var preview = new Plan
+        {
+            Target = targets[0], Commit = "", Fingerprint = "",
+            Projects = [project],
+            Frontend = [new(@"OrderingSystem\Order\ucOrder.ascx", @"DesktopModules\Order\ucOrder.ascx")],
+            Changes =
+            [
+                new(@"OrderingSystem\Order\ucOrder.ascx", false), new(@"OrderingSystem\Order\ucOrder.ascx.cs", false),
+                new(@"bin\OrderingSystem.dll", false), new(@"bin\Unrelated.dll", false),
+                new("README.md", false), new("schema.sql", false), new("web.config", false)
+            ]
+        };
+        var actionable = Terminal.ActionableChanges(preview);
+        Check(actionable.Select(item => item.Change.Path).SequenceEqual(
+            [@"OrderingSystem\Order\ucOrder.ascx", @"OrderingSystem\Order\ucOrder.ascx.cs"]),
+            "default changed-file rows contain only the mapped frontend and changed backend");
+        Check(actionable.Select(item => item.Action).SequenceEqual(
+            [@"Sync DesktopModules\Order\ucOrder.ascx", "Build OrderingSystem.dll"]),
+            "default rows show the exact frontend destination and owning DLL build");
+        Check(preview.Changes.Count == 7, "filtered previews preserve all changes for Show every changed file");
+        preview.Changes.Add(new(@"OrderingSystem\Order\Removed.cs", true));
+        preview.Changes.Add(new(project.RelativePath, false));
+        Check(Terminal.ActionableChanges(preview).Any(item => item.Change.Path.EndsWith("Removed.cs") && item.Action == "Build OrderingSystem.dll"),
+            "deleted backend files keep their owning-project action when project entries were removed");
+        preview.Changes.Add(new(@"OrderingSystem\obsolete.sql", true));
+        preview.Changes.Add(new(@"OrderingSystem\bin\Old.dll", true));
+        Check(!Terminal.ActionableChanges(preview).Any(item => item.Change.Path.EndsWith("obsolete.sql") || item.Change.Path.EndsWith("Old.dll")),
+            "a changed project does not give deleted SQL or generated DLLs a deployment action");
+        preview.Frontend[0] = new(@"OrderingSystem\Order\ucOrder.ascx", @"DesktopModules\Order\ucOrder.ascx", true);
+        Check(Terminal.ActionableChanges(preview)[0].Action == @"Delete DesktopModules\Order\ucOrder.ascx",
+            "frontend deletion actions remain visible");
+        preview.Projects.Clear();
+        preview.Frontend.Clear();
+        Check(Terminal.ActionableChanges(preview).Count == 0, "a preview with no deployment actions has no changed-file rows");
+    }
+
+    private static string Project(string name, string? dependency = null, string? restorePackage = null)
+    {
+        var reference = dependency is null ? "" : $$"""
+            <ProjectReference Include="..\{{dependency}}\{{dependency}}.csproj">
+              <Project>{{Guid.NewGuid().ToString("B")}}</Project><Name>{{dependency}}</Name>
+            </ProjectReference>
+            """;
+        var restore = restorePackage is null ? "" : $$"""
+            <Import Project="..\packages\{{restorePackage}}\build\Cultivate.RestoreFixture.props"
+                    Condition="Exists('..\packages\{{restorePackage}}\build\Cultivate.RestoreFixture.props')" />
+            <Target Name="RequireRestoreFixture" BeforeTargets="Build">
+              <Error Condition="'$(CultivateRestoreFixtureImported)' != 'true'" Text="The offline package was not restored to the snapshot." />
+            </Target>
+            """;
+        return $$"""
+            <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+              {{restore}}
+              <PropertyGroup>
+                <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+                <Platform Condition="'$(Platform)' == ''">AnyCPU</Platform>
+                <ProjectGuid>{{Guid.NewGuid().ToString("B")}}</ProjectGuid>
+                <OutputType>Library</OutputType>
+                <TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>
+                <OutputPath>..\bin\</OutputPath>
+                <AssemblyName>{{name}}</AssemblyName>
+              </PropertyGroup>
+              <ItemGroup><Compile Include="Value.cs" /><None Include="App.config" /><Reference Include="System" />{{reference}}</ItemGroup>
+              <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+              <Target Name="CopyBuildOutputToWebfarm" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+                <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(WebfarmPath)bin" />
+              </Target>
+            </Project>
+            """;
+    }
+}

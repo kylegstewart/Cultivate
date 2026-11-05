@@ -1,0 +1,38 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <_MeyerLocalTool>$(MSBuildThisFileDirectory)Activate-WebfarmWorkspace.ps1</_MeyerLocalTool>
+    <_MeyerLocalRepoRoot>$([MSBuild]::GetDirectoryNameOfFileAbove('$(MSBuildProjectDirectory)', 'MyMeyer.sln'))</_MeyerLocalRepoRoot>
+  </PropertyGroup>
+  <Import Project="$(CultivateCaptureTargets)"
+          Condition="'$(CultivateCaptureTargets)' != '' and Exists('$(CultivateCaptureTargets)')" />
+  <PropertyGroup Condition="'$(_MeyerLocalRepoRoot)' != ''">
+    <_MeyerInitialWebfarmPath>$(WebfarmPath)</_MeyerInitialWebfarmPath>
+    <_MeyerPropertyProbe>$(LOCALAPPDATA)\Meyer\WebfarmWorkspace\PropertyProbe\</_MeyerPropertyProbe>
+    <WebfarmPath>$(_MeyerPropertyProbe)</WebfarmPath>
+    <_MeyerImmutableWebfarmPath Condition="'$(WebfarmPath)' != '$(_MeyerPropertyProbe)'">true</_MeyerImmutableWebfarmPath>
+    <WebfarmPath>$(_MeyerInitialWebfarmPath)</WebfarmPath>
+  </PropertyGroup>
+  <!-- Existing project targets are declared after user imports. Redirect their copy, not their definition. -->
+  <Target Name="MeyerLocalStageWebfarmCopy" BeforeTargets="CopyBuildOutputToWebfarm"
+          Condition="'$(_MeyerLocalRepoRoot)' != '' and '$(Configuration)' == 'Debug'">
+    <PropertyGroup>
+      <_MeyerOriginalWebfarmPath>$(WebfarmPath)</_MeyerOriginalWebfarmPath>
+      <_MeyerLocalStage>$(LOCALAPPDATA)\Meyer\WebfarmWorkspace\Staging\$([System.Guid]::NewGuid())\</_MeyerLocalStage>
+      <WebfarmPath>$(_MeyerLocalStage)</WebfarmPath>
+    </PropertyGroup>
+    <Error Condition="'$(_MeyerImmutableWebfarmPath)' == 'true' or '$(WebfarmPath)' != '$(_MeyerLocalStage)'"
+           Text="WebfarmPath cannot be a global /p: property with the standalone workspace tool. Set it as an environment variable instead." />
+    <Message Text="Standalone webfarm workspace: intercepting the legacy DLL copy locally." Importance="high" />
+  </Target>
+  <Target Name="MeyerLocalPublishWebfarmCopy" AfterTargets="CopyBuildOutputToWebfarm"
+          Condition="'$(_MeyerLocalStage)' != ''">
+    <PropertyGroup>
+      <WebfarmPath>$(_MeyerOriginalWebfarmPath)</WebfarmPath>
+    </PropertyGroup>
+    <Exec Condition="'$(CultivateRunDirectory)' == '' and '$(_MeyerOriginalWebfarmPath)' != '' and Exists('$(_MeyerLocalStage)bin\$(TargetFileName)')"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(_MeyerLocalTool)&quot; -Action CopyBuild -ProjectDirectory &quot;$(MSBuildProjectDirectory)&quot; -WebfarmRoot &quot;$(_MeyerOriginalWebfarmPath)\.&quot; -Source &quot;$(BinPath)$(TargetFileName)&quot;" />
+    <Message Condition="'$(_MeyerOriginalWebfarmPath)' == ''"
+             Text="Skipping webfarm publishing: WebfarmPath is not set." Importance="high" />
+    <RemoveDir Directories="$(_MeyerLocalStage)" />
+  </Target>
+</Project>
