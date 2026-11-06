@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Change: activation previews default to Activate once (no automatic updates).
+
 ## 1.1.15 — 2026-11-06
 
 - Feature: failures now identify the operation, project, branch/worktree, exit code, and useful error lines,

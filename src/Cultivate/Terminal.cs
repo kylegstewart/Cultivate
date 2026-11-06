@@ -24,10 +24,10 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         var actions = new List<MenuAction>();
         if (canDeploy)
         {
-            actions.Add(new("Activate and automatically update saved changes",
-                "Deploy the planned files and enable automatic updates after successful builds."));
             actions.Add(new("Activate once (no automatic updates)",
                 "Deploy this preview once; later saves will not update the webfarm."));
+            actions.Add(new("Activate and automatically update saved changes",
+                "Deploy the planned files and enable automatic updates after successful builds."));
         }
         actions.Add(new("Show every changed file", "Show all Git changes, including files with no deployment action."));
         actions.Add(new("Back", "Return home without deploying this version."));
