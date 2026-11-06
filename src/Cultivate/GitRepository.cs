@@ -58,7 +58,53 @@ internal sealed class GitRepository(Settings settings)
         return result.OrderBy(x => x.Worktree is null).ThenBy(x => x.Branch, Files.Comparer).ToList();
     }
 
-    public async Task<(string Commit, List<Change> Changes, string Fingerprint)> Inspect(Target target)
+    /// <summary>Checkouts with a solution under the worktrees folder, from any repository, that are not already known.</summary>
+    public async Task<List<Target>> OtherWorktrees(IEnumerable<Target> known)
+    {
+        if (settings.WorktreesRoot.Length == 0 || !Directory.Exists(settings.WorktreesRoot)) return [];
+        var skip = known.Where(x => x.Worktree is not null).Select(x => Files.Full(x.Worktree!)).ToHashSet(Files.Comparer);
+        var folders = new List<string>();
+        void Find(string folder, int depth)
+        {
+            if (Path.Exists(Path.Combine(folder, ".git")))
+            {
+                if (!skip.Contains(folder) && SolutionOpener.Solutions(folder).Count != 0) folders.Add(folder);
+                return;
+            }
+            if (depth == 0) return;
+            try { foreach (var child in Directory.EnumerateDirectories(folder)) Find(child, depth - 1); }
+            catch (UnauthorizedAccessException) { }
+        }
+        // The worktrees folder normally holds <repository>\<worktree>; a deeper level also covers a folder of repositories.
+        Find(Files.Full(settings.WorktreesRoot), 3);
+        var found = await Task.WhenAll(folders.Select(async folder =>
+        {
+            try
+            {
+                var head = (await Git(folder, "rev-parse", "HEAD", "--symbolic-full-name", "HEAD")).Split('\n', StringSplitOptions.TrimEntries);
+                return head[1].StartsWith("refs/heads/", StringComparison.Ordinal)
+                    ? new Target(head[1]["refs/heads/".Length..], folder, head[1])
+                    : new Target($"(detached {head[0][..7]})", folder, head[0]);
+            }
+            catch (InvalidOperationException) { return null; } // A repository without commits has nothing to open.
+        }));
+        return found.OfType<Target>().ToList();
+    }
+
+    /// <summary>The branch a checkout's changes are compared against: origin's default branch, else main or master.</summary>
+    public async Task<string> DefaultBranch(string root)
+    {
+        try { return await Git(root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); }
+        catch (InvalidOperationException) { }
+        foreach (var name in new[] { "origin/main", "origin/master", "main", "master" })
+        {
+            try { await Git(root, "rev-parse", "--verify", "--quiet", name + "^{commit}"); return name; }
+            catch (InvalidOperationException) { }
+        }
+        throw new InvalidOperationException($"No default branch (origin/HEAD, main, or master) was found in {root}.");
+    }
+
+    public async Task<(string Commit, List<Change> Changes, string Fingerprint)> Inspect(Target target, string? baseBranch = null)
     {
         var root = target.Worktree ?? settings.RepositoryRoot;
         if (target.Worktree is not null)
@@ -75,7 +121,7 @@ internal sealed class GitRepository(Settings settings)
         else if (target.Worktree is not null && await Git(root, "rev-parse", "HEAD") != target.Ref)
             throw new InvalidOperationException("This detached worktree moved to another commit. Refresh the selection.");
         var commit = await Git(root, "rev-parse", "--verify", target.Worktree is null ? target.Ref + "^{commit}" : "HEAD");
-        var baseline = await Git(root, "merge-base", commit, settings.BaseBranch);
+        var baseline = await Git(root, "merge-base", commit, baseBranch ?? settings.BaseBranch);
         var names = target.Worktree is null
             ? await Git(root, "diff", "--name-only", "--no-renames", "-z", baseline, commit, "--")
             : await Git(root, "diff", "--name-only", "--no-renames", "-z", baseline, "--");

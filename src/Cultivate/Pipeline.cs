@@ -205,10 +205,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 // to the checkout's bin folder; accept that copy only when it is exactly the version the Reference declares.
                 project.HintVersions.TryGetValue(hint, out var declared);
                 source = new[] { Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name) }
-                    .FirstOrDefault(path => declared is not null && VersionOf(path) == declared) ??
-                    throw new FileNotFoundException($"Declared package dependency {hint} for {project.Assembly} is missing after restore" +
-                        (declared is null ? "" : $", and no bin folder has version {declared}") +
-                        ". Align the project's HintPath with packages.config; Cultivate will not substitute a Visual Studio or GAC DLL.", desired);
+                    .FirstOrDefault(path => declared is not null && VersionOf(path) == declared) ?? "";
             }
             else
             {
@@ -217,8 +214,12 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     source = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(settings.RepositoryRoot, project.RelativePath))!, hint));
                 if (!File.Exists(source)) source = Path.Combine(sourceRoot, "bin", name);
                 if (!File.Exists(source)) source = Path.Combine(settings.RepositoryRoot, "bin", name);
-                if (!File.Exists(source))
-                    throw new FileNotFoundException($"Missing dependency {name} for {project.Assembly}. Restore the normal checkout's dependency or correct its reference; Cultivate will not guess another version.", source);
+            }
+            if (!File.Exists(source))
+            {
+                // Visual Studio builds with such a reference unresolved and fails only if the code uses it; MSBuild does the same here.
+                File.AppendAllText(Path.Combine(run, "build.log"), $"Unresolved reference {name} for {project.Assembly}: {hint} was not found.\n");
+                continue;
             }
             var seeded = Path.Combine(seeds, name);
             if (File.Exists(seeded) && Files.Hash(seeded) != Files.Hash(source))

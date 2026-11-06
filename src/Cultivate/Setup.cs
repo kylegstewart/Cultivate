@@ -22,7 +22,7 @@ internal static class Setup
             return value;
         }
         var settings = await Settings.Read();
-        var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch" };
+        var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -37,6 +37,7 @@ internal static class Setup
         if (Option("--webfarm") is { } webfarm) settings.WebfarmRoot = Files.Full(webfarm);
         if (Option("--base-branch") is { } branch) settings.BaseBranch = branch;
         if (Option("--msbuild") is { } msbuild) settings.MSBuild = Files.Full(msbuild);
+        if (Option("--worktrees") is { } worktrees) settings.WorktreesRoot = Files.Full(worktrees);
         if (Option("--watch") is { } watch)
             settings.WatchSavedFiles = bool.TryParse(watch, out var value) ? value : throw new InvalidOperationException("--watch expects true or false.");
         if (Option("--mapping-assembly") is { } mapping) settings.MappingAssembly = Files.Full(mapping);
@@ -80,6 +81,9 @@ internal static class Setup
         settings.MSBuild = Files.Full(Ask("Visual Studio [bold]MSBuild.exe[/]", settings.MSBuild.Length != 0 ? settings.MSBuild : await Settings.FindMSBuild() ?? "",
             value => Path.IsPathFullyQualified(value) && File.Exists(value) ? null : "MSBuild.exe was not found there."));
         settings.WatchSavedFiles = AnsiConsole.Confirm("Automatically deploy later saved changes by default?", settings.WatchSavedFiles);
+        var worktrees = Ask("Default [bold]worktrees folder[/] (Open solution lists its worktrees from any repo; blank for none)",
+            settings.WorktreesRoot, value => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path.", optional: true);
+        settings.WorktreesRoot = worktrees.Length == 0 ? "" : Files.Full(worktrees);
 
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n" + string.Join("\n", problems));
@@ -93,16 +97,17 @@ internal static class Setup
         return settings;
     }
 
-    private static string Ask(string prompt, string current, Func<string, string?> validate)
+    private static string Ask(string prompt, string current, Func<string, string?> validate, bool optional = false)
     {
         var text = new TextPrompt<string>(prompt).PromptStyle(new Style(Color.FromHex(TerminalStyle.Accent)))
             .Validate(value =>
             {
                 value = value.Trim().Trim('"');
-                var error = value.Length == 0 ? "A value is required." : validate(value);
+                var error = value.Length == 0 ? optional ? null : "A value is required." : validate(value);
                 return error is null ? ValidationResult.Success() : ValidationResult.Error($"[red]{Escape(error)}[/]");
             });
         if (current.Length != 0) text.DefaultValue(current);
+        else if (optional) text.AllowEmpty();
         return AnsiConsole.Prompt(text).Trim().Trim('"');
     }
 

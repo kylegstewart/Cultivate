@@ -70,6 +70,8 @@ internal sealed class Settings
     public bool CheckForUpdates { get; set; } = true;
     /// <summary>Deployment journal, backups and per-destination locks.</summary>
     public string StateRoot { get; set; } = "";
+    /// <summary>Folder whose worktrees, from any repository, can be opened with Open solution.</summary>
+    public string WorktreesRoot { get; set; } = "";
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
@@ -113,6 +115,11 @@ internal sealed class Settings
             MappingAssembly = Path.Combine(RepositoryRoot, "bin", "MeyerObjects.dll");
         if (string.IsNullOrWhiteSpace(StateRoot))
             StateRoot = Directory.Exists(Files.LegacyWorkspace) ? Files.LegacyWorkspace : Path.Combine(Files.Home, "State");
+        if (string.IsNullOrWhiteSpace(WorktreesRoot))
+        {
+            var guess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Documents", "GitHub", "t3-worktrees");
+            if (Directory.Exists(guess)) WorktreesRoot = guess;
+        }
     }
 
     public List<string> Problems()
