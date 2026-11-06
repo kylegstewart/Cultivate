@@ -122,7 +122,7 @@ internal sealed class VersionPicker
             var item = Matches[row];
             var selected = row == Index;
             var style = selected ? TerminalStyle.Selection : new Style(Color.FromHex(TerminalStyle.Text));
-            var folder = item.Worktree is not null ? Path.GetFileName(Files.Full(item.Worktree)) :
+            var folder = item.Worktree is not null ? WorktreeFolder(item.Worktree) :
                 item.Remote ? item.Branch.Split('/')[0] + " / committed" : "Local / committed";
             if (IsActive(item)) folder = "LIVE  " + folder;
             table.AddRow(TerminalStyle.Line(selected ? ">" : "", style),
@@ -150,6 +150,13 @@ internal sealed class VersionPicker
             new Markup($"[{TerminalStyle.Gold}]Tab[/] source   [{TerminalStyle.Gold}]arrows[/] move   [{TerminalStyle.Gold}]Enter[/] " +
                 $"{(openSolution ? "open" : "preview")}   [{TerminalStyle.Gold}]Esc[/] back"),
             new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
+    }
+
+    // Solutions can come from several repositories, so the solution picker also names the repository folder.
+    private string WorktreeFolder(string worktree)
+    {
+        var full = Files.Full(worktree);
+        return openSolution ? Path.Combine(Path.GetFileName(Path.GetDirectoryName(full)) ?? "", Path.GetFileName(full)) : Path.GetFileName(full);
     }
 
     private static string DisplayPath(string path)

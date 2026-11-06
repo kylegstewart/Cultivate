@@ -10,13 +10,27 @@ internal static class SolutionOpener
     private static readonly HashSet<string> SourceExtensions = new(
         [".cs", ".ascx", ".aspx", ".js", ".css", ".html", ".htm"], Files.Comparer);
 
-    internal static List<string> FilesToOpen(string solution, IEnumerable<Change> actionable) => actionable
+    /// <summary>Solutions at a checkout's root, or one folder down when the root has none.</summary>
+    internal static List<string> Solutions(string root)
+    {
+        var top = Directory.EnumerateFiles(root, "*.sln").ToList();
+        if (top.Count == 0)
+        {
+            try { top = Directory.EnumerateDirectories(root).SelectMany(folder => Directory.EnumerateFiles(folder, "*.sln")).ToList(); }
+            catch (UnauthorizedAccessException) { }
+        }
+        return top.Order(Files.Comparer).ToList();
+    }
+
+    /// <summary>Changed source files of a checkout that belong under the folder of the solution being opened.</summary>
+    internal static List<string> FilesToOpen(string root, string solution, IEnumerable<Change> actionable) => actionable
         .Where(change => !change.Deleted && SourceExtensions.Contains(Path.GetExtension(change.Path)) &&
             !Planner.IsExcluded(change.Path) && !change.Path.EndsWith(".designer.cs", StringComparison.OrdinalIgnoreCase) &&
             !change.Path.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) &&
             !change.Path.EndsWith(".g.i.cs", StringComparison.OrdinalIgnoreCase))
-        .Select(change => Files.Child(Path.GetDirectoryName(solution)!, change.Path))
-        .Where(File.Exists).Distinct(Files.Comparer).Order(Files.Comparer).ToList();
+        .Select(change => Files.Child(root, change.Path))
+        .Where(file => File.Exists(file) && file.StartsWith(Path.GetDirectoryName(solution)! + "\\", StringComparison.OrdinalIgnoreCase))
+        .Distinct(Files.Comparer).Order(Files.Comparer).ToList();
 
     internal static List<string> MissingDocuments(IEnumerable<string> requested, IEnumerable<string> opened)
     {

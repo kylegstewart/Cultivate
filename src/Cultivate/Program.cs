@@ -21,6 +21,7 @@ internal static class Program
           setup                                   Configure interactively, or pass any of:
                 [--repository PATH] [--webfarm PATH] [--base-branch NAME]
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
+                [--worktrees PATH]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values

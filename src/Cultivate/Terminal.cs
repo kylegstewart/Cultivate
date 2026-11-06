@@ -166,15 +166,38 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
 
     private async Task OpenSolution(DeploymentState? state)
     {
-        var targets = await AnsiConsole.Status().StartAsync("Finding worktrees and local branches...", _ => git.Targets());
-        var target = new VersionPicker(targets, state, openSolution: true).Show();
+        var (targets, others) = await AnsiConsole.Status().StartAsync("Finding worktrees and local branches...", async _ =>
+        {
+            var myMeyer = await git.Targets();
+            return (myMeyer, await git.OtherWorktrees(myMeyer));
+        });
+        var target = new VersionPicker(targets.Concat(others), state, openSolution: true).Show();
         if (target is null) return;
         var visualStudio = await Settings.FindVisualStudio()
             ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution and its changed files.");
-        var solution = await AnsiConsole.Status().StartAsync("Locating the solution...", _ => git.Solution(target));
-        var plan = await AnsiConsole.Status().StartAsync("Finding actionable changes to open...", _ =>
-            new Planner(settings, git, bridge).Create(target with { Worktree = Path.GetDirectoryName(solution)! }));
-        var files = SolutionOpener.FilesToOpen(solution, ActionableChanges(plan).Select(item => item.Change));
+        string solution;
+        List<string> files;
+        if (others.Contains(target))
+        {
+            // Another repository has no deployment plan, so every changed source file under its solution opens.
+            var root = target.Worktree!;
+            var solutions = SolutionOpener.Solutions(root);
+            solution = solutions.Count == 1 ? solutions[0] : AnsiConsole.Prompt(new SelectionPrompt<string>()
+                .Title($"[{TerminalStyle.Accent}]Which solution in {Escape(Path.GetFileName(root))}?[/]")
+                .HighlightStyle(TerminalStyle.Selection).UseConverter(path => Escape(Path.GetRelativePath(root, path)))
+                .AddChoices(solutions));
+            var changes = await AnsiConsole.Status().StartAsync("Finding changed source files to open...", async _ =>
+                (await git.Inspect(target, await git.DefaultBranch(root))).Changes);
+            files = SolutionOpener.FilesToOpen(root, solution, changes);
+        }
+        else
+        {
+            solution = await AnsiConsole.Status().StartAsync("Locating the solution...", _ => git.Solution(target));
+            var root = Path.GetDirectoryName(solution)!;
+            var plan = await AnsiConsole.Status().StartAsync("Finding actionable changes to open...", _ =>
+                new Planner(settings, git, bridge).Create(target with { Worktree = root }));
+            files = SolutionOpener.FilesToOpen(root, solution, ActionableChanges(plan).Select(item => item.Change));
+        }
         await AnsiConsole.Status().StartAsync("Opening the solution and changed source files...", _ =>
             SolutionOpener.Open(visualStudio, solution, files));
     }
@@ -220,7 +243,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 Pause();
                 continue;
             }
-            if (!AnsiConsole.Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", false)) continue;
+            if (!AnsiConsole.Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
             var watch = action == "Activate and automatically update saved changes";
             var activated = await AnsiConsole.Status().StartAsync("Preparing activation...", context =>
                 new Pipeline(settings, git, bridge).Activate(plan, message => context.Status(Escape(message)), watch));

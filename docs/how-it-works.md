@@ -71,9 +71,9 @@ outputs, and each project's existing configuration. There is no solution build.
   `packages.config` projects restore into the snapshot's own `packages` folder.
 - After the restore, literal package `HintPath`s are used directly when they exist. If one is still
   missing, Cultivate accepts a copy from the selected worktree's or normal checkout's `bin` only
-  when its assembly version exactly matches the reference's declared `Version`. Otherwise it
-  stops with an explicit error. It never substitutes a Visual Studio or GAC DLL for that missing
-  package reference. See [reference preparation](webfarm-pipeline.md#4a-preparing-references-pipelineprepare).
+  when its assembly version exactly matches the reference's declared `Version`. Otherwise the
+  reference is left unresolved, as in Visual Studio: MSBuild warns and the build fails only if the
+  code uses it. Cultivate never substitutes a DLL with a different version. See [reference preparation](webfarm-pipeline.md#4a-preparing-references-pipelineprepare).
 - Literal `HintPath`s are tried in the snapshot, the selected worktree, and the normal checkout
   before generic `bin` caches. This keeps sibling-repository references (such as
   `Warehouse--PickTickets`) working even when a worktree is relocated. Each seeded reference's

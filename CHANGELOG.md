@@ -5,6 +5,14 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: Open solution also lists worktrees from any repository under a default worktrees folder
+  (`WorktreesRoot`, set with `cultivate setup` or `--worktrees PATH`; defaults to `Documents\GitHub\t3-worktrees`).
+  Each opens its solution, asking which one when there are several, plus the changed source files under it.
+- Change: the deploy confirmation now defaults to yes.
+- Fix: a project reference whose DLL can't be found, such as a `HintPath` to a package that
+  `packages.config` never restores, no longer stops the build. Like Visual Studio, MSBuild warns and the
+  build fails only if the code uses it. A DLL with a different version is still never substituted.
+
 ## 1.1.13 — 2026-11-06
 
 - Fix: a webfarm file changed outside Cultivate, such as by a manual Visual Studio build, no longer blocks

@@ -197,7 +197,11 @@ internal static class SelfTest
                 StaleHint(new Version(binVersion.Major + 1, 0, 0, 0)));
             var mismatchRun = Path.Combine(home, "relocated", "stale-mismatch");
             Directory.CreateDirectory(mismatchRun);
-            await Reject(() => pipeline.Build(Relocated(), relocated, mismatchRun, _ => { }),"a bin DLL with a different version never replaces a missing package");
+            File.WriteAllText(Path.Combine(relocated, @"Consumer\Value.cs"), "public class ConsumerValue { public static int Value => 1; }");
+            await pipeline.Build(Relocated(), relocated, mismatchRun, _ => { });
+            Check(!File.Exists(Path.Combine(mismatchRun, @"references\Core.dll")) &&
+                File.ReadAllText(Path.Combine(mismatchRun, "build.log")).Contains("Unresolved reference Core.dll for Consumer"),
+                "a missing package the code does not use builds like Visual Studio, and a bin DLL with another version is never substituted");
             Save(@"Core\Core.csproj", coreProject.Replace("<Reference Include=\"System\" />", """
                 <Reference Include="System" />
                 <Reference Include="UnrelatedMissingPackage">
@@ -578,7 +582,7 @@ internal static class SelfTest
         plan.Changes.Add(new(@"Order\Deleted.cs", true));
         plan.Changes.Add(new(@"Order\Missing.cs", false));
         plan.Projects[0].Inputs.AddRange([@"Order\Deleted.cs", @"Order\Missing.cs"]);
-        var files = SolutionOpener.FilesToOpen(solution, Terminal.ActionableChanges(plan).Select(item => item.Change));
+        var files = SolutionOpener.FilesToOpen(root, solution, Terminal.ActionableChanges(plan).Select(item => item.Change));
         var expected = new[]
         {
             @"Order\Freight.cs", @"Order\Page.ascx", @"Order\Page.ascx.cs", @"Order\script.js", @"Order\style.css", @"Other\Freight.cs"
@@ -671,7 +675,7 @@ internal static class SelfTest
         {
             var selectedRoot = Path.GetDirectoryName(selectedSolution)!;
             var selected = new Target("fixture", selectedRoot, await git.Git(selectedRoot, "rev-parse", "HEAD"));
-            return SolutionOpener.FilesToOpen(selectedSolution, (await git.Inspect(selected)).Changes);
+            return SolutionOpener.FilesToOpen(selectedRoot, selectedSolution, (await git.Inspect(selected)).Changes);
         }
         var solution = Path.Combine(root, "MyMeyer.sln");
         await G("init", "-b", "master");
@@ -755,6 +759,56 @@ internal static class SelfTest
         {
             foreach (var target in (await git.Targets()).Where(x => x.Worktree is not null && x.Worktree != root))
                 await G("worktree", "remove", "--force", target.Worktree!);
+        }
+
+        // The worktrees folder adds checkouts from other repositories, each opened against its own default branch.
+        var worktrees = Path.Combine(home, "worktrees folder");
+        var other = Path.Combine(home, "other repository");
+        var otherWorktree = Path.Combine(worktrees, "Other", "feature work");
+        var myMeyerWorktree = Path.Combine(worktrees, "MyMeyer", "listed already");
+        var noSolution = Path.Combine(worktrees, "Database", "scripts");
+        async Task Commit(string repository, params string[] files)
+        {
+            Directory.CreateDirectory(repository);
+            await git.Git(repository, "init", "-q", "-b", "main");
+            await git.Git(repository, "config", "user.email", "cultivate-test@localhost");
+            await git.Git(repository, "config", "user.name", "Cultivate isolated tests");
+            foreach (var file in files)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(repository, file))!);
+                File.WriteAllText(Path.Combine(repository, file), "baseline " + file);
+            }
+            await git.Git(repository, "add", ".");
+            await git.Git(repository, "commit", "-qm", "fixture");
+        }
+        await Commit(other, @"App\App.sln", @"App\Program.cs", @"Lib\Lib.cs");
+        await Commit(noSolution, "schema.sql");
+        await git.Git(other, "worktree", "add", "-q", "-b", "feature", otherWorktree);
+        await G("worktree", "add", "-q", "--detach", myMeyerWorktree);
+        try
+        {
+            File.WriteAllText(Path.Combine(otherWorktree, @"App\Program.cs"), "feature edit");
+            File.WriteAllText(Path.Combine(otherWorktree, @"App\New.cs"), "untracked feature file");
+            File.WriteAllText(Path.Combine(otherWorktree, @"Lib\Lib.cs"), "edit outside the solution folder");
+            var scoped = new GitRepository(new Settings { RepositoryRoot = root, WorktreesRoot = worktrees });
+            var others = await scoped.OtherWorktrees(await scoped.Targets());
+            Check(others.SequenceEqual([new Target("feature", otherWorktree, "refs/heads/feature")]),
+                "the worktrees folder lists other repositories' checkouts once, skipping known MyMeyer worktrees and folders without a solution");
+            Check(await scoped.DefaultBranch(otherWorktree) == "main" &&
+                SolutionOpener.Solutions(otherWorktree).SequenceEqual([Path.Combine(otherWorktree, @"App\App.sln")]),
+                "another repository uses its own default branch and finds a solution one folder down");
+            var appSolution = Path.Combine(otherWorktree, @"App\App.sln");
+            var opened = SolutionOpener.FilesToOpen(otherWorktree, appSolution,
+                (await scoped.Inspect(others[0], await scoped.DefaultBranch(otherWorktree))).Changes);
+            Check(opened.Select(path => Path.GetRelativePath(otherWorktree, path)).SequenceEqual([@"App\New.cs", @"App\Program.cs"]),
+                "another repository opens its changed source files under the chosen solution's folder");
+            Check((await new GitRepository(new Settings { RepositoryRoot = root }).OtherWorktrees([])).Count == 0,
+                "without a worktrees folder, only MyMeyer's worktrees are offered");
+        }
+        finally
+        {
+            await git.Git(other, "worktree", "remove", "--force", otherWorktree);
+            await G("worktree", "remove", "--force", myMeyerWorktree);
         }
     }
 

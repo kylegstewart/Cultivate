@@ -56,6 +56,7 @@ effective values and settings file path. Settings normally live in
 | `MSBuild` | Visual Studio `MSBuild.exe`, discovered with `vswhere` if not configured. This builds MyMeyer projects, independently of Cultivate's .NET 10 runtime. |
 | `WatchSavedFiles` | Default `true`; determines whether activation starts a worker unless the caller disables it. |
 | `StateRoot` | Journal, locks, and original-file backups. Reuses `%LOCALAPPDATA%\Meyer\WebfarmWorkspace` if that directory exists; otherwise defaults to `<data directory>\State`. A saved explicit value takes precedence. |
+| `WorktreesRoot` | Folder whose worktrees, from any repository, Open solution also lists. Defaults to `Documents\GitHub\t3-worktrees` when that exists. Their changed source files are compared with each repository's own default branch (`origin/HEAD`, else `main` or `master`). |
 | Program directory | Installed by [`install.ps1`](../scripts/install.ps1) to `%LOCALAPPDATA%\Programs\Cultivate` by default. The PowerShell and targets files remain beside `Cultivate.exe`. |
 | Data directory | `%LOCALAPPDATA%\Meyer\Cultivate`, or `CULTIVATE_HOME`: settings, `Runs`, `Requests`, `Workers`, `Logs`, and `Staging`. Changing this does not relocate an explicitly configured `StateRoot`. |
 
@@ -211,16 +212,16 @@ checkout. Cultivate prepares the inputs for each changed project as follows:
      `references`. If one is still missing, because the HintPath names a version
      that `packages.config` never restores, Cultivate falls back to `bin\<name>` in the worktree, then in the
      normal checkout. It accepts that file only when its assembly version exactly equals the `Version=` in the
-     `<Reference Include>`. Otherwise the build stops. Cultivate never substitutes a GAC or Visual Studio
-     DLL.
+     `<Reference Include>`. Otherwise the reference is left unresolved, as in Visual Studio: MSBuild
+     warns, and the build fails only if the code uses it. Cultivate never seeds a DLL with a different version.
    - **Other HintPaths** (sibling repositories, `..\..\bin\MeyerObjects.dll`, and so on) are looked up in
      order: the snapshot, the selected worktree, the normal checkout, then `bin\<name>` in the worktree and
-     in the checkout.
+     in the checkout. If none exists, the reference is left unresolved for MSBuild, as above.
    - Non-package HintPaths and accepted package fallbacks are copied to `references`. References whose
      DLL name matches another project in this build are skipped here; build ordering makes its fresh
      output available to dependent projects.
-   - If two different files with the same name would be seeded, the build stops. Every seed's source is
-     written to `build.log`.
+   - If two different files with the same name would be seeded, the build stops. Every seed's source, and
+     every unresolved reference, is written to `build.log`.
 
 ### 4b. Evaluating before building
 
