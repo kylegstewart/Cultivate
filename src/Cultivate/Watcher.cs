@@ -97,8 +97,9 @@ internal static class Watcher
             }
             catch (Exception exception) when (exception is IOException or InvalidOperationException or System.Xml.XmlException or System.Text.Json.JsonException)
             {
-                error = exception.Message;
-                await File.AppendAllTextAsync(log, $"{DateTime.Now:O} UPDATE BLOCKED; previous files retained: {exception}\n");
+                var report = Diagnostics.Record(exception, "Automatic update");
+                error = report.Brief;
+                await File.AppendAllTextAsync(log, $"{DateTime.Now:O} {report.Label}\n{report.Text}\n{exception}\n");
                 await bridge.Call("Heartbeat", new { Token = token, ProcessId = Environment.ProcessId, Error = error });
             }
             await Task.Delay(2000);

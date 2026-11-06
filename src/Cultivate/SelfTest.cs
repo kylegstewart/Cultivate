@@ -33,6 +33,7 @@ internal static class SelfTest
         try
         {
             CheckTerminal();
+            await CheckDiagnostics(home);
             await CheckVisualStudio();
             CheckSolutionFiles(home);
             CheckSolutionAutomation(home);
@@ -295,7 +296,17 @@ internal static class SelfTest
                 "frontend saves copy without recopying the target DLL");
             Save(@"Page\Value.cs", "this changed project deliberately cannot compile;");
             var broken = await planner.Create(target, Maps);
-            await Reject(() => pipeline.Activate(broken, _ => { }, watch: false), "a changed-project compiler failure blocks publication");
+            FailureReport? buildFailure = null;
+            await Reject(async () =>
+            {
+                try { await pipeline.Activate(broken, _ => { }, watch: false); }
+                catch (InvalidOperationException exception) { buildFailure = Diagnostics.Describe(exception); throw; }
+            }, "a changed-project compiler failure blocks publication");
+            Check(buildFailure?.Label == "BUILD FAILED" && buildFailure.Context.Project == @"Page\Page.csproj" &&
+                buildFailure.Context.Worktree == target.Worktree && buildFailure.Context.Branch == target.Branch &&
+                buildFailure.Context.ExitCode is not null and not 0 && buildFailure.Errors.Any(error => error.Contains("error CS")) &&
+                buildFailure.Logs.Any(path => path.EndsWith(".binlog")) && buildFailure.Logs.Any(path => path.EndsWith("build.log")),
+                "a real compiler failure identifies its project, selected source, errors, exit status, and existing build logs");
             Check((await bridge.Status())?.Token == state.Token && Files.Hash(pageDestination) == pageHash &&
                 File.ReadAllText(frontendDestination) == "second saved markup", "failed builds preserve the last successful files");
             Save(@"Page\Value.cs", "public class PageValue { public static int Value => CoreValue.Value + 1; }");
@@ -531,6 +542,78 @@ internal static class SelfTest
         await Reject(() => Build(managed, "-p:WebfarmPath=" + farm + "\\"),
             "an immutable destination cannot bypass Cultivate's private staging");
         Check(File.ReadAllText(destination) == "next manual build", "invalid Cultivate builds preserve existing webfarm files");
+    }
+
+    private static async Task CheckDiagnostics(string home)
+    {
+        var root = Path.Combine(home, "diagnostics [literal]");
+        Directory.CreateDirectory(root);
+        var buildLog = Path.Combine(root, "build.log");
+        var binaryLog = Path.Combine(root, "Page.binlog");
+        File.WriteAllText(buildLog, "full build output");
+        File.WriteAllText(binaryLog, "binary log fixture");
+        var snapshot = Path.Combine(root, "snapshot");
+        var errorLine = Path.Combine(snapshot, @"Page\Value.cs") + "(3,4): error CS0246: Type 'Missing[red]' could not be found [Page.csproj]";
+        var failure = new InvalidOperationException("MSBuild.exe failed (1).\nwarning MSB3245: Missing reference\n" + errorLine + "\n" + errorLine + "\nfull-output-sentinel");
+        Diagnostics.Attach(failure, new("Build") { Project = @"Page\Page.csproj", Tool = "MSBuild.exe", ExitCode = 1, Log = buildLog, BinaryLog = binaryLog });
+        Check(ReferenceEquals(Diagnostics.Attach(failure, new("Activate") { Branch = "12345", Worktree = root, Snapshot = snapshot }), failure),
+            "diagnostic context preserves the original exception instance and type");
+        var report = Diagnostics.Describe(failure);
+        Check(report.Label == "BUILD FAILED" && report.Context.Project == @"Page\Page.csproj" && report.Context.Branch == "12345" && report.Context.Worktree == root,
+            "build diagnostics preserve the specific phase, project, branch, and worktree through outer failures");
+        Check(report.Errors.Count == 1 && report.Errors[0].StartsWith(@"Page\Value.cs(3,4)") && report.Errors[0].Contains("Missing[red]"),
+            "diagnostics deduplicate compiler errors, preserve literal text, and show source locations outside the temporary snapshot");
+        Check(report.Diagnosis == "Type or assembly reference error" && report.Hints.Any(x => x.Contains("unchanged project")) && !report.Errors.Any(x => x.Contains("warning MSB")),
+            "missing type errors get reference guidance without labeling warnings as errors");
+        Check(report.Logs.SequenceEqual(new[] { buildLog, binaryLog }) && report.Text.Contains("Exit code: 1"),
+            "build diagnostics identify the text log, binary log, and process exit code");
+        foreach (var item in new[]
+        {
+            (Code: "CS1002", Kind: "C# compiler error"), (Code: "CS1705", Kind: "Assembly version conflict"),
+            (Code: "MSB3644", Kind: "Missing .NET Framework targeting pack"), (Code: "MSB4019", Kind: "Missing imported build targets"),
+            (Code: "NU1301", Kind: "Package restore error"), (Code: "MSB3021", Kind: "File access or copy failure")
+        })
+            Check(Diagnostics.Describe(new InvalidOperationException($"project: error {item.Code}: fixture"), "Build").Diagnosis == item.Kind,
+                $"diagnostics provide targeted guidance for {item.Code}");
+        Check(Diagnostics.Describe(new InvalidOperationException("warning CS0246: fixture"), "Build").Diagnosis == "Operation failure",
+            "a warning alone is not diagnosed as a compiler failure");
+        Check(Diagnostics.Describe(new System.ComponentModel.Win32Exception(2), "Project evaluation").Diagnosis == "Tool or working directory not found",
+            "missing executables are distinguished from compiler failures");
+        Check(Diagnostics.Describe(new InvalidOperationException("Could not get dispatch ID for Count (error: 0x80010001))."), "Open solution").Diagnosis == "Visual Studio is busy",
+            "busy Visual Studio failures identify the modal-dialog and loading checks");
+        var many = new InvalidOperationException(string.Join("\n", Enumerable.Range(1, 20).Select(x => $"file{x}.cs: error CS1002: fixture")));
+        Check(Diagnostics.Describe(many, "Build").Errors.Count == 6, "large failure output is bounded in the readable summary");
+        var logs = Path.Combine(root, "logs");
+        var first = Diagnostics.Record(failure, directory: logs);
+        var second = Diagnostics.Record(many, "Build", logs);
+        Check(first.Incident != second.Incident && Directory.GetFiles(logs, "failure-*.log").Length == 2 && File.ReadAllText(first.Logs[^1]).Contains("full-output-sentinel"),
+            "dated incident reports preserve prior failures and the complete original output");
+        Check(File.ReadAllText(Path.Combine(logs, "last-error.log")).Contains(second.Incident!) && first.Brief.Contains("CS0246") && first.Brief.Contains(first.Logs[^1]),
+            "the latest report and automatic-update summary retain the diagnostic identity and full-report path");
+        var blocked = Path.Combine(root, "not-a-directory");
+        File.WriteAllText(blocked, "fixture");
+        var unsaved = Diagnostics.Record(failure, directory: blocked);
+        Check(unsaved.Label == "BUILD FAILED" && unsaved.LoggingError is not null && unsaved.Errors.Any(x => x.Contains("CS0246")),
+            "an unwritable diagnostic directory does not hide the original failure");
+
+        var shell = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe");
+        var commandLog = Path.Combine(root, "command.log");
+        var command = "[Console]::Out.WriteLine('Value.cs(1,1): error CS1002: fixture'); [Console]::Error.WriteLine('stderr fixture'); exit 7";
+        Exception? commandFailure = null;
+        try { await Commands.Run(shell, ["-NoProfile", "-Command", command], root, log: commandLog, context: new("Build") { Project = "Page.csproj" }); }
+        catch (InvalidOperationException exception) { commandFailure = exception; }
+        var commandReport = Diagnostics.Describe(commandFailure ?? throw new InvalidOperationException("Expected a failing process."));
+        var commandText = File.ReadAllText(commandLog);
+        Check(commandReport.Label == "BUILD FAILED" && commandReport.Context.ExitCode == 7 && commandReport.Errors.Single().Contains("CS1002"),
+            "real subprocess failures carry their phase, project, exit code, and compiler output");
+        Check(commandText.Contains("Build | Page.csproj") && commandText.Contains("Directory: " + root) && commandText.Contains("STDOUT:") && commandText.Contains("STDERR:") && commandText.Contains("stderr fixture"),
+            "command logs separate output streams and label command, directory, phase, project, and exit status");
+        commandFailure = null;
+        try { await Commands.Run(shell, ["-NoProfile", "-Command", command], root, log: Path.Combine(blocked, "command.log"), context: new("Build")); }
+        catch (InvalidOperationException exception) { commandFailure = exception; }
+        commandReport = Diagnostics.Describe(commandFailure ?? throw new InvalidOperationException("Expected a failing process."));
+        Check(commandReport.Context.ExitCode == 7 && commandReport.Errors.Any(x => x.Contains("CS1002")) && commandReport.LoggingError is not null,
+            "command-log write failures preserve the real process error and exit code");
     }
 
     private static async Task CheckVisualStudio()

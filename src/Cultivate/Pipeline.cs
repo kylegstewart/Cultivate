@@ -7,17 +7,19 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
 {
     public async Task<DeploymentState> Activate(Plan plan, Action<string> progress, bool watch = true, bool workerUpdate = false)
     {
-        if (!plan.CanDeploy) throw new InvalidOperationException(string.Join("\n", plan.Errors));
-        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "Capture.targets")))
-            throw new FileNotFoundException("Cultivate's build capture target is missing. Reinstall Cultivate.");
-        await bridge.Call("Check");
-        var previous = await bridge.Status();
         var run = Path.Combine(Files.Home, "Runs", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(run);
-        Files.WriteJson(Path.Combine(run, "plan.json"), plan);
         string? snapshot = null;
+        var stage = "Deployment preflight";
         try
         {
+            if (!plan.CanDeploy) throw new InvalidOperationException(string.Join("\n", plan.Errors));
+            if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "Capture.targets")))
+                throw new FileNotFoundException("Cultivate's build capture target is missing. Reinstall Cultivate.");
+            await bridge.Call("Check");
+            var previous = await bridge.Status();
+            Directory.CreateDirectory(run);
+            Files.WriteJson(Path.Combine(run, "plan.json"), plan);
+            stage = "Snapshot";
             progress("Snapshotting the selected version (your checkout stays untouched)");
             snapshot = await git.Snapshot(plan, run);
             var files = plan.Frontend.Select(x => x with { Source = Files.Child(snapshot, x.Source) }).ToList();
@@ -29,6 +31,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 previous.SourceRef == plan.Target.Ref && Files.Comparer.Equals(previous.SourceRoot, plan.Target.Worktree ?? "");
             if (reuse)
             {
+                stage = "Runtime cache validation";
                 progress("Frontend-only update: keeping the active project DLLs");
                 runtimeFiles.AddRange(previous!.RuntimeFiles);
                 foreach (var artifact in runtimeFiles)
@@ -43,7 +46,9 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             }
             else if (plan.Projects.Count != 0)
             {
+                stage = "Build";
                 files.AddRange(await Build(plan, snapshot, run, progress));
+                stage = "Artifact verification";
                 foreach (var artifact in files.Where(x => x.RelativePath.StartsWith("bin\\", StringComparison.OrdinalIgnoreCase)))
                 {
                     var cached = Files.Child(Path.Combine(run, "verified"), artifact.RelativePath);
@@ -52,8 +57,10 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     runtimeFiles.Add(new(cached, artifact.RelativePath, Files.Hash(cached)));
                 }
             }
+            stage = "Source validation";
             if ((await git.Inspect(plan.Target)).Fingerprint != plan.Fingerprint)
                 throw new InvalidOperationException("The selected source changed during the build. Nothing was deployed. Preview again.");
+            stage = "Deploy";
             progress("Deploying the verified set; journaling originals for restoration");
             var result = await bridge.Call("Deploy", new
             {
@@ -76,10 +83,21 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase).ToList();
             if (watch)
             {
+                stage = "Automatic update startup";
                 progress("Starting automatic saved-file updates");
                 await Watcher.Start(settings, bridge, state.Token);
             }
             return state;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
+            UnauthorizedAccessException or System.Xml.XmlException or JsonException or TimeoutException)
+        {
+            Diagnostics.Attach(exception, new(stage)
+            {
+                Branch = plan.Target.Branch, Worktree = plan.Target.Worktree, Snapshot = snapshot, RunDirectory = run,
+                Log = Path.Combine(run, "build.log")
+            });
+            throw;
         }
         finally
         {
@@ -90,79 +108,95 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
 
     internal async Task<List<DeployFile>> Build(Plan plan, string snapshot, string run, Action<string> progress)
     {
-        progress("Preparing references for changed projects only");
-        var seeds = Path.Combine(run, "references");
-        Directory.CreateDirectory(seeds);
-        var environment = new Dictionary<string, string>
+        var context = new FailureContext("Reference preparation");
+        try
         {
-            ["WebfarmPath"] = Path.Combine(run, "intercepted") + "\\",
-            ["CultivateRunDirectory"] = run,
-            ["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets"),
-            ["ReferencePath"] = seeds
-        };
-        var internalNames = plan.Projects.Select(x => x.Assembly).ToHashSet(Files.Comparer);
-        foreach (var project in plan.Projects)
-        {
-            await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, environment, run);
-            var full = Files.Child(snapshot, project.RelativePath);
-            var metadataText = await Commands.Run(settings.MSBuild,
-                [full, "-nologo", "-p:Configuration=Debug", "-getProperty:TargetPath,_CultivateCaptureReady",
-                 "-getItem:Compile,EmbeddedResource,ProjectReference"], snapshot, environment, Path.Combine(run, "build.log"));
-            using var metadata = JsonDocument.Parse(metadataText);
-            var properties = metadata.RootElement.GetProperty("Properties");
-            if (properties.GetProperty("_CultivateCaptureReady").GetString() != "true")
-                throw new InvalidOperationException("Cultivate's per-user MSBuild hook was not imported. Run install.ps1 again, then check with `cultivate doctor`.");
-            var targetPath = properties.GetProperty("TargetPath").GetString() ?? throw new InvalidDataException("Missing TargetPath.");
-            Files.Child(snapshot, Path.GetRelativePath(snapshot, targetPath));
-            var declared = metadata.RootElement.GetProperty("Items").GetProperty("ProjectReference");
-            foreach (var reference in declared.EnumerateArray())
+            progress("Preparing references for changed projects only");
+            var seeds = Path.Combine(run, "references");
+            Directory.CreateDirectory(seeds);
+            var environment = new Dictionary<string, string>
             {
-                if (reference.TryGetProperty("ReferenceOutputAssembly", out var outputAssembly) &&
-                    outputAssembly.GetString()?.Equals("false", StringComparison.OrdinalIgnoreCase) == true) continue;
-                var relative = Path.GetRelativePath(snapshot, reference.GetProperty("FullPath").GetString()!);
-                if (plan.Projects.Any(x => Files.Comparer.Equals(x.RelativePath, relative))) continue;
-                Files.Child(snapshot, relative);
-                var referenceMetadata = await Commands.Run(settings.MSBuild,
-                    [Files.Child(snapshot, relative), "-nologo", "-p:Configuration=Debug", "-getProperty:TargetPath"],
-                    snapshot, environment, Path.Combine(run, "build.log"));
-                var existingTarget = Files.Full(referenceMetadata.Trim());
-                var outputRelative = Path.GetRelativePath(snapshot, existingTarget);
-                Files.Child(snapshot, outputRelative);
-                if (File.Exists(existingTarget)) continue;
-                var source = Files.Child(plan.Target.Worktree ?? settings.RepositoryRoot, outputRelative);
-                if (!File.Exists(source)) source = Files.Child(settings.RepositoryRoot, outputRelative);
-                if (!File.Exists(source))
-                    throw new FileNotFoundException($"An existing compiled DLL for unchanged project {relative} is required. Build that dependency separately; Cultivate does not automatically rebuild unchanged projects.", source);
-                Directory.CreateDirectory(Path.GetDirectoryName(existingTarget)!);
-                File.Copy(source, existingTarget);
-            }
-            var evaluatedInputs = new HashSet<string>(Files.Comparer);
-            foreach (var itemType in new[] { "Compile", "EmbeddedResource" })
-                foreach (var item in metadata.RootElement.GetProperty("Items").GetProperty(itemType).EnumerateArray())
-                {
-                    var relative = Path.GetRelativePath(snapshot, item.GetProperty("FullPath").GetString()!);
-                    Files.Child(snapshot, relative);
-                    evaluatedInputs.Add(relative);
-                }
-            foreach (var change in plan.Changes.Where(x => project.Owns(x.Path) && new[] { ".cs", ".resx" }.Contains(Path.GetExtension(x.Path), Files.Comparer)))
-                if (!evaluatedInputs.Contains(change.Path.Replace('/', '\\')))
-                    throw new InvalidOperationException($"MSBuild does not compile {change.Path} in Debug. Deployment stopped.");
-            progress($"Building {project.Assembly} ({plan.Projects.IndexOf(project) + 1}/{plan.Projects.Count})");
-            var arguments = new List<string>
-            {
-                full, "-nologo", "-t:Build", "-p:Configuration=Debug", "-p:BuildProjectReferences=false",
-                "-m:1", "-v:minimal",
-                $"-bl:{Path.Combine(run, project.Assembly + ".binlog")}"
+                ["WebfarmPath"] = Path.Combine(run, "intercepted") + "\\",
+                ["CultivateRunDirectory"] = run,
+                ["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets"),
+                ["ReferencePath"] = seeds
             };
-            await Commands.Run(settings.MSBuild, arguments, snapshot, environment, Path.Combine(run, "build.log"));
-            if (!File.Exists(targetPath)) throw new FileNotFoundException("Build succeeded without its expected assembly.", targetPath);
-            var identity = AssemblyName.GetAssemblyName(targetPath);
-            if (!Files.Comparer.Equals(identity.Name, project.Assembly))
-                throw new InvalidDataException($"Unexpected assembly identity for {targetPath}.");
-            File.Copy(targetPath, Path.Combine(seeds, Path.GetFileName(targetPath)), true);
+            var internalNames = plan.Projects.Select(x => x.Assembly).ToHashSet(Files.Comparer);
+            foreach (var project in plan.Projects)
+            {
+                context = new("Reference preparation") { Project = project.RelativePath, Log = Path.Combine(run, "build.log") };
+                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, environment, run);
+                context = context with { Stage = "Project evaluation" };
+                var full = Files.Child(snapshot, project.RelativePath);
+                var metadataText = await Commands.Run(settings.MSBuild,
+                    [full, "-nologo", "-p:Configuration=Debug", "-getProperty:TargetPath,_CultivateCaptureReady",
+                     "-getItem:Compile,EmbeddedResource,ProjectReference"], snapshot, environment, Path.Combine(run, "build.log"), context);
+                using var metadata = JsonDocument.Parse(metadataText);
+                var properties = metadata.RootElement.GetProperty("Properties");
+                if (properties.GetProperty("_CultivateCaptureReady").GetString() != "true")
+                    throw new InvalidOperationException("Cultivate's per-user MSBuild hook was not imported. Run install.ps1 again, then check with `cultivate doctor`.");
+                var targetPath = properties.GetProperty("TargetPath").GetString() ?? throw new InvalidDataException("Missing TargetPath.");
+                Files.Child(snapshot, Path.GetRelativePath(snapshot, targetPath));
+                var declared = metadata.RootElement.GetProperty("Items").GetProperty("ProjectReference");
+                foreach (var reference in declared.EnumerateArray())
+                {
+                    if (reference.TryGetProperty("ReferenceOutputAssembly", out var outputAssembly) &&
+                        outputAssembly.GetString()?.Equals("false", StringComparison.OrdinalIgnoreCase) == true) continue;
+                    var relative = Path.GetRelativePath(snapshot, reference.GetProperty("FullPath").GetString()!);
+                    if (plan.Projects.Any(x => Files.Comparer.Equals(x.RelativePath, relative))) continue;
+                    Files.Child(snapshot, relative);
+                    var referenceMetadata = await Commands.Run(settings.MSBuild,
+                        [Files.Child(snapshot, relative), "-nologo", "-p:Configuration=Debug", "-getProperty:TargetPath"],
+                        snapshot, environment, Path.Combine(run, "build.log"), new("Dependency evaluation") { Project = relative });
+                    var existingTarget = Files.Full(referenceMetadata.Trim());
+                    var outputRelative = Path.GetRelativePath(snapshot, existingTarget);
+                    Files.Child(snapshot, outputRelative);
+                    if (File.Exists(existingTarget)) continue;
+                    var source = Files.Child(plan.Target.Worktree ?? settings.RepositoryRoot, outputRelative);
+                    if (!File.Exists(source)) source = Files.Child(settings.RepositoryRoot, outputRelative);
+                    if (!File.Exists(source))
+                        throw new FileNotFoundException($"An existing compiled DLL for unchanged project {relative} is required. Build that dependency separately; Cultivate does not automatically rebuild unchanged projects.", source);
+                    Directory.CreateDirectory(Path.GetDirectoryName(existingTarget)!);
+                    File.Copy(source, existingTarget);
+                }
+                context = context with { Stage = "Build input validation" };
+                var evaluatedInputs = new HashSet<string>(Files.Comparer);
+                foreach (var itemType in new[] { "Compile", "EmbeddedResource" })
+                    foreach (var item in metadata.RootElement.GetProperty("Items").GetProperty(itemType).EnumerateArray())
+                    {
+                        var relative = Path.GetRelativePath(snapshot, item.GetProperty("FullPath").GetString()!);
+                        Files.Child(snapshot, relative);
+                        evaluatedInputs.Add(relative);
+                    }
+                foreach (var change in plan.Changes.Where(x => project.Owns(x.Path) && new[] { ".cs", ".resx" }.Contains(Path.GetExtension(x.Path), Files.Comparer)))
+                    if (!evaluatedInputs.Contains(change.Path.Replace('/', '\\')))
+                        throw new InvalidOperationException($"MSBuild does not compile {change.Path} in Debug. Deployment stopped.");
+                progress($"Building {project.Assembly} ({plan.Projects.IndexOf(project) + 1}/{plan.Projects.Count})");
+                context = context with { Stage = "Build", BinaryLog = Path.Combine(run, project.Assembly + ".binlog") };
+                var arguments = new List<string>
+                {
+                    full, "-nologo", "-t:Build", "-p:Configuration=Debug", "-p:BuildProjectReferences=false",
+                    "-m:1", "-v:minimal",
+                    $"-bl:{Path.Combine(run, project.Assembly + ".binlog")}"
+                };
+                await Commands.Run(settings.MSBuild, arguments, snapshot, environment, Path.Combine(run, "build.log"), context);
+                context = context with { Stage = "Artifact verification" };
+                if (!File.Exists(targetPath)) throw new FileNotFoundException("Build succeeded without its expected assembly.", targetPath);
+                var identity = AssemblyName.GetAssemblyName(targetPath);
+                if (!Files.Comparer.Equals(identity.Name, project.Assembly))
+                    throw new InvalidDataException($"Unexpected assembly identity for {targetPath}.");
+                File.Copy(targetPath, Path.Combine(seeds, Path.GetFileName(targetPath)), true);
+            }
+            context = new("Artifact verification") { Log = Path.Combine(run, "build.log") };
+            progress("Verifying only the changed projects' own DLLs");
+            return Artifacts.Collect(run, snapshot, plan.Projects);
         }
-        progress("Verifying only the changed projects' own DLLs");
-        return Artifacts.Collect(run, snapshot, plan.Projects);
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
+            UnauthorizedAccessException or JsonException)
+        {
+            Diagnostics.Attach(exception, context with { RunDirectory = run, Snapshot = snapshot, Branch = plan.Target.Branch, Worktree = plan.Target.Worktree });
+            throw;
+        }
     }
 
     private async Task Prepare(ProjectInfo project, string snapshot, string sourceRoot, string seeds, HashSet<string> internalNames,
@@ -187,8 +221,12 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         {
             await Commands.Run(settings.MSBuild,
                 [Files.Child(snapshot, project.RelativePath), "-nologo", "-t:Restore", "-p:Configuration=Debug",
-                 "-p:RestorePackagesConfig=true", $"-p:SolutionDir={snapshot}\\", "-v:minimal"],
-                snapshot, environment, Path.Combine(run, "restore.log"));
+                 "-p:RestorePackagesConfig=true", $"-p:SolutionDir={snapshot}\\", "-v:minimal",
+                 $"-bl:{Path.Combine(run, project.Assembly + ".restore.binlog")}"],
+                snapshot, environment, Path.Combine(run, "restore.log"), new("Package restore")
+                {
+                    Project = project.RelativePath, BinaryLog = Path.Combine(run, project.Assembly + ".restore.binlog")
+                });
         }
         foreach (var hint in project.Hints)
         {

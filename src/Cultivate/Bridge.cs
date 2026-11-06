@@ -11,15 +11,21 @@ internal sealed class Bridge(Settings settings)
         var input = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".json");
         var output = input + ".result";
         Files.WriteJson(input, new { settings.WebfarmRoot, settings.StateRoot, settings.MappingAssembly, Payload = payload });
+        var stage = action switch { "Mappings" => "Mapping lookup", "Check" => "Deployment preflight", _ => action };
         try
         {
             await Commands.Run(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"),
                 ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(AppContext.BaseDirectory, "Bridge.ps1"),
                  "-Action", action, "-InputPath", input, "-OutputPath", output],
                 log: action is "Status" or "Heartbeat" ? null :
-                    Path.Combine(Files.Home, "Logs", "bridge-" + Path.GetFileNameWithoutExtension(input) + ".log"));
+                    Path.Combine(Files.Home, "Logs", "bridge-" + Path.GetFileNameWithoutExtension(input) + ".log"), context: new(stage));
             using var document = JsonDocument.Parse(await File.ReadAllTextAsync(output));
             return document.RootElement.Clone();
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.Text.Json.JsonException or UnauthorizedAccessException)
+        {
+            Diagnostics.Attach(exception, new(stage));
+            throw;
         }
         finally
         {
