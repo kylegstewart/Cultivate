@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.13 — 2026-11-06
+
 - Fix: a webfarm file changed outside Cultivate, such as by a manual Visual Studio build, no longer blocks
   activating or restoring a deployment. Cultivate leaves that file as is instead of restoring over it, stops
   tracking it, and lists it as "Kept (changed outside Cultivate)". If the new deployment includes the file,
