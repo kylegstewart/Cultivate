@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.12 — 2026-11-06
+
 - Fix: Backspace, Delete, and other editor commands work in documents Cultivate opens. Visual Studio now
   starts directly with the solution instead of showing the Start window, which stayed open behind the IDE
   and blocked those commands.
