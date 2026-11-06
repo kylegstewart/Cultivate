@@ -106,11 +106,8 @@ internal static class Program
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
-            var log = Path.Combine(Files.Home, "Logs", "last-error.log");
-            Directory.CreateDirectory(Path.GetDirectoryName(log)!);
-            await File.WriteAllTextAsync(log, exception.ToString());
-            var message = exception.Message.Trim().Length != 0 ? exception.Message : exception.ToString().Split('\n')[0].Trim();
-            if (args.FirstOrDefault() != "watch") Console.Error.WriteLine($"Cultivate: {message}\nDetails: {log}");
+            var report = Diagnostics.Record(exception, args.FirstOrDefault() ?? "Startup");
+            if (args.FirstOrDefault() != "watch") Console.Error.WriteLine($"Cultivate: {report.Label}\n{report.Text}");
             if (args.Length == 0 && !Console.IsInputRedirected)
             {
                 Console.Error.WriteLine("Press any key to close.");

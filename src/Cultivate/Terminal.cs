@@ -77,7 +77,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     state.Mode == "Cultivate" && DateTime.TryParse(state.Heartbeat, out var heartbeat) &&
                     DateTime.UtcNow - heartbeat.ToUniversalTime() < TimeSpan.FromSeconds(20) ? "[green]watching saved files[/]" : "[yellow]no healthy auto-update worker[/]";
                 cards.Add(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]LIVE[/]  {Escape(state.Branch)}\n{Escape(state.SourceRoot.Length == 0 ? state.SourceRef : state.SourceRoot)}\n{health}" +
-                    (string.IsNullOrEmpty(state.LastError) ? "" : $"\n[red]Update blocked:[/] {Escape(state.LastError)}")), "ACTIVE DEPLOYMENT", TerminalStyle.Accent));
+                    (string.IsNullOrEmpty(state.LastError) ? "" : $"\n[red]Automatic update failed:[/] {Escape(state.LastError)}")), "ACTIVE DEPLOYMENT", TerminalStyle.Accent));
             }
             else cards.Add(TerminalStyle.Card(new Markup(
                 $"[{TerminalStyle.Gold}]READY WHEN YOU ARE[/]\n[{TerminalStyle.Muted}]Choose a version to inspect its files and builds. Nothing deploys until you confirm.[/]"),
@@ -158,7 +158,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
                 System.Xml.XmlException or System.Text.Json.JsonException)
             {
-                ShowError(exception);
+                ShowError(exception, action);
                 Pause();
             }
         }
@@ -279,13 +279,10 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         AnsiConsole.MarkupLine($"\n[{TerminalStyle.Gold}]Press any key[/] [{TerminalStyle.Muted}]to continue[/]");
         Console.ReadKey(true);
     }
-    internal static void ShowError(Exception exception)
+    internal static void ShowError(Exception exception, string stage = "Operation")
     {
-        var log = Path.Combine(Files.Home, "Logs", "last-error.log");
-        Directory.CreateDirectory(Path.GetDirectoryName(log)!);
-        File.WriteAllText(log, exception.ToString());
-        AnsiConsole.Write(TerminalStyle.Card(new Text(exception.Message), "OPERATION BLOCKED", "#F0A3A3"));
-        AnsiConsole.MarkupLine($"[grey]Details: {Escape(log)}[/]");
+        var report = Diagnostics.Record(exception, stage);
+        AnsiConsole.Write(TerminalStyle.Card(new Text(report.Text), report.Label, "#F0A3A3"));
     }
 
 }
