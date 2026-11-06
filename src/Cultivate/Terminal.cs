@@ -241,7 +241,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             .AddColumn($"[{TerminalStyle.Accent}]UPDATED ON {Escape(webfarmRoot.ToUpperInvariant())}[/]")
             .AddColumn($"[{TerminalStyle.Accent}]CHANGE[/]");
         foreach (var file in state.Updated)
-            table.AddRow(Escape(file.RelativePath), $"[{(file.Change == UpdatedFile.Restored ? TerminalStyle.Gold : TerminalStyle.Muted)}]{Escape(file.Change)}[/]");
+            table.AddRow(Escape(file.RelativePath), $"[{(file.Change is UpdatedFile.Restored or UpdatedFile.Kept ? TerminalStyle.Gold : TerminalStyle.Muted)}]{Escape(file.Change)}[/]");
         if (state.Updated.Count == 0) table.AddRow("[grey]No webfarm files changed[/]", "");
         return table;
     }

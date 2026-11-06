@@ -5,6 +5,11 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: a webfarm file changed outside Cultivate, such as by a manual Visual Studio build, no longer blocks
+  activating or restoring a deployment. Cultivate leaves that file as is instead of restoring over it, stops
+  tracking it, and lists it as "Kept (changed outside Cultivate)". If the new deployment includes the file,
+  Cultivate replaces it and backs up the manual build as its original.
+
 ## 1.1.12 — 2026-11-06
 
 - Fix: Backspace, Delete, and other editor commands work in documents Cultivate opens. Visual Studio now

@@ -69,9 +69,10 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     file.Delete ? UpdatedFile.Deleted :
                     runtimeFiles.Any(x => Files.Comparer.Equals(x.RelativePath, file.RelativePath)) ? (reuse ? UpdatedFile.Reused : UpdatedFile.Built) :
                     UpdatedFile.Synced))
-                // The bridge restores the previous version's files that this one no longer deploys.
+                // The bridge restores the previous version's files that this one no longer deploys, unless they changed outside Cultivate.
                 .Concat((previous?.Active == true ? previous.Files : []).Where(file => !deployed.Contains(file.RelativePath))
-                    .Select(file => new UpdatedFile(file.RelativePath, UpdatedFile.Restored)))
+                    .Select(file => new UpdatedFile(file.RelativePath,
+                        state.Kept.Contains(file.RelativePath, Files.Comparer) ? UpdatedFile.Kept : UpdatedFile.Restored)))
                 .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase).ToList();
             if (watch)
             {

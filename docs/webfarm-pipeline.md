@@ -384,21 +384,22 @@ Everything below runs while holding `workspace.lock`.
    be unique, and each file's current SHA-256 must equal the hash `Cultivate.exe` computed after the build.
 3. **Switch or update in place.**
    - **New activation** (any other version, or a fresh activation of the same one): the previous version is
-     marked inactive under a new token, and **all** of its files are restored to their originals first.
-     Then a new journal is started. Originals mean the farm files saved before Cultivate's override, not
-     the previous development branch's files.
-   - **Worker update** of the same source and ref: the journal is kept. Each existing entry must still hold
-     either its deployed or its original hash, and its backup must still be intact. Files the new plan no
-     longer deploys are restored individually inside the publish try block below.
+     marked inactive under a new token, and **all** of its files are restored to their originals first,
+     except files changed outside Cultivate (see Restore). Then a new journal is started. Originals mean the
+     farm files saved before Cultivate's override, not the previous development branch's files.
+   - **Worker update** of the same source and ref: the journal is kept. Each existing entry's backup must still
+     be intact, unless its file changed outside Cultivate. Files the new plan no longer deploys are
+     restored individually inside the publish try block below.
 4. **Write ahead.** The new or reused state is saved with `Active = false` and a new token before applying
    the new payload or restoring its obsolete entries. Any previous activation's restore in step 3 has
    already happened.
 5. **Copy each file** (`Copy-WorkspaceFile`):
    1. Copy the source to `<guid>.upload` in the journal folder, and hash it.
    2. Hash the current destination.
-   3. **If the file is already journaled,** the destination must match its `DeployedHash` or `OriginalHash`.
-      Anything else means someone changed the farm file, and the deploy stops. An identical file is
-      skipped.
+   3. **If the file is already journaled,** an identical file is skipped. If the destination matches
+      neither its `DeployedHash` nor its `OriginalHash`, someone changed the farm file, for example with a
+      manual build. Cultivate drops that entry and its backup and treats the file as new to the journal, so
+      the changed file becomes the original that a later restore returns to.
    4. **If the file is new to the journal,** back up the existing destination (if any) to `<guid>.backup`
       and record `OriginalHash`.
    5. Record the new `DeployedHash`, **save the journal**, and only then copy (or delete) the file.
@@ -407,13 +408,13 @@ Everything below runs while holding `workspace.lock`.
 7. **On failure inside the publish try block,** the error is saved to `LastError` and the bridge attempts
    to restore every remaining journaled file to its original, including files from an in-place worker
    update. It rethrows the failure; it does not reactivate the previous development version. Restoration
-   can itself fail because of an external edit, a missing backup, permissions, or a lost share. Remaining
+   can itself fail because of a missing backup, permissions, or a lost share. Remaining
    entries and backups are kept for recovery. Earlier validation failures stop before this try block and
    do not trigger this rollback.
 
 `Cultivate.exe` then builds the **deployment summary** from the payload and the previous journal. Each file
-is listed as built and copied, copied (unchanged build), synced, deleted, or restored to its original (files
-the old version deployed that the new one doesn't).
+is listed as built and copied, copied (unchanged build), synced, deleted, restored to its original, or kept
+(the last two for files the old version deployed that the new one doesn't).
 These labels describe the payload's actions; identical content may be skipped by the bridge. The summary
 is added to the activation result by C# and is not persisted as part of `workspace.json`.
 
@@ -422,12 +423,13 @@ is added to the activation result by C# and is not persisted as part of `workspa
 `Restore` (`Disable-WebfarmWorkspace`) takes the lock, marks the journal inactive with a new token (which
 stops the worker), and restores files in two passes:
 
-1. **Verify everything first.** Every destination must still hold its deployed or original hash, and every
-   backup must match its `OriginalHash`. A file changed outside Cultivate blocks the whole restore and is
-   never overwritten.
-2. **Restore each file.** Cultivate copies the backup back, or deletes the file if it didn't exist before,
-   then verifies the hash and removes the entry from the journal. Only after that does it delete the
-   backup.
+1. **Verify everything first.** Every backup must match its `OriginalHash`. Files changed outside
+   Cultivate are skipped here, because their backups are not used.
+2. **Restore each file.** A file whose destination matches neither its deployed nor its original hash
+   changed outside Cultivate, usually from a manual build. Cultivate keeps it as is, drops its entry and
+   backup, and reports it as kept (`[KEPT]` in the bridge log). For every other file, Cultivate copies
+   the backup back, or deletes the file if it didn't exist before, then verifies the hash and removes the
+   entry from the journal. Only after that does it delete the backup.
 
 Because the journal format is unchanged, `cultivate restore` also undoes deployments made by the original
 WebfarmWorkspace utility when configured to use the same `StateRoot` and webfarm root.
@@ -437,7 +439,7 @@ WebfarmWorkspace utility when configured to use the same `StateRoot` and webfarm
 | Failure point | Effect on the webfarm |
 | --- | --- |
 | Mapping, snapshot, reference preparation, restore of packages, build, or final source check | Publishing has not started. The current farm files remain as they were. |
-| Expected-token or payload validation; in-place validation of existing files/backups | Rejected before publish changes. External edits remain untouched. |
+| Expected-token or payload validation; in-place validation of existing backups | Rejected before publish changes. |
 | Restoring a previous activation while switching versions | Restore verifies the entries first, then changes them one at a time. An I/O failure can leave a partial restore with journal entries retained. |
 | Copying a new payload or removing obsolete files during a worker update | The bridge attempts to restore the journaled originals. The previous development deployment is not guaranteed to remain active. A failed rollback leaves recovery work recorded in the journal. |
 | Worker startup after a successful deploy | Files are already deployed. A worker timeout is not a deployment rollback; inspect status before relying on automatic saves. |
@@ -544,5 +546,5 @@ cultivate restore --yes
 Run `cultivate status` for the journal as JSON, and `cultivate doctor` to check the hook, the runtime
 files, the mapping assembly's presence, and access to the journal. Doctor does not prove that a mapping
 query will succeed or that a new DLL's runtime dependencies are compatible with the farm. Run a plan to
-exercise frontend mapping lookup. If restoration is blocked by an external edit, resolve that file and
-retry Restore while keeping its journal and backup intact.
+exercise frontend mapping lookup. If restoration fails, retry Restore while
+keeping the journal and its backups intact.

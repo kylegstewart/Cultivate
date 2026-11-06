@@ -5,6 +5,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:Mappings = @{}
+$script:Kept = @()
 
 function Get-WorkspacePath([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path) -or
@@ -122,11 +123,14 @@ function Copy-WorkspaceFile($Context, $State, [string]$Source, [string]$Relative
             $sourceHash = Get-WorkspaceHash $snapshot
         }
         $destinationHash = Get-WorkspaceHash $destination
+        if ($entry.Count -eq 1 -and $destinationHash -ne $entry[0].DeployedHash -and $destinationHash -ne $entry[0].OriginalHash) {
+            # The outside change becomes the original this deployment backs up and later restores.
+            Remove-WorkspaceEntry $Context $State $entry[0]
+            Write-Host "[REPLACED] $destination changed outside Cultivate; backing it up before copying."
+            $entry = @()
+        }
         if ($entry.Count -eq 1) {
             $entry = $entry[0]
-            if ($destinationHash -ne $entry.DeployedHash -and $destinationHash -ne $entry.OriginalHash) {
-                throw "Webfarm file changed outside this tool: '$destination'. Resolve it before copying or restoring."
-            }
             if ($entry.Source -ne $sourcePath) { throw "Multiple source files map to '$destination'." }
             if ($sourceHash -eq $destinationHash) { return }
         } else {
@@ -154,16 +158,25 @@ function Copy-WorkspaceFile($Context, $State, [string]$Source, [string]$Relative
     }
 }
 
+function Test-WorkspaceFileChanged($Context, $Entry) {
+    $hash = Get-WorkspaceHash (Assert-WorkspaceChildPath (Join-Path $Context.Root $Entry.RelativePath) $Context.Root)
+    $hash -ne $Entry.DeployedHash -and $hash -ne $Entry.OriginalHash
+}
+
+function Remove-WorkspaceEntry($Context, $State, $Entry) {
+    $State.Files = @($State.Files | Where-Object { $_.RelativePath -ne $Entry.RelativePath })
+    Save-WorkspaceState $Context $State
+    $backupPath = Join-Path $Context.Directory $Entry.Backup
+    if (Test-Path -LiteralPath $backupPath) { [IO.File]::Delete($backupPath) }
+}
+
 function Assert-WorkspaceFiles($Context, $Entries) {
     foreach ($entry in $Entries) {
-        $destination = Assert-WorkspaceChildPath (Join-Path $Context.Root $entry.RelativePath) $Context.Root
-        $hash = Get-WorkspaceHash $destination
-        if ($hash -ne $entry.DeployedHash -and $hash -ne $entry.OriginalHash) {
-            throw "Webfarm file changed outside Cultivate: '$destination'. A manual build may have updated it. Resolve it before copying or restoring; backups are retained in '$($Context.Directory)'."
-        }
+        # Files changed outside Cultivate, such as by a manual build, are kept rather than restored.
+        if (Test-WorkspaceFileChanged $Context $entry) { continue }
         if ($entry.OriginalHash -and
             (Get-WorkspaceHash (Join-Path $Context.Directory $entry.Backup)) -ne $entry.OriginalHash) {
-            throw "Missing or damaged backup for '$destination'."
+            throw "Missing or damaged backup for '$(Join-Path $Context.Root $entry.RelativePath)'."
         }
     }
 }
@@ -172,6 +185,12 @@ function Restore-WorkspaceFiles($Context, $State, $Entries = $State.Files) {
     Assert-WorkspaceFiles $Context $Entries
     foreach ($entry in @($Entries)) {
         $destination = Join-Path $Context.Root $entry.RelativePath
+        if (Test-WorkspaceFileChanged $Context $entry) {
+            Remove-WorkspaceEntry $Context $State $entry
+            $script:Kept += $entry.RelativePath
+            Write-Host "[KEPT] $destination changed outside Cultivate; leaving it as is."
+            continue
+        }
         $backupPath = Join-Path $Context.Directory $entry.Backup
         if ($entry.OriginalHash) { [IO.File]::Copy($backupPath, $destination, $true) }
         elseif (Test-Path -LiteralPath $destination) { [IO.File]::Delete($destination) }
