@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.16 — 2026-11-06
+
 - Change: activation previews default to Activate once (no automatic updates).
 
 ## 1.1.15 — 2026-11-06
