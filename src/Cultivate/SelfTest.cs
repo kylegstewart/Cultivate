@@ -295,25 +295,6 @@ internal static class SelfTest
             Check((await bridge.Status())?.Token == state.Token && Files.Hash(pageDestination) == pageHash &&
                 File.ReadAllText(frontendDestination) == "second saved markup", "failed builds preserve the last successful files");
             Save(@"Page\Value.cs", "public class PageValue { public static int Value => CoreValue.Value + 1; }");
-            var deployedBytes = File.ReadAllBytes(pageDestination);
-            File.WriteAllText(pageDestination, "output from a manual build");
-            progress.Clear();
-            await Reject(() => pipeline.Activate(markupUpdate, progress.Add, watch: false),
-                "manual build output is detected before Cultivate prepares another deployment");
-            Check(progress.Count == 0 && (await bridge.Status())?.Token == state.Token &&
-                File.ReadAllText(pageDestination) == "output from a manual build",
-                "preflight conflicts preserve the manual output and the active deployment journal");
-            var conflictSnapshot = Path.Combine(home, "conflict snapshot");
-            Directory.CreateDirectory(conflictSnapshot);
-            await Reject(() => bridge.Call("Deploy", new
-            {
-                Snapshot = conflictSnapshot, SourceRoot = state.SourceRoot, SourceRef = state.SourceRef,
-                state.Branch, state.Fingerprint, ExpectedToken = state.Token, WatchEnabled = false,
-                state.BuildFingerprint, state.RuntimeFiles, WorkerUpdate = false, Files = Array.Empty<object>()
-            }), "publication rechecks external changes after preparation");
-            Check((await bridge.Status())?.Token == state.Token && File.ReadAllText(pageDestination) == "output from a manual build",
-                "publication conflicts do not invalidate the active journal or overwrite manual output");
-            File.WriteAllBytes(pageDestination, deployedBytes);
             var backup = Directory.EnumerateFiles(settings.StateRoot, "*.backup", SearchOption.AllDirectories).First();
             var backupBytes = File.ReadAllBytes(backup);
             File.WriteAllText(backup, "damaged backup");
@@ -323,15 +304,23 @@ internal static class SelfTest
                 Check((await bridge.Status())?.Token == state.Token, "damaged backup validation preserves the active journal");
             }
             finally { File.WriteAllBytes(backup, backupBytes); }
-            File.WriteAllText(frontendDestination, "foreign edit");
-            await Reject(() => bridge.Call("Restore"), "foreign server edits block restoration");
-            Check(File.ReadAllText(frontendDestination) == "foreign edit", "foreign content is not overwritten");
-            Check((await bridge.Status())?.Token == state.Token, "a rejected restore preserves the active deployment journal");
-            File.WriteAllText(frontendDestination, "second saved markup");
             await bridge.Call("Restore");
             Check(File.ReadAllText(frontendDestination) == "server baseline" && Files.Hash(pageDestination) == originalHashes[@"bin\Page.dll"],
                 "restore returns original markup and the original target DLL");
 
+            state = await pipeline.Activate(await planner.Create(target, Maps), _ => { }, watch: false);
+            var originalPage = File.ReadAllBytes(Directory.EnumerateFiles(settings.StateRoot, "*.backup", SearchOption.AllDirectories)
+                .First(file => Files.Hash(file) == originalHashes[@"bin\Page.dll"]));
+            var activePageHash = Files.Hash(pageDestination);
+            File.WriteAllText(pageDestination, "output from a manual build");
+            var manualHash = Files.Hash(pageDestination);
+            state = await pipeline.Activate(await planner.Create(target, Maps), _ => { }, watch: false, workerUpdate: true);
+            Check(Files.Hash(pageDestination) == activePageHash && File.ReadAllText(frontendDestination) == "second saved markup",
+                "a manual build of a deployed file does not block the next update, which publishes its file again");
+            Check(Directory.EnumerateFiles(settings.StateRoot, "*.backup", SearchOption.AllDirectories).Any(file => Files.Hash(file) == manualHash),
+                "a replaced manual build becomes the original that restore returns to");
+
+            File.WriteAllText(pageDestination, "second manual build");
             Save(@"Page\View.ascx", "feature markup");
             await G("checkout", "-qb", "frontend-only", "master");
             Save(@"Page\View.ascx", "frontend only");
@@ -340,8 +329,17 @@ internal static class SelfTest
             Check(frontendPlan.CanDeploy && frontendPlan.Projects.Count == 0, "markup-only selection never schedules compilation");
             var frontendState = await pipeline.Activate(frontendPlan, _ => { }, watch: false);
             Check(frontendState.RuntimeFiles.Count == 0 && File.ReadAllText(frontendDestination) == "frontend only" &&
-                Files.Hash(pageDestination) == originalHashes[@"bin\Page.dll"], "markup-only activation builds and copies no DLLs");
-            await bridge.Call("Restore");
+                File.ReadAllText(pageDestination) == "second manual build", "markup-only activation builds and copies no DLLs");
+            Check(frontendState.Updated.Select(file => (file.RelativePath, file.Change)).SequenceEqual(
+                [(@"bin\Page.dll", UpdatedFile.Kept), (@"modules\View.ascx", UpdatedFile.Synced)]),
+                "a manual build of a file the next activation omits is kept and reported instead of blocking it");
+            File.WriteAllText(frontendDestination, "foreign edit");
+            var restored = await bridge.Call("Restore");
+            Check(File.ReadAllText(frontendDestination) == "foreign edit" &&
+                restored.GetProperty("Kept").EnumerateArray().Select(file => file.GetString()).SequenceEqual([@"modules\View.ascx"]) &&
+                (await bridge.Status())?.Files.Count == 0, "restore keeps files changed outside Cultivate and reports them");
+            File.WriteAllText(frontendDestination, "server baseline");
+            File.WriteAllBytes(pageDestination, originalPage);
             File.Delete(Files.Child(settings.RepositoryRoot, @"Page\View.ascx"));
             var deleted = await planner.Create(frontendTarget, Maps);
             Check(deleted.Frontend.Single().Delete, "frontend deletions are explicitly planned");

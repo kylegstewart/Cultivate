@@ -200,6 +200,8 @@ internal sealed class DeploymentState
     public List<RuntimeFile> RuntimeFiles { get; set; } = [];
     /// <summary>The journaled webfarm files this version deployed.</summary>
     public List<JournalEntry> Files { get; set; } = [];
+    /// <summary>Previously deployed files left as is because they changed outside Cultivate. Not stored by the bridge.</summary>
+    public List<string> Kept { get; set; } = [];
     /// <summary>What the activation that returned this state changed on the webfarm. Not stored by the bridge.</summary>
     public List<UpdatedFile> Updated { get; set; } = [];
 }
@@ -207,5 +209,5 @@ internal sealed record JournalEntry(string RelativePath);
 internal sealed record UpdatedFile(string RelativePath, string Change)
 {
     internal const string Built = "Built and copied", Reused = "Copied (unchanged build)", Synced = "Synced",
-        Deleted = "Deleted", Restored = "Restored original";
+        Deleted = "Deleted", Restored = "Restored original", Kept = "Kept (changed outside Cultivate)";
 }

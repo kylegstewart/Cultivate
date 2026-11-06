@@ -26,7 +26,7 @@ $result = & (Get-Module Cultivate.Journal) {
     }
     if ($Action -eq 'Restore') {
         Disable-WebfarmWorkspace $context
-        return @{ Restored = $true }
+        return @{ Restored = $true; Kept = @($script:Kept) }
     }
     if ($Action -eq 'Heartbeat') {
         return (Invoke-WorkspaceLock $context {
@@ -123,6 +123,8 @@ $result = & (Get-Module Cultivate.Journal) {
             Restore-WorkspaceFiles $context $state
             throw
         }
+        # Reported to Cultivate.exe after the final save, so it is not stored in the journal.
+        $state | Add-Member -NotePropertyName Kept -NotePropertyValue @($script:Kept)
         return $state
     }
 } $Action $request
