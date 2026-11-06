@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.15 — 2026-11-06
+
 - Feature: failures now identify the operation, project, branch/worktree, exit code, and useful error lines,
   with targeted checks for compiler, reference, package, targeting-pack, and file-access problems.
   Build and restore logs include phase/project labels, command context, and binary-log paths. The terminal,
