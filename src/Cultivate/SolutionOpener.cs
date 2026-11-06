@@ -56,19 +56,21 @@ internal static class SolutionOpener
         {
             if (dte is null)
             {
+                // Passing the solution skips the Start window, which otherwise stays open and blocks editor
+                // commands such as Backspace and Delete in the documents opened afterward.
                 using var process = Process.Start(new ProcessStartInfo(visualStudio)
                 {
-                    UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(solution)!
+                    UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(solution)!, ArgumentList = { solution }
                 }) ?? throw new InvalidOperationException("Visual Studio could not be started.");
-                var until = DateTime.UtcNow.AddMinutes(2);
+                // Visual Studio rejects automation while loading, so the solution reports open only after its tabs are restored.
+                var until = DateTime.UtcNow.AddMinutes(5);
                 while (dte is null && DateTime.UtcNow < until)
                 {
-                    dte = Retry(() => FindInstance((name, _) => name.EndsWith(":" + process.Id, StringComparison.Ordinal)));
+                    dte = Retry(() => FindInstance((name, instance) => name.EndsWith(":" + process.Id, StringComparison.Ordinal) &&
+                        Files.Comparer.Equals((string)instance.Solution.FullName, solution)));
                     if (dte is null) Thread.Sleep(250);
                 }
-                if (dte is null) throw new InvalidOperationException("Visual Studio did not become ready within two minutes. Try again once it finishes starting.");
-                // Open synchronously before reading restored documents, rather than sending files during startup.
-                Retry(() => { dte.Solution.Open(solution); return true; });
+                if (dte is null) throw new InvalidOperationException("Visual Studio did not open the solution within five minutes. Try again once it finishes loading.");
                 // A new instance restores the solution's last session tabs, such as DLLs; keep only the changed files.
                 Retry(() => { CloseDocumentWindows(dte); return true; });
             }
