@@ -19,7 +19,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         new("Exit", "Close this menu without stopping active automatic updates.")
     ];
 
-    internal static List<MenuAction> PreviewActions(bool canDeploy)
+    internal static List<MenuAction> PreviewActions(bool canDeploy, bool hasSelectableChanges = false)
     {
         var actions = new List<MenuAction>();
         if (canDeploy)
@@ -29,6 +29,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             actions.Add(new("Activate and automatically update saved changes",
                 "Deploy the planned files and enable automatic updates after successful builds."));
         }
+        if (hasSelectableChanges)
+            actions.Add(new("Choose files to deploy", "Uncheck files to exclude them from activation and automatic updates; check them again to include them."));
         actions.Add(new("Show every changed file", "Show all Git changes, including files with no deployment action."));
         actions.Add(new("Back", "Return home without deploying this version."));
         return actions;
@@ -39,11 +41,12 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     internal static List<(Change Change, string Action)> ActionableChanges(Plan plan)
     {
         var actions = new List<(Change, string)>();
-        foreach (var change in plan.Changes)
+        var selected = plan.Changes.Where(change => !IsExcluded(plan, change.Path)).ToList();
+        foreach (var change in selected)
         {
             var frontend = plan.Frontend.FirstOrDefault(file => Files.Comparer.Equals(file.Source, change.Path));
             var owners = plan.Projects.Where(project => Planner.IsCompiledInput(change)
-                ? project.Owns(change, plan.Changes) : project.Owns(change.Path)).ToList();
+                ? project.Owns(change, selected) : project.Owns(change.Path)).ToList();
             if (frontend is not null)
                 actions.Add((change, (frontend.Delete ? "Delete " : "Sync ") + frontend.RelativePath));
             else if (owners.Count != 0)
@@ -51,6 +54,14 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         }
         return actions;
     }
+
+    private static bool IsExcluded(Plan plan, string path) =>
+        plan.ExcludedPaths.Contains(path.Replace('\\', '/'), Files.Comparer);
+
+    internal static List<string> SelectableChanges(Plan plan) => plan.Changes
+        .Where(change => Planner.IsCompiledInput(change) ||
+            Planner.FrontendExtensions.Contains(Path.GetExtension(change.Path)) && !Planner.IsExcluded(change.Path))
+        .Select(change => change.Path).ToList();
 
     public async Task Run()
     {
@@ -208,7 +219,10 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         var target = new VersionPicker(targets, state).Show();
         if (target is null) return;
         var planner = new Planner(settings, git, bridge);
-        var plan = await AnsiConsole.Status().StartAsync("Inspecting changed files, frontend mappings, and owning projects...", _ => planner.Create(target));
+        var excluded = state?.Active == true && state.SourceRef == target.Ref &&
+            Files.Comparer.Equals(state.SourceRoot, target.Worktree ?? "") ? state.ExcludedPaths : [];
+        var plan = await AnsiConsole.Status().StartAsync("Inspecting changed files, frontend mappings, and owning projects...", _ =>
+            planner.Create(target, excludedPaths: excluded));
         while (true)
         {
             AnsiConsole.Clear();
@@ -218,8 +232,9 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 $"[{TerminalStyle.Muted}]SOURCE[/]       {Escape(target.Worktree ?? target.Ref)}\n" +
                 $"[{TerminalStyle.Muted}]DESTINATION[/]  {Escape(settings.WebfarmRoot)}"), "SELECTED VERSION"));
             var actionable = ActionableChanges(plan);
+            var selectable = SelectableChanges(plan);
             AnsiConsole.MarkupLine($"[bold {(plan.CanDeploy ? TerminalStyle.Accent : TerminalStyle.Gold)}]{(plan.CanDeploy ? "READY TO ACTIVATE" : "ACTIVATION BLOCKED")}[/]   " +
-                $"[{TerminalStyle.Muted}]{actionable.Count} changed files   /   {plan.Frontend.Count} frontend   /   {plan.Projects.Count} DLL builds[/]");
+                $"[{TerminalStyle.Muted}]{actionable.Count} selected files   /   {plan.ExcludedPaths.Count} excluded   /   {plan.Frontend.Count} frontend   /   {plan.Projects.Count} DLL builds[/]");
             var changes = new Table().Border(TableBorder.Rounded).BorderColor(Color.FromHex(TerminalStyle.Border)).Expand()
                 .AddColumn($"[{TerminalStyle.Accent}]CHANGED FILES[/]").AddColumn($"[{TerminalStyle.Accent}]ACTION[/]");
             // Each project builds once however many of its files changed; later rows say so instead of repeating the action.
@@ -228,6 +243,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 changes.AddRow(Escape((change.Deleted ? "DELETE " : "") + change.Path),
                     description.StartsWith("Build ", StringComparison.Ordinal) && !shown.Add(description)
                         ? $"[{TerminalStyle.Muted}]{Escape(description[6..])} (same build)[/]" : Escape(description));
+            foreach (var change in plan.Changes.Where(change => IsExcluded(plan, change.Path)))
+                changes.AddRow($"[{TerminalStyle.Muted}]{Escape(change.Path)}[/]", $"[{TerminalStyle.Gold}]Excluded[/]");
             if (actionable.Count == 0) changes.AddRow("[grey]No files have a deployment action[/]", "");
             AnsiConsole.Write(changes);
             AnsiConsole.Write(TerminalStyle.Card(new Markup(plan.Projects.Count == 0 ? $"[{TerminalStyle.Muted}]Frontend only. No DLL builds needed.[/]" :
@@ -235,11 +252,28 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 "CHANGED PROJECTS ONLY"));
             foreach (var note in plan.Notes) AnsiConsole.MarkupLine($"[grey]{Escape(note)}[/]");
             foreach (var error in plan.Errors) AnsiConsole.MarkupLine($"[red]{Escape(error)}[/]");
-            var action = Select("[bold]Preview only[/] - choose an action", PreviewActions(plan.CanDeploy));
+            var action = Select("[bold]Preview only[/] - choose an action", PreviewActions(plan.CanDeploy, selectable.Count != 0));
             if (action == "Back") return;
+            if (action == "Choose files to deploy")
+            {
+                AnsiConsole.Clear();
+                AnsiConsole.Write(TerminalStyle.Header("SELECT DEPLOYMENT FILES", "Checked files deploy. Unchecked files stay excluded from automatic updates."));
+                var prompt = new MultiSelectionPrompt<string>().Title($"[{TerminalStyle.Accent}]Choose files to deploy[/]")
+                    .NotRequired().PageSize(12).HighlightStyle(TerminalStyle.Selection)
+                    .InstructionsText("[grey](Space toggles a file; Enter applies the selection)[/]")
+                    .UseConverter(Escape).AddChoices(selectable);
+                foreach (var path in selectable.Where(path => !IsExcluded(plan, path))) prompt.Select(path);
+                var included = AnsiConsole.Prompt(prompt).ToHashSet(Files.Comparer);
+                excluded = plan.ExcludedPaths.Where(path => !selectable.Contains(path, Files.Comparer))
+                    .Concat(selectable.Where(path => !included.Contains(path))).ToList();
+                plan = await AnsiConsole.Status().StartAsync("Updating selected files and owning projects...", _ =>
+                    planner.Create(target, excludedPaths: excluded));
+                continue;
+            }
             if (action == "Show every changed file")
             {
-                foreach (var change in plan.Changes) AnsiConsole.MarkupLine(Escape((change.Deleted ? "DELETE " : "") + change.Path));
+                foreach (var change in plan.Changes) AnsiConsole.MarkupLine(Escape((IsExcluded(plan, change.Path) ? "EXCLUDED " : "") +
+                    (change.Deleted ? "DELETE " : "") + change.Path));
                 Pause();
                 continue;
             }

@@ -15,7 +15,10 @@ Typing filters actions, the arrow keys move the highlight, and Enter selects.
    refs and are not fetched. Nothing is checked out or switched.
 2. **Review the preview.** It lists actionable changed files, exact frontend destinations, and the
    projects that own changed compiled files. Files with no deployment action, such as generated
-   DLLs, stay hidden unless you choose **Show every changed file**.
+   DLLs, stay hidden unless you choose **Show every changed file**. Use **Choose files to deploy**
+   to uncheck files you want to leave out (Space toggles, Enter applies). The preview marks them
+   **Excluded** and recalculates the frontend copies and DLL builds. Reopen the checklist to include
+   a file again.
 3. **Confirm the destination.** Cultivate takes an isolated snapshot, prepares references, builds
    only the changed projects, then syncs the mapped frontend files and each changed project's
    own DLL.
@@ -23,6 +26,18 @@ Typing filters actions, the arrow keys move the highlight, and Enter selects.
    the menu closes. Frontend saves copy without a rebuild, and compiled changes rebuild only
    their owning projects. A failed build leaves the last successful deployment in place.
 5. **Restore original webfarm files** stops updates and restores the journaled originals.
+
+Exclusions apply to both activation and later automatic updates. Reopening the same active worktree
+or branch keeps its exclusions; a new activation replaces that selection. Newly changed files are
+included unless their paths were excluded. Excluded frontend files are neither copied nor deleted.
+When a selected compiled file shares a project with an excluded file, the temporary build uses the
+excluded file's baseline contents. Added excluded files are omitted; deleted excluded files are
+restored in the snapshot. Your source files stay untouched. Keep related changes selected together:
+if selected code requires an excluded change, the build can fail and the current deployment stays
+in place.
+
+If a previous Cultivate activation already deployed a file you now exclude, the normal version-switch
+cleanup restores its journaled original, subject to the existing protection for external changes.
 
 Only files saved to disk are seen; Cultivate cannot read unsaved editor buffers. It does not
 commit, push, run SQL, deploy site configuration, or modify project source. Frontend mappings are
@@ -38,7 +53,7 @@ blocked. Deployments of the baseline branch itself are refused.
 
 **Frontend** extensions: `.ascx`, `.aspx`, `.css`, `.js`, `.html`, `.htm`, common images
 (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.ico`), and fonts (`.woff`, `.woff2`, `.ttf`,
-`.eot`). Every one needs an unambiguous mapping in Code Release Manager
+`.eot`). Each selected file needs an unambiguous mapping in Code Release Manager
 (`MEYER..MY_CodeRelease_WebfarmFiles`). `bin`, `obj`, `packages`, `.git`, and `Backup` folders are
 excluded.
 

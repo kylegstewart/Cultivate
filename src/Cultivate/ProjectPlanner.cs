@@ -74,14 +74,24 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
 
     internal static bool IsExcluded(string path) => Excluded().IsMatch(path);
 
-    public async Task<Plan> Create(Target target, Func<string, Task<Dictionary<string, string>>>? mapping = null)
+    public async Task<Plan> Create(Target target, Func<string, Task<Dictionary<string, string>>>? mapping = null,
+        IEnumerable<string>? excludedPaths = null)
     {
         var inspected = await git.Inspect(target);
-        var plan = new Plan { Target = target, Commit = inspected.Commit, Changes = inspected.Changes, Fingerprint = inspected.Fingerprint };
+        var excluded = (excludedPaths ?? []).Select(path => path.Replace('\\', '/'))
+            .Select(path => inspected.Changes.FirstOrDefault(change => Files.Comparer.Equals(change.Path, path))?.Path ?? path)
+            .Distinct(Files.Comparer).Order(Files.Comparer).ToList();
+        foreach (var path in excluded) Files.Child(target.Worktree ?? settings.RepositoryRoot, path);
+        var plan = new Plan
+        {
+            Target = target, Commit = inspected.Commit, Baseline = inspected.Baseline,
+            Changes = inspected.Changes, Fingerprint = inspected.Fingerprint, ExcludedPaths = excluded
+        };
+        var selected = plan.Changes.Where(change => !excluded.Contains(change.Path.Replace('\\', '/'), Files.Comparer)).ToList();
         if (target.Ref == "refs/heads/" + settings.BaseBranch || target.Branch == settings.BaseBranch ||
             target.Remote && target.Branch.EndsWith("/" + settings.BaseBranch, StringComparison.OrdinalIgnoreCase))
             plan.Errors.Add("The baseline branch is not a test deployment. Select a development branch.");
-        var frontend = plan.Changes.Where(x => FrontendExtensions.Contains(Path.GetExtension(x.Path)) && !IsExcluded(x.Path)).ToList();
+        var frontend = selected.Where(x => FrontendExtensions.Contains(Path.GetExtension(x.Path)) && !IsExcluded(x.Path)).ToList();
         if (frontend.Count != 0)
         {
             var names = frontend.Select(x => Path.GetFileName(x.Path)).Distinct(Files.Comparer).ToList();
@@ -101,10 +111,11 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
                 plan.Frontend.Add(new(change.Path, destination, change.Deleted));
             }
         }
-        var compiled = plan.Changes.Where(IsCompiledInput).ToList();
+        var compiled = selected.Where(IsCompiledInput).ToList();
         using (var buildHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
         {
-            buildHash.AppendData(Encoding.UTF8.GetBytes("changed-project-targets-v2\0" + plan.Commit + "\0" + settings.MSBuild + "\0"));
+            buildHash.AppendData(Encoding.UTF8.GetBytes("changed-project-targets-v3\0" + plan.Commit + "\0" + settings.MSBuild + "\0" +
+                plan.Baseline + "\0" + string.Join('\0', excluded) + "\0"));
             foreach (var change in compiled)
             {
                 var content = change.Deleted ? "(deleted)" : target.Worktree is null ?
@@ -119,17 +130,18 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
             // Catalog the selected commit, not a different branch in the normal checkout.
             var root = target.Worktree;
             string? catalog = null;
-            if (root is null)
+            if (root is null || excluded.Any(path => Path.GetExtension(path).Equals(".csproj", StringComparison.OrdinalIgnoreCase)))
             {
-                catalog = Path.Combine(Files.Home, "Runs", Guid.NewGuid().ToString("N"), "catalog");
-                Directory.CreateDirectory(Path.GetDirectoryName(catalog)!);
-                await git.Git(settings.RepositoryRoot, "worktree", "add", "--detach", catalog, inspected.Commit);
+                var run = Path.Combine(Files.Home, "Runs", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(run);
+                catalog = await git.Snapshot(plan, run);
                 root = catalog;
             }
             try
             {
                 var paths = (await git.Git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.csproj")).Split('\0', StringSplitOptions.RemoveEmptyEntries);
-                var projects = paths.Where(path => File.ReadAllText(Files.Child(root, path)).Contains("CopyBuildOutputToWebfarm", StringComparison.Ordinal))
+                var projects = paths.Where(path => File.Exists(Files.Child(root, path)) &&
+                    File.ReadAllText(Files.Child(root, path)).Contains("CopyBuildOutputToWebfarm", StringComparison.Ordinal))
                     .Select(path => ProjectInfo.Read(root, path)).ToList();
                 plan.Projects.AddRange(BuildOrder(projects, compiled, plan.Errors));
             }
@@ -138,7 +150,8 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
                 if (catalog is not null) await git.Git(settings.RepositoryRoot, "worktree", "remove", "--force", catalog);
             }
         }
-        var ignored = plan.Changes.Count - frontend.Count - compiled.Count;
+        var ignored = selected.Count - frontend.Count - compiled.Count;
+        if (excluded.Count != 0) plan.Notes.Add($"{excluded.Count} file(s) excluded from this deployment and automatic updates. Excluded build inputs use baseline contents.");
         if (ignored > 0) plan.Notes.Add($"{ignored} other changed file(s) are not deployed (documentation, SQL, config, etc.). No database scripts are executed.");
         if (plan.Projects.Count == 0) plan.Notes.Add("No changed compiled projects: no DLL builds or copies.");
         else plan.Notes.Add("Only projects owning changed compiled files are built. Unchanged dependencies and consumers are not rebuilt or deployed.");

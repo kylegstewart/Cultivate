@@ -81,7 +81,7 @@ internal static class Watcher
                     var stable = await git.Inspect(target);
                     if (stable.Fingerprint != inspected.Fingerprint) continue;
                     lastAttempt = stable.Fingerprint;
-                    var plan = await planner.Create(target);
+                    var plan = await planner.Create(target, excludedPaths: state.ExcludedPaths);
                     if (!plan.CanDeploy) throw new InvalidOperationException(string.Join("\n", plan.Errors));
                     var activation = pipeline.Activate(plan, message => File.AppendAllText(log, $"{DateTime.Now:O} {message}\n"), watch: false, workerUpdate: true);
                     while (!activation.IsCompleted)

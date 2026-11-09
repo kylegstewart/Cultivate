@@ -104,7 +104,7 @@ internal sealed class GitRepository(Settings settings)
         throw new InvalidOperationException($"No default branch (origin/HEAD, main, or master) was found in {root}.");
     }
 
-    public async Task<(string Commit, List<Change> Changes, string Fingerprint)> Inspect(Target target, string? baseBranch = null)
+    public async Task<(string Commit, List<Change> Changes, string Fingerprint, string Baseline)> Inspect(Target target, string? baseBranch = null)
     {
         var root = target.Worktree ?? settings.RepositoryRoot;
         if (target.Worktree is not null)
@@ -149,7 +149,7 @@ internal sealed class GitRepository(Settings settings)
             hash.AppendData(Encoding.UTF8.GetBytes(path + "\0" + contentHash + "\0"));
             changes.Add(new(path, deleted));
         }
-        return (commit, changes, Convert.ToHexString(hash.GetHashAndReset()));
+        return (commit, changes, Convert.ToHexString(hash.GetHashAndReset()), baseline);
     }
 
     public async Task<string> Snapshot(Plan plan, string run)
@@ -173,6 +173,16 @@ internal sealed class GitRepository(Settings settings)
                         File.Copy(source, destination, true);
                     }
                 }
+            }
+            // Exclusions affect build inputs too: a selected file can share a DLL with an excluded file.
+            foreach (var path in plan.ExcludedPaths)
+            {
+                var destination = Files.Child(root, path);
+                var literal = ":(literal)" + path.Replace('\\', '/');
+                if ((await Git(root, "ls-tree", "--name-only", plan.Baseline, "--", literal)).Length == 0)
+                    File.Delete(destination);
+                else
+                    await Git(root, "restore", "--source", plan.Baseline, "--worktree", "--", literal);
             }
             if ((await Inspect(plan.Target)).Fingerprint != plan.Fingerprint)
                 throw new InvalidOperationException("Files changed while taking the snapshot. Preview again; nothing has been deployed.");

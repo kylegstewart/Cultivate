@@ -181,6 +181,8 @@ internal sealed class Plan
     public required Target Target { get; init; }
     public required string Commit { get; init; }
     public required string Fingerprint { get; init; }
+    public string Baseline { get; init; } = "";
+    public List<string> ExcludedPaths { get; init; } = [];
     public string BuildFingerprint { get; set; } = "";
     public List<Change> Changes { get; init; } = [];
     public List<DeployFile> Frontend { get; init; } = [];
@@ -205,6 +207,7 @@ internal sealed class DeploymentState
     public bool WatchEnabled { get; set; }
     public string BuildFingerprint { get; set; } = "";
     public List<RuntimeFile> RuntimeFiles { get; set; } = [];
+    public List<string> ExcludedPaths { get; set; } = [];
     /// <summary>The journaled webfarm files this version deployed.</summary>
     public List<JournalEntry> Files { get; set; } = [];
     /// <summary>Previously deployed files left as is because they changed outside Cultivate. Not stored by the bridge.</summary>

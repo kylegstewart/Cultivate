@@ -67,7 +67,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 Snapshot = snapshot, SourceRoot = plan.Target.Worktree ?? "", SourceRef = plan.Target.Ref,
                 plan.Target.Branch, plan.Fingerprint, ExpectedToken = previous?.Token ?? "",
                 WatchEnabled = watch || workerUpdate,
-                plan.BuildFingerprint, RuntimeFiles = runtimeFiles, WorkerUpdate = workerUpdate,
+                plan.BuildFingerprint, plan.ExcludedPaths, RuntimeFiles = runtimeFiles, WorkerUpdate = workerUpdate,
                 Files = files.Select(x => new { x.Source, x.RelativePath, x.Delete, Hash = x.Delete ? null : Files.Hash(x.Source) }).ToList()
             });
             var state = result.Deserialize<DeploymentState>(Files.Json) ?? throw new InvalidDataException("Deployment did not return its state.");
