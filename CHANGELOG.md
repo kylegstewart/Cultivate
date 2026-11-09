@@ -5,6 +5,11 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: deployment previews offer Choose files to deploy. Uncheck changed files to exclude them
+  from activation and automatic updates, with exclusions shown in the preview and preserved for the
+  active source. Excluded compiled files use baseline contents in the isolated build snapshot so
+  their changes cannot enter a DLL built for another selected file in the same project.
+
 ## 1.1.16 — 2026-11-06
 
 - Change: activation previews default to Activate once (no automatic updates).
