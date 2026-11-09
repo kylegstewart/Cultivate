@@ -43,6 +43,7 @@ internal static class SelfTest
             var settings = await Settings.Read();
             if (!File.Exists(settings.MSBuild))
                 throw new FileNotFoundException("The self-test needs Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack.", settings.MSBuild);
+            await CheckExclusions(home, settings.MSBuild);
             await CheckBuildHooks(home, settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
@@ -1124,6 +1125,8 @@ internal static class SelfTest
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");
+        Check(Terminal.PreviewActions(false, true).Any(action => action.Label == "Choose files to deploy"),
+            "blocked previews allow excluding files with mapping or ownership errors");
 
         static IAnsiConsole LiveConsole(StringWriter output)
         {
@@ -1186,6 +1189,11 @@ internal static class SelfTest
             [@"Sync DesktopModules\Order\ucOrder.ascx", "Build OrderingSystem.dll"]),
             "default rows show the exact frontend destination and owning DLL build");
         Check(preview.Changes.Count == 7, "filtered previews preserve all changes for Show every changed file");
+        Check(Terminal.SelectableChanges(preview).Count == 2, "file selection offers frontend and compiled changes, not generated DLLs or documentation");
+        preview.ExcludedPaths.Add("orderingsystem/order/ucorder.ascx.cs");
+        Check(Terminal.ActionableChanges(preview).Count == 1 && Terminal.SelectableChanges(preview).Count == 2,
+            "excluded files lose deployment actions but remain available to reinclude");
+        preview.ExcludedPaths.Clear();
         var multiFile = new ProjectInfo
         {
             RelativePath = project.RelativePath, Assembly = project.Assembly,
@@ -1216,6 +1224,139 @@ internal static class SelfTest
         preview.Projects.Clear();
         preview.Frontend.Clear();
         Check(Terminal.ActionableChanges(preview).Count == 0, "a preview with no deployment actions has no changed-file rows");
+    }
+
+    private static async Task CheckExclusions(string home, string msbuild)
+    {
+        var settings = new Settings
+        {
+            RepositoryRoot = Path.Combine(home, "exclusions", "repository"),
+            WebfarmRoot = Path.Combine(home, "exclusions", "farm"),
+            StateRoot = Path.Combine(home, "exclusions", "state"), MSBuild = msbuild
+        };
+        Directory.CreateDirectory(settings.RepositoryRoot);
+        Directory.CreateDirectory(settings.WebfarmRoot);
+        var git = new GitRepository(settings);
+        var bridge = new Bridge(settings);
+        var planner = new Planner(settings, git, bridge);
+        async Task G(params string[] args) => _ = await git.Git(settings.RepositoryRoot, args);
+        void Save(string path, string content)
+        {
+            var full = Files.Child(settings.RepositoryRoot, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+        var baselineProject = Project("ExclusionFixture").Replace("<Compile Include=\"Value.cs\" />",
+            "<Compile Include=\"Value.cs\" /><Compile Include=\"Other.cs\" /><Compile Include=\"Gone.cs\" />");
+        await G("init", "-b", "master");
+        await G("config", "user.email", "cultivate-test@localhost");
+        await G("config", "user.name", "Cultivate isolated tests");
+        Save(".gitignore", "bin/\nobj/\n");
+        Save("MyMeyer.sln", "");
+        Save("Fixture/ExclusionFixture.csproj", baselineProject);
+        Save("Fixture/App.config", "<configuration />");
+        Save("Fixture/Value.cs", "public class ExclusionValue { public static int Value => 1; }");
+        Save("Fixture/Other.cs", "public class OtherValue { public static int Value => 10; }");
+        Save("Fixture/Gone.cs", "public class GoneValue { }");
+        Save("Fixture/View.ascx", "baseline markup");
+        Save("Fixture/Removed.css", "baseline css");
+        await G("add", ".");
+        await G("commit", "-qm", "baseline");
+        await G("checkout", "-qb", "feature");
+        Save("Fixture/Value.cs", "public class ExclusionValue { public static int Value => 2; }");
+        Save("Fixture/Other.cs", "excluded committed code cannot compile;");
+        Save("Fixture/ExclusionFixture.csproj", baselineProject.Replace("Gone.cs", "New.cs"));
+        File.Delete(Files.Child(settings.RepositoryRoot, "Fixture/Gone.cs"));
+        Save("Fixture/New.cs", "excluded added code cannot compile;");
+        Save("Fixture/View.ascx", "excluded markup");
+        File.Delete(Files.Child(settings.RepositoryRoot, "Fixture/Removed.css"));
+        await G("add", ".");
+        await G("commit", "-qm", "mixed selected and excluded changes");
+        Save("Fixture/Untracked.cs", "excluded untracked code;");
+        var target = new Target("feature", settings.RepositoryRoot, "refs/heads/feature");
+        string[] excluded = [@"fixture\other.cs", "Fixture/Gone.cs", "Fixture/New.cs", "Fixture/Untracked.cs",
+            "Fixture/ExclusionFixture.csproj", "Fixture/View.ascx", "Fixture/Removed.css"];
+        Task<Dictionary<string, string>> NoMaps(string _) => throw new InvalidOperationException("Excluded frontend must not request mappings.");
+        var plan = await planner.Create(target, NoMaps, excluded);
+        Check(plan.CanDeploy && plan.Frontend.Count == 0 && plan.Projects.Single().Assembly == "ExclusionFixture",
+            "exclusions remove frontend mapping errors and retain only selected project actions");
+        Check(plan.Projects[0].Inputs.Any(path => path.EndsWith("Gone.cs")) && !plan.Projects[0].Inputs.Any(path => path.EndsWith("New.cs")),
+            "project ownership uses the baseline version of an excluded project file");
+        var before = await git.Git(settings.RepositoryRoot, "status", "--porcelain");
+        var snapshot = await git.Snapshot(plan, Path.Combine(home, "exclusions", "snapshot"));
+        try
+        {
+            Check(File.ReadAllText(Files.Child(snapshot, "Fixture/Other.cs")).Contains("=> 10") &&
+                File.Exists(Files.Child(snapshot, "Fixture/Gone.cs")) && !File.Exists(Files.Child(snapshot, "Fixture/New.cs")) &&
+                !File.Exists(Files.Child(snapshot, "Fixture/Untracked.cs")),
+                "snapshot restores excluded modifications and deletions and removes excluded additions");
+            Check(File.ReadAllText(Files.Child(snapshot, "Fixture/Value.cs")).Contains("=> 2") &&
+                File.ReadAllText(Files.Child(snapshot, "Fixture/View.ascx")) == "baseline markup",
+                "snapshot preserves selected changes while excluded frontend uses baseline contents");
+        }
+        finally { await git.Git(settings.RepositoryRoot, "worktree", "remove", "--force", snapshot); }
+        var branch = target with { Worktree = null };
+        var branchPlan = await planner.Create(branch, NoMaps, excluded);
+        Check(branchPlan.CanDeploy && branchPlan.Projects.Single().Inputs.Any(path => path.EndsWith("Gone.cs")),
+            "committed branch previews respect excluded project changes too");
+        Check(before == await git.Git(settings.RepositoryRoot, "status", "--porcelain") &&
+            File.ReadAllText(Files.Child(settings.RepositoryRoot, "Fixture/Other.cs")) == "excluded committed code cannot compile;",
+            "planning and snapshot exclusions never alter the selected source checkout");
+        var allExcluded = await planner.Create(target, NoMaps, plan.Changes.Select(change => change.Path));
+        Check(allExcluded.Frontend.Count == 0 && allExcluded.Projects.Count == 0,
+            "excluding all changes schedules no frontend copies or DLL builds");
+        var frontendOnly = await planner.Create(target, _ => Task.FromResult(
+            new Dictionary<string, string> { ["View.ascx"] = "modules" }),
+            excluded.Where(path => path != "Fixture/View.ascx").Append("Fixture/Value.cs"));
+        Check(frontendOnly.CanDeploy && frontendOnly.Frontend.Count == 1 && frontendOnly.Projects.Count == 0,
+            "excluding the last compiled change removes its DLL build while keeping selected frontend");
+        var includedFrontend = await planner.Create(target, _ => Task.FromResult(new Dictionary<string, string>()),
+            excluded.Where(path => path != "Fixture/View.ascx"));
+        Check(!includedFrontend.CanDeploy, "reincluded unmapped files restore their validation errors");
+        File.WriteAllText(Path.Combine(settings.WebfarmRoot, "View.ascx"), "server markup");
+        File.WriteAllText(Path.Combine(settings.WebfarmRoot, "Removed.css"), "server css");
+        System.Diagnostics.Process? worker = null;
+        try
+        {
+            var state = await new Pipeline(settings, git, bridge).Activate(plan, _ => { }, watch: true);
+            worker = System.Diagnostics.Process.GetProcessById((await bridge.Status())!.WatcherPid);
+            Check(state.ExcludedPaths.SequenceEqual(plan.ExcludedPaths) && state.Files.Single().RelativePath == @"bin\ExclusionFixture.dll",
+                "activation journals exclusions and publishes only the selected DLL");
+            var built = System.Reflection.Assembly.Load(File.ReadAllBytes(state.RuntimeFiles.Single().Source));
+            Check((int)built.GetType("ExclusionValue")!.GetProperty("Value")!.GetValue(null)! == 2 &&
+                (int)built.GetType("OtherValue")!.GetProperty("Value")!.GetValue(null)! == 10,
+                "the published DLL contains selected code and baseline excluded code from the same project");
+            Save("Fixture/Other.cs", "excluded saved code still cannot compile;");
+            var excludedSave = await planner.Create(target, NoMaps, state.ExcludedPaths);
+            Check(excludedSave.BuildFingerprint == plan.BuildFingerprint,
+                "saving excluded code does not invalidate the compiled artifact cache");
+            Save("Fixture/Value.cs", "public class ExclusionValue { public static int Value => 3; }");
+            DeploymentState? updated = null;
+            var expected = (await git.Inspect(target)).Fingerprint;
+            for (var deadline = DateTime.UtcNow.AddSeconds(60); DateTime.UtcNow < deadline; await Task.Delay(500))
+            {
+                updated = await bridge.Status();
+                if (updated?.Active == true && updated.Fingerprint == expected) break;
+            }
+            Check(updated?.Active == true && updated.Fingerprint == expected && updated.ExcludedPaths.SequenceEqual(plan.ExcludedPaths),
+                "automatic updates preserve exclusions while publishing later selected saves");
+            var rebuilt = System.Reflection.Assembly.Load(File.ReadAllBytes(updated!.RuntimeFiles.Single().Source));
+            Check((int)rebuilt.GetType("ExclusionValue")!.GetProperty("Value")!.GetValue(null)! == 3 &&
+                (int)rebuilt.GetType("OtherValue")!.GetProperty("Value")!.GetValue(null)! == 10,
+                "automatic rebuilds include the selected save and keep excluded code at baseline");
+            Check(File.ReadAllText(Path.Combine(settings.WebfarmRoot, "View.ascx")) == "server markup" &&
+                File.ReadAllText(Path.Combine(settings.WebfarmRoot, "Removed.css")) == "server css",
+                "excluded frontend files are neither copied nor deleted during activation or automatic updates");
+        }
+        finally
+        {
+            await bridge.Call("Restore");
+            if (worker is not null)
+            {
+                await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                worker.Dispose();
+            }
+        }
     }
 
     private static string Project(string name, string? dependency = null, string? restorePackage = null)

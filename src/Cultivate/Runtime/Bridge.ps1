@@ -97,6 +97,10 @@ $result = & (Get-Module Cultivate.Journal) {
         $state.Fingerprint = $payload.Fingerprint
         $state.BuildFingerprint = $payload.BuildFingerprint
         $state.RuntimeFiles = @($payload.RuntimeFiles)
+        # Older journals have no exclusions. Add-Member also upgrades them on their next deployment.
+        $excludedPaths = @()
+        if ($payload.PSObject.Properties.Name -contains 'ExcludedPaths') { $excludedPaths = @($payload.ExcludedPaths) }
+        $state | Add-Member -NotePropertyName ExcludedPaths -NotePropertyValue $excludedPaths -Force
         $state.WatchEnabled = $payload.WatchEnabled
         $state.LastError = $null
         $state.Active = $false

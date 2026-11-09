@@ -113,6 +113,14 @@ remote branch, is refused.
 
 `Planner.Create` sorts every changed path into one of three kinds.
 
+The interactive preview's **Choose files to deploy** checklist supplies repository-relative
+`ExcludedPaths`. The plan retains the full `Changes` list for inspection, but excluded paths do not
+request mappings or select project builds. They remain selectable even when excluding them removes
+a mapping or ownership error. When compiled changes remain and project files are excluded, project
+ownership is read from an isolated snapshot with those exclusions applied, so excluded `.csproj`
+changes do not affect the catalog. The baseline commit and exclusion list are included in `BuildFingerprint`;
+later saves to excluded files do not invalidate the compiled cache.
+
 ### Frontend files (copied as-is)
 
 Files with a frontend extension (`.ascx .aspx .css .js .html .htm`, images, and fonts) that aren't under a
@@ -177,6 +185,13 @@ included, and changing those alone does not trigger the source worker.
 untracked files, and removes deleted ones. The result contains the selected commit with saved changes
 overlaid; ignored package and build caches are prepared separately. Your selected worktree is never
 checked out, built in, or modified by activation.
+
+After overlaying saved files, the snapshot resets each `ExcludedPaths` entry to `Plan.Baseline`, the
+merge-base captured during planning. Existing baseline files are restored with `git restore`; files
+absent from the baseline are removed. This prevents excluded code from entering a DLL built for a
+different selected file in the same project. The same rules apply to committed branch targets.
+Selecting dependent changes inconsistently can cause a build failure; exclusions never bypass the
+existing build and artifact checks.
 
 If the fingerprint changed during the copy, the snapshot is discarded. The snapshot worktree is always
 removed with `git worktree remove --force` when the run ends normally or unwinds through an exception.
@@ -352,7 +367,8 @@ destinations:
 ```
 
 `workspace.json` holds the active branch, source, fingerprints, a random **token**, `Active`, the
-worker's PID and heartbeat, `RuntimeFiles`, and `Files`. Each `Files` entry has this shape:
+worker's PID and heartbeat, `RuntimeFiles`, `ExcludedPaths`, and `Files`. Older journals without
+`ExcludedPaths` default to no exclusions. Each `Files` entry has this shape:
 
 ```json
 { "RelativePath": "bin\\MiscApps.dll", "Backup": "<guid>.backup",
@@ -465,8 +481,8 @@ The worker waits 2 seconds between completed loop iterations; inspection and bui
    successor on the new executable and exits.
 4. **Look for changes.** The worker runs `Inspect` on the source. If the fingerprint differs from the
    deployed one (and from the last failed attempt), it waits 800 ms and inspects again, so editors that save
-   in several writes settle first. It then plans again and runs `Activate` with `workerUpdate: true`,
-   sending heartbeats every 2 seconds during long builds.
+   in several writes settle first. It then plans again using the journal's `ExcludedPaths` and runs
+   `Activate` with `workerUpdate: true`, sending heartbeats every 2 seconds during long builds.
    - If the **build fingerprint is unchanged** and the active DLLs cover exactly the planned projects, the
      update needs no new compilation. The verified DLLs in `Runs\<old-run>\verified` are hash-checked and redeployed,
      **without MSBuild**. The summary lists them as copied (unchanged build).
