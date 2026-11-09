@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.17 — 2026-11-09
+
 - Feature: deployment previews offer Choose files to deploy. Uncheck changed files to exclude them
   from activation and automatic updates, with exclusions shown in the preview and preserved for the
   active source. Excluded compiled files use baseline contents in the isolated build snapshot so
