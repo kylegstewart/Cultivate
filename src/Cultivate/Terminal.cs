@@ -9,13 +9,10 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     private const string UpdateAction = "Update Cultivate";
     internal static IReadOnlyList<MenuAction> HomeActions { get; } =
     [
-        new("Choose a worktree or branch", "Browse versions and preview their changed files before deploying anything."),
-        new("Refresh deployment status", "Reload the active version and its automatic-update status."),
-        new("Open solution", "Open a worktree or local branch and its actionable source changes in Visual Studio; create a worktree if needed."),
+        new("Update my webfarm", "Browse versions and preview their changed files before deploying anything."),
+        new("Open solution", "Open a repository's main solution, or a worktree or local branch with its changed source files."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
         new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
-        new("Open logs", "Open Cultivate's diagnostic logs in File Explorer."),
-        new("How it works", "Read the guide to version selection, deployment, and recovery."),
         new("Exit", "Close this menu without stopping active automatic updates.")
     ];
 
@@ -125,7 +122,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         AnsiConsole.MarkupLine($"[{TerminalStyle.Accent}]Updated to Cultivate {Escape(release.Version)}.[/] Restarting...");
                         Updater.Restart();
                         break;
-                    case "Choose a worktree or branch": await Choose(state); break;
+                    case "Update my webfarm": await Choose(state); break;
                     case "Open solution": await OpenSolution(state); break;
                     case "Restore original webfarm files":
                         if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))
@@ -137,30 +134,6 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         break;
                     case "Settings":
                         await Setup.Interactive(settings, state);
-                        Pause();
-                        break;
-                    case "Open logs":
-                        Directory.CreateDirectory(Path.Combine(Files.Home, "Logs"));
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", Path.Combine(Files.Home, "Logs")) { UseShellExecute = true });
-                        break;
-                    case "How it works":
-                        var guide = TerminalStyle.Card(new Text(
-                            "1. Choose a worktree for its saved disk contents, or a branch for committed contents.\n" +
-                            "2. Review frontend destinations and affected projects. Nothing is deployed yet.\n" +
-                            "3. Confirm activation. Cultivate snapshots and builds only projects owning changed compiled files.\n" +
-                            "4. Verified frontend files and DLLs replace the previous test version together.\n" +
-                            "5. Built-in file sync copies later frontend saves; code saves rebuild only the changed projects.\n" +
-                            "   Unchanged dependencies and consumers are never automatically rebuilt or copied.\n" +
-                            "   Failed builds leave the last successful version in place.\n\n" +
-                            "Your Git branch is never switched, committed, or pushed. Unsaved editor buffers are not accessible.\n" +
-                            "Close the old WebfarmFileSync watcher first. Multiple files cannot be atomically swapped on a live IIS share;\n" +
-                            "an interrupted deployment can be recovered with Restore. External webfarm edits block restoration.\n" +
-                            "SQL and site configuration are not automatically published. Static assets need Code Release Manager mappings."),
-                            "HOW CULTIVATE WORKS");
-                        AnsiConsole.Clear();
-                        AnsiConsole.Write(new Banner("FIELD GUIDE", "A safe route from local code to your development webfarm.",
-                            TerminalStyle.Lines(guide) + PauseLines));
-                        AnsiConsole.Write(guide);
                         Pause();
                         break;
                     case "Exit": return;
@@ -182,7 +155,26 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             var myMeyer = await git.Targets();
             return (myMeyer, await git.OtherWorktrees(myMeyer));
         });
-        var target = new VersionPicker(targets.Concat(others), state, openSolution: true).Show();
+        var picker = new VersionPicker(targets.Concat(others), state, openSolution: true);
+        var target = picker.Show();
+        if (picker.OpenMainWorktree)
+        {
+            var roots = await AnsiConsole.Status().StartAsync("Finding repositories' main worktrees...", _ =>
+                git.MainWorktrees(targets.Concat(others)));
+            if (roots.Count == 0) throw new InvalidOperationException("No main worktrees containing a solution were found.");
+            var choices = roots.Select(root => new MenuAction(Path.GetFileName(root) + "  |  " + root,
+                "Open this repository's main worktree solution without opening specific files.")).ToList();
+            choices.Add(new("Back", "Return home without opening a solution."));
+            var choice = Select("Which repository's main worktree?", choices);
+            if (choice == "Back") return;
+            var root = roots[choices.FindIndex(item => item.Label == choice)];
+            var mainSolution = SelectSolution(root);
+            var ide = await Settings.FindVisualStudio()
+                ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution.");
+            await AnsiConsole.Status().StartAsync("Opening the main worktree solution...", _ =>
+                SolutionOpener.Open(ide, mainSolution, []));
+            return;
+        }
         if (target is null) return;
         var visualStudio = await Settings.FindVisualStudio()
             ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution and its changed files.");
@@ -192,11 +184,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         {
             // Another repository has no deployment plan, so every changed source file under its solution opens.
             var root = target.Worktree!;
-            var solutions = SolutionOpener.Solutions(root);
-            solution = solutions.Count == 1 ? solutions[0] : AnsiConsole.Prompt(new SelectionPrompt<string>()
-                .Title($"[{TerminalStyle.Accent}]Which solution in {Escape(Path.GetFileName(root))}?[/]")
-                .HighlightStyle(TerminalStyle.Selection).UseConverter(path => Escape(Path.GetRelativePath(root, path)))
-                .AddChoices(solutions));
+            solution = SelectSolution(root);
             var changes = await AnsiConsole.Status().StartAsync("Finding changed source files to open...", async _ =>
                 (await git.Inspect(target, await git.DefaultBranch(root))).Changes);
             files = SolutionOpener.FilesToOpen(root, solution, changes);
@@ -211,6 +199,16 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         }
         await AnsiConsole.Status().StartAsync("Opening the solution and changed source files...", _ =>
             SolutionOpener.Open(visualStudio, solution, files));
+    }
+
+    private static string SelectSolution(string root)
+    {
+        var solutions = SolutionOpener.Solutions(root);
+        if (solutions.Count == 0) throw new InvalidOperationException($"No solution was found in {root}.");
+        return solutions.Count == 1 ? solutions[0] : AnsiConsole.Prompt(new SelectionPrompt<string>()
+            .Title($"[{TerminalStyle.Accent}]Which solution in {Escape(Path.GetFileName(root))}?[/]")
+            .HighlightStyle(TerminalStyle.Selection).UseConverter(path => Escape(Path.GetRelativePath(root, path)))
+            .AddChoices(solutions));
     }
 
     private async Task Choose(DeploymentState? state)

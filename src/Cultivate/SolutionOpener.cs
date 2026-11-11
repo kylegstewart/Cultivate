@@ -52,7 +52,7 @@ internal static class SolutionOpener
             }
             catch (Exception exception)
             {
-                completion.SetException(new InvalidOperationException("Visual Studio could not open the solution's changed files: " +
+                completion.SetException(new InvalidOperationException("Visual Studio could not open the solution: " +
                     exception.Message, exception));
             }
         });

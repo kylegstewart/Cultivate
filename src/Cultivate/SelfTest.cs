@@ -878,6 +878,20 @@ internal static class SelfTest
             var others = await scoped.OtherWorktrees(await scoped.Targets());
             Check(others.SequenceEqual([new Target("feature", otherWorktree, "refs/heads/feature")]),
                 "the worktrees folder lists other repositories' checkouts once, skipping known MyMeyer worktrees and folders without a solution");
+            File.WriteAllText(solution, "main checkout solution");
+            await git.Git(other, "checkout", "-qb", "primary-work-in-progress");
+            var fromLinkedCheckout = new GitRepository(new Settings { RepositoryRoot = myMeyerWorktree, WorktreesRoot = worktrees });
+            var mainRoots = await fromLinkedCheckout.MainWorktrees((await scoped.Targets()).Concat(others).Concat(others));
+            Check(mainRoots.SequenceEqual(new[] { root, other }.OrderBy(Path.GetFileName, Files.Comparer)),
+                "main solutions resolve each repository's primary checkout once, even from linked worktrees and a non-default branch");
+            Check((await new GitRepository(new Settings { RepositoryRoot = root }).MainWorktrees([])).SequenceEqual([root]),
+                "the configured repository's main solution is available without a worktrees folder");
+            File.Delete(Path.Combine(other, @"App\App.sln"));
+            Check((await scoped.MainWorktrees(others)).SequenceEqual([root]),
+                "a repository whose main checkout has no solution is omitted without creating or switching worktrees");
+            Check(await git.Git(other, "branch", "--show-current") == "primary-work-in-progress" &&
+                File.ReadAllText(Path.Combine(otherWorktree, @"App\Program.cs")) == "feature edit",
+                "main solution discovery preserves primary branches and linked-checkout edits");
             Check(await scoped.DefaultBranch(otherWorktree) == "main" &&
                 SolutionOpener.Solutions(otherWorktree).SequenceEqual([Path.Combine(otherWorktree, @"App\App.sln")]),
                 "another repository uses its own default branch and finds a solution one folder down");
@@ -1038,6 +1052,18 @@ internal static class SelfTest
         static string Render(VersionPicker model, int width, int height) => Capture(model.Render(width, height), width, height);
         Check(Render(picker, 100, 30).Contains("LIVE  agent-017"), "picker marks the actual deployed source");
         picker = new VersionPicker(targets, openSolution: true);
+        Check(picker.Index == -1 && picker.Selected is null &&
+            Render(picker, 100, 30).Contains("> Open main worktree solution"),
+            "the solution picker initially selects its pinned main worktree action");
+        Key(ConsoleKey.DownArrow);
+        Check(picker.Selected == targets[0], "the pinned action navigates down to the first checkout");
+        Key(ConsoleKey.UpArrow);
+        Key(ConsoleKey.UpArrow);
+        Check(picker.Selected == targets[36], "navigating up from the pinned action wraps to the last checkout");
+        Check(Render(picker, 100, 30).Contains("Open main worktree solution"),
+            "the main worktree action stays visible while paging through checkouts");
+        Key(ConsoleKey.Home);
+        Check(picker.Index == -1, "Home returns to the pinned main worktree action");
         Key(ConsoleKey.Tab);
         Check(picker.Kind == VersionKind.Local && picker.Matches.All(x => !x.Remote),
             "the solution picker offers local branches");
@@ -1102,7 +1128,7 @@ internal static class SelfTest
             "action menus show the highlighted explanation instead of generic instructions");
         menu.HandleKey(new('\0', ConsoleKey.DownArrow, false, false, false), 7);
         menuScreen = Capture(menu.Render("Actions", 30), 100, 30);
-        Check(menuScreen.Contains("Reload the active version") && !menuScreen.Contains("Browse versions and preview"),
+        Check(menuScreen.Contains("Open a repository's main solution") && !menuScreen.Contains("Browse versions and preview"),
             "moving the action highlight replaces the footer explanation");
         foreach (var character in "RESTORE")
             menu.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
@@ -1123,6 +1149,9 @@ internal static class SelfTest
         Check(Terminal.HomeActions.Concat(Terminal.PreviewActions(true)).All(action => !string.IsNullOrWhiteSpace(action.Description)),
             "every home and preview action has contextual help");
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
+        Check(Terminal.HomeActions.Select(action => action.Label).SequenceEqual(
+            ["Update my webfarm", "Open solution", "Restore original webfarm files", "Settings", "Exit"]),
+            "the homepage uses Update my webfarm and omits refresh, logs, and the guide");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");
         Check(Terminal.PreviewActions(false, true).Any(action => action.Label == "Choose files to deploy"),
@@ -1149,6 +1178,21 @@ internal static class SelfTest
                 return new('\r', ConsoleKey.Enter, false, false, false);
             });
             Check(selected == targets[0], "the initial version can be selected without an arrow-key redraw");
+        }
+        using (var output = new StringWriter())
+        {
+            picker = new VersionPicker(targets, new DeploymentState { Active = true, SourceRoot = targets[17].Worktree! }, openSolution: true);
+            var selected = picker.Show(LiveConsole(output), () => new('\r', ConsoleKey.Enter, false, false, false));
+            Check(selected is null && picker.OpenMainWorktree,
+                "Enter chooses the pinned main solution action even when another checkout is deployed");
+        }
+        using (var output = new StringWriter())
+        {
+            picker = new VersionPicker([], openSolution: true);
+            Check(Render(picker, 60, 24).Contains("Open main worktree solution"),
+                "the main solution action remains available without listed branches or worktrees");
+            var selected = picker.Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false));
+            Check(selected is null && !picker.OpenMainWorktree, "Escape cancels without choosing a main solution");
         }
         using (var output = new StringWriter())
         {

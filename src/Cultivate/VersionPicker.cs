@@ -14,8 +14,10 @@ internal sealed class VersionPicker
     internal VersionKind Kind { get; private set; }
     internal string Query { get; private set; } = "";
     internal IReadOnlyList<Target> Matches { get; private set; } = [];
+    // In the solution picker, -1 selects the pinned main-worktree action above the paged targets.
     internal int Index { get; private set; }
-    internal Target? Selected => Matches.Count == 0 ? null : Matches[Index];
+    internal Target? Selected => Index < 0 || Matches.Count == 0 ? null : Matches[Index];
+    internal bool OpenMainWorktree { get; private set; }
 
     internal VersionPicker(IEnumerable<Target> targets, DeploymentState? active = null, bool openSolution = false)
     {
@@ -28,14 +30,17 @@ internal sealed class VersionPicker
             this.targets.Any(x => !x.Remote) || openSolution ? VersionKind.Local : VersionKind.Remote;
         Filter();
         var live = Matches.ToList().FindIndex(IsActive);
-        if (live >= 0) Index = live;
+        if (!openSolution && live >= 0) Index = live;
     }
 
     internal static int PageSize(int height) => Math.Clamp(height - 18, 3, 18);
+    private int VisiblePageSize(int height) => PageSize(height - (openSolution ? 1 : 0));
 
     internal void HandleKey(ConsoleKeyInfo key, int pageSize)
     {
         var last = Math.Max(0, Matches.Count - 1);
+        var first = openSolution ? -1 : 0;
+        if (openSolution && Matches.Count == 0) last = -1;
         switch (key.Key)
         {
             case ConsoleKey.Tab:
@@ -43,11 +48,11 @@ internal sealed class VersionPicker
                 break;
             case ConsoleKey.LeftArrow: ChangeKind(-1); break;
             case ConsoleKey.RightArrow: ChangeKind(1); break;
-            case ConsoleKey.UpArrow: Index = Index == 0 ? last : Index - 1; break;
-            case ConsoleKey.DownArrow: Index = Index == last ? 0 : Index + 1; break;
-            case ConsoleKey.PageUp: Index = Math.Max(0, Index - pageSize); break;
+            case ConsoleKey.UpArrow: Index = Index == first ? last : Index - 1; break;
+            case ConsoleKey.DownArrow: Index = Index == last ? first : Index + 1; break;
+            case ConsoleKey.PageUp: Index = Math.Max(first, Index - pageSize); break;
             case ConsoleKey.PageDown: Index = Math.Min(last, Index + pageSize); break;
-            case ConsoleKey.Home: Index = 0; break;
+            case ConsoleKey.Home: Index = first; break;
             case ConsoleKey.End: Index = last; break;
             case ConsoleKey.Backspace:
                 if (Query.Length != 0) { Query = Query[..^1]; Filter(); }
@@ -83,7 +88,7 @@ internal sealed class VersionPicker
             x.Branch.Contains(term, StringComparison.OrdinalIgnoreCase) ||
             (x.Worktree?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false) ||
             x.Ref.Contains(term, StringComparison.OrdinalIgnoreCase))).ToArray();
-        Index = 0;
+        Index = openSolution && (Query.Length == 0 || Matches.Count == 0) ? -1 : 0;
     }
 
     private bool IsActive(Target target) => active?.Active == true &&
@@ -93,8 +98,8 @@ internal sealed class VersionPicker
 
     internal IRenderable Render(int width, int height)
     {
-        var pageSize = PageSize(height);
-        var start = Index / pageSize * pageSize;
+        var pageSize = VisiblePageSize(height);
+        var start = Math.Max(0, Index) / pageSize * pageSize;
         var end = Math.Min(start + pageSize, Matches.Count);
         var tabs = string.Join("   ", kinds.Select(kind =>
         {
@@ -129,15 +134,23 @@ internal sealed class VersionPicker
                 TerminalStyle.Line(item.Branch, style), TerminalStyle.Line(folder, style));
         }
         var selectedTarget = Selected;
-        IRenderable details = selectedTarget is null
+        IRenderable details = openSolution && Index < 0
+            ? new Text("Choose a repository and open its main worktree solution without specific files.")
+            : selectedTarget is null
             ? new Markup($"[{TerminalStyle.Muted}]No matches in this source. Change tabs or press Ctrl+U to clear the search.[/]")
             : new Rows(
                 TerminalStyle.Line(selectedTarget.Branch, new Style(Color.FromHex(TerminalStyle.Accent), decoration: Decoration.Bold)),
                 TerminalStyle.Line(selectedTarget.Worktree is not null ? DisplayPath(selectedTarget.Worktree) : selectedTarget.Ref));
-        return new Rows(
+        var content = new List<IRenderable>
+        {
             TerminalStyle.Header(openSolution ? "OPEN SOLUTION" : "VERSION LIBRARY",
-                openSolution ? "Choose a worktree or local branch to open." : "Find your version. Preview before you deploy."),
+                openSolution ? "Open a main solution, worktree, or local branch." : "Find your version. Preview before you deploy."),
             new Text(""),
+        };
+        if (openSolution)
+            content.Add(TerminalStyle.Line((Index < 0 ? "> " : "  ") + "Open main worktree solution",
+                Index < 0 ? TerminalStyle.Selection : new Style(Color.FromHex(TerminalStyle.Text))));
+        content.AddRange([
             new Markup(tabs),
             new Markup($"[{TerminalStyle.Muted}]{description}[/]"),
             TerminalStyle.Line(Query.Length == 0 ? "/  Type a branch name or any part of a path..." : "/  " + Query,
@@ -149,7 +162,8 @@ internal sealed class VersionPicker
             TerminalStyle.Card(details, "SELECTED SOURCE"),
             new Markup($"[{TerminalStyle.Gold}]Tab[/] source   [{TerminalStyle.Gold}]arrows[/] move   [{TerminalStyle.Gold}]Enter[/] " +
                 $"{(openSolution ? "open" : "preview")}   [{TerminalStyle.Gold}]Esc[/] back"),
-            new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
+            new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]")]);
+        return new Rows(content);
     }
 
     // Solutions can come from several repositories, so the solution picker also names the repository folder.
@@ -179,8 +193,13 @@ internal sealed class VersionPicker
                 {
                     var key = readKey();
                     if (key.Key == ConsoleKey.Escape) return null;
+                    if (key.Key == ConsoleKey.Enter && openSolution && Index < 0)
+                    {
+                        OpenMainWorktree = true;
+                        return null;
+                    }
                     if (key.Key == ConsoleKey.Enter && Selected is not null) return Selected;
-                    HandleKey(key, PageSize(console.Profile.Height));
+                    HandleKey(key, VisiblePageSize(console.Profile.Height));
                     context.UpdateTarget(Render(console.Profile.Width, console.Profile.Height));
                     context.Refresh();
                 }

@@ -91,6 +91,27 @@ internal sealed class GitRepository(Settings settings)
         return found.OfType<Target>().ToList();
     }
 
+    /// <summary>Each discovered repository's primary checkout, regardless of the branch currently checked out there.</summary>
+    public async Task<List<string>> MainWorktrees(IEnumerable<Target> targets)
+    {
+        var roots = new HashSet<string>(Files.Comparer);
+        var repositories = new HashSet<string>(Files.Comparer);
+        var checkouts = targets.Where(target => target.Worktree is not null).Select(target => target.Worktree!)
+            .Prepend(settings.RepositoryRoot).Distinct(Files.Comparer);
+        foreach (var checkout in checkouts)
+        {
+            var common = await Git(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir");
+            if (!repositories.Add(Files.Full(common))) continue;
+            // Git lists the primary worktree first; branch names and folder layout need not match it.
+            var listing = await Git(checkout, "worktree", "list", "--porcelain", "-z");
+            var first = listing.Split('\0', 2)[0];
+            if (!first.StartsWith("worktree ", StringComparison.Ordinal)) continue;
+            var root = Files.Full(first[9..]);
+            if (Directory.Exists(root) && SolutionOpener.Solutions(root).Count != 0) roots.Add(root);
+        }
+        return roots.OrderBy(Path.GetFileName, Files.Comparer).ThenBy(root => root, Files.Comparer).ToList();
+    }
+
     /// <summary>The branch a checkout's changes are compared against: origin's default branch, else main or master.</summary>
     public async Task<string> DefaultBranch(string root)
     {
