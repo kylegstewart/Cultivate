@@ -5,6 +5,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.18 — 2026-11-11
+
+Maintenance release.
+
 ## 1.1.17 — 2026-11-09
 
 - Feature: deployment previews offer Choose files to deploy. Uncheck changed files to exclude them
