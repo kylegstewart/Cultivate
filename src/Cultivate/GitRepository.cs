@@ -142,7 +142,12 @@ internal sealed class GitRepository(Settings settings)
         else if (target.Worktree is not null && await Git(root, "rev-parse", "HEAD") != target.Ref)
             throw new InvalidOperationException("This detached worktree moved to another commit. Refresh the selection.");
         var commit = await Git(root, "rev-parse", "--verify", target.Worktree is null ? target.Ref + "^{commit}" : "HEAD");
-        var baseline = await Git(root, "merge-base", commit, baseBranch ?? settings.BaseBranch);
+        var comparison = baseBranch ?? settings.BaseBranch;
+        // A local baseline can lag behind changes already merged into the PR's target branch.
+        // Use its cached upstream without fetching or changing either checkout.
+        try { comparison = await Git(root, "rev-parse", "--symbolic-full-name", comparison + "@{upstream}"); }
+        catch (InvalidOperationException) { } // Explicit remote refs and local-only branches have no upstream.
+        var baseline = await Git(root, "merge-base", commit, comparison);
         var names = target.Worktree is null
             ? await Git(root, "diff", "--name-only", "--no-renames", "-z", baseline, commit, "--")
             : await Git(root, "diff", "--name-only", "--no-renames", "-z", baseline, "--");

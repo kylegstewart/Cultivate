@@ -38,6 +38,7 @@ internal static class SelfTest
             CheckSolutionFiles(home);
             CheckSolutionAutomation(home);
             await CheckSolutions(home);
+            await CheckBaseline(home);
             CheckUpdater(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
             var settings = await Settings.Read();
@@ -908,6 +909,78 @@ internal static class SelfTest
             await git.Git(other, "worktree", "remove", "--force", otherWorktree);
             await G("worktree", "remove", "--force", myMeyerWorktree);
         }
+    }
+
+    private static async Task CheckBaseline(string home)
+    {
+        var root = Path.Combine(home, "baseline repository");
+        Directory.CreateDirectory(root);
+        var settings = new Settings { RepositoryRoot = root, WebfarmRoot = Path.Combine(home, "baseline farm") };
+        var git = new GitRepository(settings);
+        var planner = new Planner(settings, git, new Bridge(settings));
+        async Task G(params string[] args) => _ = await git.Git(root, args);
+        void Save(string name, string content) => File.WriteAllText(Path.Combine(root, name), content);
+        await G("init", "-b", "master");
+        await G("config", "user.email", "cultivate-test@localhost");
+        await G("config", "user.name", "Cultivate isolated tests");
+        Save("UnprintedOrders.ascx", "baseline markup");
+        Save("Unrelated.ascx", "old markup");
+        Save("Unrelated.cs", "old compiled input");
+        await G("add", ".");
+        await G("commit", "-qm", "local master");
+        var stale = await git.Git(root, "rev-parse", "HEAD");
+        await G("checkout", "-qb", "feature");
+        Save("Unrelated.ascx", "already merged markup");
+        Save("Unrelated.cs", "already merged compiled input");
+        await G("add", ".");
+        await G("commit", "-qm", "advance remote master only");
+        var upstream = await git.Git(root, "rev-parse", "HEAD");
+        await G("remote", "add", "company", root);
+        await G("update-ref", "refs/remotes/company/master", upstream);
+        await G("branch", "--set-upstream-to=company/master", "master");
+        Save("UnprintedOrders.ascx", "feature markup");
+        await G("add", ".");
+        await G("commit", "-qm", "markup-only feature");
+        var target = new Target("feature", root, "refs/heads/feature");
+        var branch = target with { Worktree = null };
+        var mapsRequested = new List<string>();
+        Task<Dictionary<string, string>> Maps(string names)
+        {
+            mapsRequested.Add(names);
+            return Task.FromResult(new Dictionary<string, string> { ["UnprintedOrders.ascx"] = "DesktopModules/UnprintedOrders" });
+        }
+        foreach (var selected in new[] { target, branch })
+        {
+            var plan = await planner.Create(selected, Maps);
+            Check(plan.CanDeploy && plan.Baseline == upstream && plan.Changes.Select(change => change.Path).SequenceEqual(["UnprintedOrders.ascx"]) &&
+                plan.Frontend.Count == 1 && plan.Projects.Count == 0,
+                $"{(selected.Worktree is null ? "branch" : "worktree")} preview uses the cached upstream, excluding merged files and DLL builds");
+        }
+        Check(mapsRequested.SequenceEqual(["UnprintedOrders.ascx", "UnprintedOrders.ascx"]),
+            "stale local master does not request mappings for already merged frontend files");
+        Check((await git.Inspect(branch, "company/master")).Baseline == upstream,
+            "an explicitly configured remote baseline is used directly");
+        Check((await git.Inspect(branch, stale)).Baseline == stale,
+            "an explicitly configured commit baseline is preserved");
+
+        Save("Unrelated.ascx", "saved frontend edit");
+        Save("Staged.cs", "staged compiled input");
+        await G("add", "Staged.cs");
+        Save("Untracked.css", "untracked frontend");
+        File.Delete(Path.Combine(root, "Unrelated.cs"));
+        var dirty = await git.Inspect(target);
+        Check(dirty.Changes.Select(change => change.Path).SequenceEqual(
+            ["Staged.cs", "UnprintedOrders.ascx", "Unrelated.ascx", "Unrelated.cs", "Untracked.css"]) &&
+            dirty.Changes.Single(change => change.Path == "Unrelated.cs").Deleted,
+            "upstream comparison retains staged, saved, untracked, and deleted worktree files");
+        Check((await git.Inspect(branch)).Changes.Select(change => change.Path).SequenceEqual(["UnprintedOrders.ascx"]),
+            "branch inspection excludes another checkout's uncommitted work");
+        Check(await git.Git(root, "rev-parse", "master") == stale && await git.Git(root, "branch", "--show-current") == "feature" &&
+            File.ReadAllText(Path.Combine(root, "Unrelated.ascx")) == "saved frontend edit",
+            "baseline inspection preserves the local master, selected branch, and saved edits");
+        await G("branch", "--unset-upstream", "master");
+        Check((await git.Inspect(branch)).Baseline == stale,
+            "a local-only baseline still works without a configured upstream");
     }
 
     private static void CheckUpdater(string home)
