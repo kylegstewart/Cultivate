@@ -5,6 +5,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.19 — 2026-11-12
+
+Maintenance release.
+
 ## 1.1.18 — 2026-11-11
 
 Maintenance release.
