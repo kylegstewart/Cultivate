@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.20 — 2026-11-13
+
 - Feature: a changed project file that adds or bumps a NuGet package reference now deploys that package's DLL
   with the project. For example, when MeyerObjects moves to a new BusinessLogic version, `bin\BusinessLogic.dll`
   is copied to the webfarm too. The preview lists these packages under their projects. The DLL must be the

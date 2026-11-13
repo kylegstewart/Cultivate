@@ -9,7 +9,7 @@
     <RootNamespace>Cultivate</RootNamespace>
     <ApplicationIcon>..\..\assets\Cultivate.ico</ApplicationIcon>
     <!-- The last released version. The Release workflow bumps it; do not edit by hand. -->
-    <Version>1.1.19</Version>
+    <Version>1.1.20</Version>
     <!-- GitHub repository whose releases "cultivate update" installs. CI passes the building repository. -->
     <UpdateRepository Condition="'$(UpdateRepository)' == ''">kylegstewart/Cultivate</UpdateRepository>
     <Product>Cultivate</Product>
