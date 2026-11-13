@@ -45,6 +45,7 @@ internal static class SelfTest
             if (!File.Exists(settings.MSBuild))
                 throw new FileNotFoundException("The self-test needs Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack.", settings.MSBuild);
             await CheckExclusions(home, settings.MSBuild);
+            await CheckPackageDependencies(home, settings.MSBuild);
             await CheckBuildHooks(home, settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
@@ -640,6 +641,7 @@ internal static class SelfTest
         [
             @"Order\Page.ascx", @"Order\Page.ascx.cs", @"Order\Freight.cs", @"Other\Freight.cs",
             @"Order\Page.ascx.designer.cs", @"Order\Generated.g.cs", @"Order\Generated.g.i.cs",
+            @"Order\Unmapped.ascx", @"Order\Unmapped.ascx.designer.cs", @"Order\Unmapped.ascx.cs",
             @"Order\obj\Generated.cs", @"Order\bin\Copy.cs", @"packages\Copy.cs", @"Backup\Copy.cs",
             @"Order\Order.csproj", @"Order\packages.config", @"Order\Changes.resx",
             @"Order\style.css", @"Order\script.js", @"Order\image.png", @"bin\ClosedXML.dll",
@@ -667,13 +669,17 @@ internal static class SelfTest
         plan.Changes.Add(new(@"Order\Deleted.cs", true));
         plan.Changes.Add(new(@"Order\Missing.cs", false));
         plan.Projects[0].Inputs.AddRange([@"Order\Deleted.cs", @"Order\Missing.cs"]);
-        var files = SolutionOpener.FilesToOpen(root, solution, Terminal.ActionableChanges(plan).Select(item => item.Change));
+        var files = SolutionOpener.FilesToOpen(root, solution, Terminal.ChangesToOpen(plan));
         var expected = new[]
         {
-            @"Order\Freight.cs", @"Order\Page.ascx", @"Order\Page.ascx.cs", @"Order\script.js", @"Order\style.css", @"Other\Freight.cs"
+            @"Order\Freight.cs", @"Order\Page.ascx", @"Order\Page.ascx.cs", @"Order\script.js", @"Order\style.css",
+            @"Order\Unmapped.ascx", @"Order\Unmapped.ascx.cs", @"Other\Freight.cs"
         }.Select(path => Path.Combine(root, path)).Order(Files.Comparer).ToList();
         Check(files.SequenceEqual(expected, Files.Comparer),
             "solution documents contain only actionable source and markup, excluding binaries, generated files, metadata, assets, and unowned code");
+        Check(files.Contains(Path.Combine(root, @"Order\Unmapped.ascx"), Files.Comparer) &&
+            !files.Any(path => path.EndsWith(".designer.cs", StringComparison.OrdinalIgnoreCase)),
+            "changed markup without a Code Release Manager mapping still opens, and designer files never do");
         Check(files.Count(path => path.EndsWith("Page.ascx.cs", StringComparison.OrdinalIgnoreCase)) == 1,
             "solution documents deduplicate case and separator variants after resolving their full paths");
         Check(files.Count(path => Path.GetFileName(path) == "Freight.cs") == 2,
@@ -1474,6 +1480,124 @@ internal static class SelfTest
                 worker.Dispose();
             }
         }
+    }
+
+    // Mirrors a MeyerObjects BusinessLogic bump: the changed project file references a newer package the webfarm doesn't have yet.
+    private static async Task CheckPackageDependencies(string home, string msbuild)
+    {
+        var root = Path.Combine(home, "package dependencies");
+        var settings = new Settings
+        {
+            RepositoryRoot = Path.Combine(root, "repository"), WebfarmRoot = Path.Combine(root, "farm"),
+            StateRoot = Path.Combine(root, "state"), MSBuild = msbuild
+        };
+        Directory.CreateDirectory(settings.RepositoryRoot);
+        Directory.CreateDirectory(Path.Combine(settings.WebfarmRoot, "bin"));
+        var git = new GitRepository(settings);
+        var bridge = new Bridge(settings);
+        var planner = new Planner(settings, git, bridge);
+        var pipeline = new Pipeline(settings, git, bridge);
+        async Task G(params string[] args) => _ = await git.Git(settings.RepositoryRoot, args);
+        void Save(string path, string content)
+        {
+            var full = Files.Child(settings.RepositoryRoot, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+        const string library = "CultivatePackageFixture";
+        string Package(string version) => $@"packages\{library}.{version}\lib\net471\{library}.dll";
+        foreach (var version in new[] { "1.0.0", "2.0.0" })
+        {
+            // Built outside any MyMeyer.sln and without a webfarm copy target, so the per-user hook never applies.
+            var source = Path.Combine(root, "library " + version);
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "Library.csproj"), $$"""
+                <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+                  <PropertyGroup>
+                    <OutputType>Library</OutputType><TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>
+                    <OutputPath>out\</OutputPath><AssemblyName>{{library}}</AssemblyName>
+                  </PropertyGroup>
+                  <ItemGroup><Compile Include="Value.cs" /><Reference Include="System" /></ItemGroup>
+                  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+                </Project>
+                """);
+            File.WriteAllText(Path.Combine(source, "Value.cs"),
+                $"[assembly: System.Reflection.AssemblyVersion(\"{version}.0\")] public class PackageValue {{ public static int Value => {version[0]}; }}");
+            await Commands.Run(msbuild, [Path.Combine(source, "Library.csproj"), "-nologo", "-t:Build", "-p:Configuration=Release", "-v:minimal"], source);
+            var package = Files.Child(settings.RepositoryRoot, Package(version));
+            Directory.CreateDirectory(Path.GetDirectoryName(package)!);
+            File.Copy(Path.Combine(source, "out", library + ".dll"), package);
+        }
+        string Consumer(string name) => Project(name).Replace("<Reference Include=\"System\" />", $"""
+            <Reference Include="System" />
+            <Reference Include="{library}, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+              <HintPath>..\{Package("1.0.0")}</HintPath>
+            </Reference>
+            """);
+        var baselineProject = Consumer("PackageConsumer");
+        await G("init", "-b", "master");
+        await G("config", "user.email", "cultivate-test@localhost");
+        await G("config", "user.name", "Cultivate isolated tests");
+        Save(".gitignore", "bin/\nobj/\npackages/\n");
+        Save("MyMeyer.sln", "");
+        Save(@"Consumer\PackageConsumer.csproj", baselineProject);
+        Save(@"Consumer\App.config", "<configuration />");
+        Save(@"Consumer\Value.cs", "public class ConsumerValue { public static int Value => PackageValue.Value; }");
+        await G("add", ".");
+        await G("commit", "-qm", "baseline on package 1.0.0");
+
+        await G("checkout", "-qb", "same-package");
+        Save(@"Consumer\PackageConsumer.csproj", baselineProject.Replace("<Compile Include=\"Value.cs\" />",
+            "<Compile Include=\"Value.cs\" /><Compile Include=\"More.cs\" />"));
+        Save(@"Consumer\More.cs", "public class MoreValue { }");
+        await G("add", ".");
+        await G("commit", "-qm", "project change that keeps the package");
+        var same = await planner.Create(new("same-package", settings.RepositoryRoot, "refs/heads/same-package"));
+        Check(same.CanDeploy && same.Projects.Single().PackageDependencies.Count == 0 &&
+            same.RuntimePaths().SetEquals([@"bin\PackageConsumer.dll"]),
+            "a changed project file that keeps its package references publishes only the project's own DLL");
+
+        await G("checkout", "-qb", "package-bump", "master");
+        Save(@"Consumer\PackageConsumer.csproj", baselineProject.Replace("1.0.0", "2.0.0"));
+        await G("commit", "-qam", "bump the package to 2.0.0");
+        var target = new Target("package-bump", settings.RepositoryRoot, "refs/heads/package-bump");
+        var plan = await planner.Create(target);
+        Check(plan.CanDeploy && plan.Projects.Single().PackageDependencies.SequenceEqual([@"..\" + Package("2.0.0")]) &&
+            plan.RuntimePaths().SetEquals([@"bin\PackageConsumer.dll", $@"bin\{library}.dll"]) && plan.Notes.Any(note => note.Contains(library + ".dll")),
+            "a bumped package reference schedules the package's DLL with its project and says so in the preview");
+        var farmPackage = Files.Child(settings.WebfarmRoot, $@"bin\{library}.dll");
+        File.Copy(Files.Child(settings.RepositoryRoot, Package("1.0.0")), farmPackage);
+        try
+        {
+            var state = await pipeline.Activate(plan, _ => { }, watch: false);
+            Check(state.Updated.Select(file => (file.RelativePath, file.Change)).SequenceEqual(
+                    [($@"bin\{library}.dll", UpdatedFile.Package), (@"bin\PackageConsumer.dll", UpdatedFile.Built)]) &&
+                Files.Hash(farmPackage) == Files.Hash(Files.Child(settings.RepositoryRoot, Package("2.0.0"))),
+                "activation copies the bumped package DLL to the webfarm along with its project's DLL");
+            var progress = new List<string>();
+            state = await pipeline.Activate(await planner.Create(target), progress.Add, watch: false, workerUpdate: true);
+            Check(progress.Any(message => message.StartsWith("Frontend-only update")) &&
+                state.Updated.Any(file => file.RelativePath == $@"bin\{library}.dll" && file.Change == UpdatedFile.Package),
+                "updates without compiled changes reuse the verified package DLL instead of rebuilding");
+            await bridge.Call("Restore");
+            Check(Files.Hash(farmPackage) == Files.Hash(Files.Child(settings.RepositoryRoot, Package("1.0.0"))) &&
+                !File.Exists(Files.Child(settings.WebfarmRoot, @"bin\PackageConsumer.dll")),
+                "restore returns the webfarm's original package DLL");
+        }
+        finally
+        {
+            if ((await bridge.Status())?.Active == true) await bridge.Call("Restore");
+        }
+
+        await G("checkout", "-qb", "package-conflict", "package-bump");
+        Save(@"Second\Second.csproj", Consumer("Second"));
+        Save(@"Second\App.config", "<configuration />");
+        Save(@"Second\Value.cs", "public class SecondValue { public static int Value => PackageValue.Value; }");
+        await G("add", ".");
+        await G("commit", "-qm", "a new project on the old package");
+        var conflict = await planner.Create(new("package-conflict", settings.RepositoryRoot, "refs/heads/package-conflict"));
+        Check(!conflict.CanDeploy && conflict.Errors.Any(error => error.Contains($"different copies of {library}.dll")),
+            "changed projects that need different copies of one package DLL block activation");
     }
 
     private static string Project(string name, string? dependency = null, string? restorePackage = null)

@@ -52,6 +52,10 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         return actions;
     }
 
+    /// <summary>Changed files Open solution shows: actionable code plus every changed frontend file, whether or not it is mapped for deployment.</summary>
+    internal static IEnumerable<Change> ChangesToOpen(Plan plan) => ActionableChanges(plan).Select(item => item.Change)
+        .Concat(plan.Changes.Where(change => Planner.FrontendExtensions.Contains(Path.GetExtension(change.Path))));
+
     private static bool IsExcluded(Plan plan, string path) =>
         plan.ExcludedPaths.Contains(path.Replace('\\', '/'), Files.Comparer);
 
@@ -193,9 +197,10 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         {
             solution = await AnsiConsole.Status().StartAsync("Locating the solution...", _ => git.Solution(target));
             var root = Path.GetDirectoryName(solution)!;
+            // Opening needs no webfarm destinations, so skip the Code Release Manager lookup; unmapped markup still opens.
             var plan = await AnsiConsole.Status().StartAsync("Finding actionable changes to open...", _ =>
-                new Planner(settings, git, bridge).Create(target with { Worktree = root }));
-            files = SolutionOpener.FilesToOpen(root, solution, ActionableChanges(plan).Select(item => item.Change));
+                new Planner(settings, git, bridge).Create(target with { Worktree = root }, _ => Task.FromResult(new Dictionary<string, string>())));
+            files = SolutionOpener.FilesToOpen(root, solution, ChangesToOpen(plan));
         }
         await AnsiConsole.Status().StartAsync("Opening the solution and changed source files...", _ =>
             SolutionOpener.Open(visualStudio, solution, files));
@@ -246,7 +251,9 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             if (actionable.Count == 0) changes.AddRow("[grey]No files have a deployment action[/]", "");
             AnsiConsole.Write(changes);
             AnsiConsole.Write(TerminalStyle.Card(new Markup(plan.Projects.Count == 0 ? $"[{TerminalStyle.Muted}]Frontend only. No DLL builds needed.[/]" :
-                string.Join("\n", plan.Projects.Select((p, index) => $"[{TerminalStyle.Gold}]{index + 1:00}[/]  {Escape(p.Assembly)}  [{TerminalStyle.Muted}]{Escape(p.RelativePath)}[/]"))),
+                string.Join("\n", plan.Projects.Select((p, index) => $"[{TerminalStyle.Gold}]{index + 1:00}[/]  {Escape(p.Assembly)}  [{TerminalStyle.Muted}]{Escape(p.RelativePath)}[/]" +
+                    string.Concat(p.PackageDependencies.Select(hint => $"\n    + {Escape(Path.GetFileName(hint))}  " +
+                        $"[{TerminalStyle.Muted}]changed package {Escape(p.HintVersions.GetValueOrDefault(hint) ?? hint)}[/]"))))),
                 "CHANGED PROJECTS ONLY"));
             foreach (var note in plan.Notes) AnsiConsole.MarkupLine($"[grey]{Escape(note)}[/]");
             foreach (var error in plan.Errors) AnsiConsole.MarkupLine($"[red]{Escape(error)}[/]");
