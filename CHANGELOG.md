@@ -5,6 +5,15 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: a changed project file that adds or bumps a NuGet package reference now deploys that package's DLL
+  with the project. For example, when MeyerObjects moves to a new BusinessLogic version, `bin\BusinessLogic.dll`
+  is copied to the webfarm too. The preview lists these packages under their projects. The DLL must be the
+  version the reference declares, and changed projects that need different copies of one DLL block activation.
+  Package references a project file didn't change are still never copied, so the shared `bin` isn't downgraded.
+- Fix: Open solution opens every changed frontend file, such as an `.ascx` that has no Code Release Manager
+  mapping yet, along with its code-behind. Designer files still stay closed. Opening a solution no longer looks
+  up webfarm mappings.
+
 ## 1.1.19 — 2026-11-12
 
 Maintenance release.

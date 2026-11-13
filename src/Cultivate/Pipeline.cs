@@ -24,10 +24,10 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             snapshot = await git.Snapshot(plan, run);
             var files = plan.Frontend.Select(x => x with { Source = Files.Child(snapshot, x.Source) }).ToList();
             var runtimeFiles = new List<RuntimeFile>();
+            var runtimePaths = plan.RuntimePaths();
             var reuse = workerUpdate && previous?.Active == true && previous.BuildFingerprint == plan.BuildFingerprint &&
-                previous.RuntimeFiles.Count == plan.Projects.Count &&
-                previous.RuntimeFiles.All(file => plan.Projects.Any(project =>
-                    Files.Comparer.Equals(file.RelativePath, @"bin\" + project.Assembly + ".dll"))) &&
+                previous.RuntimeFiles.Count == runtimePaths.Count &&
+                previous.RuntimeFiles.All(file => runtimePaths.Contains(file.RelativePath)) &&
                 previous.SourceRef == plan.Target.Ref && Files.Comparer.Equals(previous.SourceRoot, plan.Target.Worktree ?? "");
             if (reuse)
             {
@@ -72,10 +72,12 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             });
             var state = result.Deserialize<DeploymentState>(Files.Json) ?? throw new InvalidDataException("Deployment did not return its state.");
             var deployed = new HashSet<string>(files.Select(file => file.RelativePath), StringComparer.OrdinalIgnoreCase);
+            var projectFiles = plan.Projects.Select(project => @"bin\" + project.Assembly + ".dll").ToHashSet(Files.Comparer);
             state.Updated = files.Select(file => new UpdatedFile(file.RelativePath,
                     file.Delete ? UpdatedFile.Deleted :
-                    runtimeFiles.Any(x => Files.Comparer.Equals(x.RelativePath, file.RelativePath)) ? (reuse ? UpdatedFile.Reused : UpdatedFile.Built) :
-                    UpdatedFile.Synced))
+                    !runtimeFiles.Any(x => Files.Comparer.Equals(x.RelativePath, file.RelativePath)) ? UpdatedFile.Synced :
+                    !projectFiles.Contains(file.RelativePath) ? UpdatedFile.Package :
+                    reuse ? UpdatedFile.Reused : UpdatedFile.Built))
                 // The bridge restores the previous version's files that this one no longer deploys, unless they changed outside Cultivate.
                 .Concat((previous?.Active == true ? previous.Files : []).Where(file => !deployed.Contains(file.RelativePath))
                     .Select(file => new UpdatedFile(file.RelativePath,
@@ -186,9 +188,23 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 if (!Files.Comparer.Equals(identity.Name, project.Assembly))
                     throw new InvalidDataException($"Unexpected assembly identity for {targetPath}.");
                 File.Copy(targetPath, Path.Combine(seeds, Path.GetFileName(targetPath)), true);
+                // Projects can share an output folder, so keep each changed package's DLL before a later build replaces it.
+                foreach (var hint in project.PackageDependencies)
+                {
+                    var name = Path.GetFileName(hint);
+                    var copied = Path.Combine(Path.GetDirectoryName(targetPath)!, name);
+                    project.HintVersions.TryGetValue(hint, out var packageVersion);
+                    var version = VersionOf(copied);
+                    if (version is null || packageVersion is not null && version != packageVersion ||
+                        !Files.Comparer.Equals(AssemblyName.GetAssemblyName(copied).Name, Path.GetFileNameWithoutExtension(name)))
+                        throw new InvalidDataException($"The build did not copy {name} {packageVersion} from {project.Assembly}'s changed package reference {hint}.");
+                    var captured = Path.Combine(run, "dependencies", project.Assembly, name);
+                    Directory.CreateDirectory(Path.GetDirectoryName(captured)!);
+                    File.Copy(copied, captured, true);
+                }
             }
             context = new("Artifact verification") { Log = Path.Combine(run, "build.log") };
-            progress("Verifying only the changed projects' own DLLs");
+            progress("Verifying only the changed projects' own DLLs and changed packages");
             return Artifacts.Collect(run, snapshot, plan.Projects);
         }
         catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or

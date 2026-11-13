@@ -20,8 +20,8 @@ Typing filters actions, the arrow keys move the highlight, and Enter selects.
    **Excluded** and recalculates the frontend copies and DLL builds. Reopen the checklist to include
    a file again.
 3. **Confirm the destination.** Cultivate takes an isolated snapshot, prepares references, builds
-   only the changed projects, then syncs the mapped frontend files and each changed project's
-   own DLL.
+   only the changed projects, then syncs the mapped frontend files, each changed project's
+   own DLL, and the DLL of any package whose reference a changed project file added or bumped.
 4. **Choose automatic updates or a one-time activation.** Automatic updates keep running after
    the menu closes. Frontend saves copy without a rebuild, and compiled changes rebuild only
    their owning projects. A failed build leaves the last successful deployment in place.
@@ -75,6 +75,28 @@ existing compiled references are used to compile the changed project. Cultivate 
 reconcile the host's entire runtime dependency graph. A markup-only activation builds and copies
 no DLLs.
 
+### Changed package references
+
+A changed project DLL can need a package version the webfarm doesn't have yet. For example, when
+a branch bumps `BusinessLogic` in `MeyerObjects\MeyerObjects.csproj` (and its `packages.config`),
+the preview shows:
+
+- Build `MeyerObjects\MeyerObjects.csproj` and publish `bin\MeyerObjects.dll`.
+- Publish `bin\BusinessLogic.dll`, the new package version that build copied beside it.
+
+For each changed project file, Cultivate compares its `packages\` `HintPath` references with the
+baseline version of that file. A reference that is new, or whose `HintPath` or declared `Version`
+changed, publishes its DLL with the project. In a brand-new project file, every package reference
+counts as new. A package reference the project file did not change is assumed to be on the webfarm
+already and is never republished, so other DLLs in the host's shared `bin` aren't downgraded.
+Removed references delete nothing.
+
+The published file is the one the build copied to the project's output folder. Its assembly name
+must match, and its version must equal the reference's declared `Version`. Otherwise the deployment
+stops. If two changed projects need different copies of the same DLL, the preview blocks activation
+until they reference the same package version. Strong-named packages must still match the site's
+`web.config` binding redirects, because Cultivate doesn't deploy site configuration.
+
 ## Builds
 
 Builds use Visual Studio MSBuild in Debug, with `BuildProjectReferences=false`, isolated writable
@@ -96,15 +118,15 @@ outputs, and each project's existing configuration. There is no solution build.
 - Existing compiled references are copied in privately when needed. Unchanged reference projects
   are not restored or built. If their DLL is missing, Cultivate reports it rather than silently
   rebuilding.
-- Build inputs never enter the deployment payload. The webfarm must already contain the APIs the
-  newly built project uses.
+- Build inputs never enter the deployment payload, except for [changed package references](#changed-package-references).
+  The webfarm must already contain every other API the newly built project uses.
 
 Each project's existing `CopyBuildOutputToWebfarm` target still runs, but Cultivate's MSBuild hook
 redirects its copy to a private local folder. `Capture.targets` records the project's own DLL,
 which is checked for the expected assembly identity and published through the journal.
-Copy-local dependencies and whole `bin` folders are never published. A frontend-only saved update
-reuses the active project DLLs without rebuilding. Project-specific custom external deployment
-tasks are not supported.
+Other copy-local dependencies and whole `bin` folders are never published. A frontend-only saved
+update reuses the active project and package DLLs without rebuilding. Project-specific custom
+external deployment tasks are not supported.
 
 Build and restore logs, per-project MSBuild binary logs, and saved plans are kept in
 `%LOCALAPPDATA%\Meyer\Cultivate\Runs\<run-id>`. Temporary Git worktrees are removed after each run.

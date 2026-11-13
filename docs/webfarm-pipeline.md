@@ -1,7 +1,8 @@
 # How Cultivate updates the webfarm
 
 Cultivate selects a MyMeyer version, snapshots its saved source, builds only projects with compiled
-changes, and publishes their own DLLs alongside mapped frontend files. It keeps a local journal of the
+changes, and publishes their own DLLs, plus the DLLs of packages whose references they changed, alongside
+mapped frontend files. It keeps a local journal of the
 original webfarm files so the deployment can be undone. For the user-level workflow, see
 [how-it-works.md](how-it-works.md).
 
@@ -172,6 +173,23 @@ files changed. It then orders the set by `ProjectReference` and by assembly refe
 rejects dependency cycles. A compiled change that no project owns is a plan error. It never widens into a
 solution build. Unchanged dependencies and consumers are never added.
 
+### Changed package references
+
+`Planner.AddPackageDependencies` runs for each planned project whose own `.csproj` is a selected change. It
+reads the baseline version with `git show <Baseline>:<path>` and compares literal `HintPath`s that resolve
+under the repository's `packages\` folder and name a `.dll`. A `HintPath` absent from the baseline file, or one
+whose `<Reference Include>` declares a different `Version=`, is added to the project's `PackageDependencies`.
+If the baseline has no such project file, every package `HintPath` counts. References the project file did not
+change, `HintPath`s containing MSBuild properties, non-package references, and names matching a DLL this plan
+builds are skipped. Removed references produce no delete action.
+
+The preview lists each package under its project and adds a note naming them. If two changed projects add
+different package paths for the same DLL name, the plan error "deploy different copies of" blocks activation.
+Excluding a project file from the deployment leaves its baseline contents in place, so it adds no packages.
+For example, the MyMeyer BusinessLogic 6.28.21 bump changed `MeyerObjects.csproj` and `OrderingSystem.csproj`.
+Both projects list `..\packages\BusinessLogic.6.28.21\lib\net471\BusinessLogic.dll`, and the payload contains
+`bin\BusinessLogic.dll` once. Unchanged references such as `BusinessObjects` are not republished.
+
 The plan also gets a **build fingerprint**: a SHA-256 of a format marker, the commit, the MSBuild path, and
 the paths and contents of every compiled change. The worker uses it to decide whether active DLLs can be
 reused. A new commit changes this fingerprint even if that commit only changes frontend files.
@@ -266,6 +284,12 @@ After the build, `TargetPath` must exist and its `AssemblyName` must match the p
 The DLL is then copied into `references`, so the next changed project in the order compiles against the
 fresh build.
 
+For each of the project's `PackageDependencies`, the build must have copied `<name>.dll` into the folder that
+holds `TargetPath`. Its assembly name must match and, when the reference declares a `Version=`, its assembly
+version must equal it. Otherwise the run stops with "The build did not copy". The file is copied immediately to
+`Runs\<run-id>\dependencies\<Assembly>\`, because projects such as `MeyerObjects` and `OrderingSystem` share
+`..\bin\` and a later build could replace it with another version.
+
 ### 4d. What happens to `CopyBuildOutputToWebfarm`
 
 Cultivate discovers participating projects by the presence of `CopyBuildOutputToWebfarm` in their project
@@ -334,11 +358,16 @@ Each built project's manifest must exist and list exactly one file named `<Assem
 identity matches. That file is staged at `<snapshot>\.cultivate-artifacts\bin\<Assembly>.dll`, with the
 webfarm destination `bin\<Assembly>.dll`. Two projects producing the same destination is an error.
 
-Copy-local dependencies, PDBs, and the rest of `bin` are **never** published. The webfarm must already have
-any API the new DLL calls.
+Each captured package DLL is then staged the same way, with the destination `bin\<name>.dll`. When several
+projects captured the same package, it is published once if the copies are identical, and the run stops if
+they differ.
+
+Other copy-local dependencies, PDBs, and the rest of `bin` are **never** published. The webfarm must already
+have every other API the new DLL calls.
 
 Each published DLL is also copied to `Runs\<run-id>\verified\` with its SHA-256, as `RuntimeFiles`. A later
-frontend-only update reuses those copies.
+frontend-only update reuses those copies when they cover exactly `Plan.RuntimePaths()`: the planned project
+DLLs and package DLLs.
 
 ### 4f. Final source check
 
@@ -430,8 +459,8 @@ Everything below runs while holding `workspace.lock`.
    do not trigger this rollback.
 
 `Cultivate.exe` then builds the **deployment summary** from the payload and the previous journal. Each file
-is listed as built and copied, copied (unchanged build), synced, deleted, restored to its original, or kept
-(the last two for files the old version deployed that the new one doesn't).
+is listed as built and copied, copied (unchanged build), copied (changed package), synced, deleted, restored to
+its original, or kept (the last two for files the old version deployed that the new one doesn't).
 These labels describe the payload's actions; identical content may be skipped by the bridge. The summary
 is added to the activation result by C# and is not persisted as part of `workspace.json`.
 
@@ -483,9 +512,10 @@ The worker waits 2 seconds between completed loop iterations; inspection and bui
    deployed one (and from the last failed attempt), it waits 800 ms and inspects again, so editors that save
    in several writes settle first. It then plans again using the journal's `ExcludedPaths` and runs
    `Activate` with `workerUpdate: true`, sending heartbeats every 2 seconds during long builds.
-   - If the **build fingerprint is unchanged** and the active DLLs cover exactly the planned projects, the
-     update needs no new compilation. The verified DLLs in `Runs\<old-run>\verified` are hash-checked and redeployed,
-     **without MSBuild**. The summary lists them as copied (unchanged build).
+   - If the **build fingerprint is unchanged** and the active DLLs cover exactly the planned projects and changed
+     packages, the update needs no new compilation. The verified DLLs in `Runs\<old-run>\verified` are hash-checked
+     and redeployed, **without MSBuild**. The summary lists project DLLs as copied (unchanged build) and package
+     DLLs as copied (changed package).
    - Otherwise the changed projects are rebuilt as in step 4.
    - The bridge applies the result **in place** (step 3 of Deploy), so the original backups from the first
      activation are kept for the final restore.
@@ -519,7 +549,7 @@ Assuming the mapping table maps `PriceGroupMatrix.ascx` to `DesktopModules\Price
 3. `CopyBuildOutputToWebfarm` runs, but its destination is local staging. Capture records `MiscApps.dll`,
    and Cultivate validates it and adds `bin\MiscApps.dll` to the payload.
 4. The bridge backs up and journals the two original webfarm files, then copies and verifies the two new
-   files. It does not publish the `.cs` file, dependency DLLs, or PDBs.
+   files. It does not publish the `.cs` file, unchanged dependency DLLs, or PDBs.
 5. A later markup-only save in the same active worktree normally reuses the verified DLL cache. The
    payload still includes that DLL, but the bridge skips its physical copy if its hash already matches.
 6. A code-behind save changes the build fingerprint and rebuilds the owning project. Restore eventually
@@ -553,7 +583,7 @@ cultivate restore --yes
 | `Runs\<run-id>\build.log` | MSBuild evaluation and build output, plus the source of every seeded reference. |
 | `Runs\<run-id>\restore.log` | NuGet restore output, when a restore was needed. |
 | `Runs\<run-id>\<Assembly>.binlog` | MSBuild binary log for each built project. Open it with MSBuild Structured Log Viewer to see the `CopyBuildOutputToWebfarm` redirect and capture. |
-| `Runs\<run-id>\captured`, `manifests`, `verified` | What the capture target recorded, and the hashed DLLs published from it. |
+| `Runs\<run-id>\captured`, `manifests`, `dependencies`, `verified` | What the capture target recorded, the changed package DLLs kept after each build, and the hashed DLLs published from them. |
 | `Logs\bridge-<guid>.log` | Output from each Deploy, Restore, Check, or Mappings call: `[OK]`, `[DELETED]`, `[RESTORED]`. |
 | `Logs\watch.log` | Worker progress and blocked updates. |
 | `Logs\last-error.log` | Exception details from a failed command. |

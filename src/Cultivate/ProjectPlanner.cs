@@ -16,12 +16,15 @@ internal sealed class ProjectInfo
     /// <summary>The assembly version each HintPath's Reference declares, for references that declare one.</summary>
     public Dictionary<string, string> HintVersions { get; init; } = [];
     public List<string> Imports { get; init; } = [];
+    /// <summary>Package HintPaths this project's changed file adds or changes. Their DLLs are published with the project's own DLL.</summary>
+    public List<string> PackageDependencies { get; init; } = [];
 
-    public static ProjectInfo Read(string root, string path)
+    /// <summary>Reads the project file at <paramref name="path"/>, or <paramref name="content"/> as if it were that file.</summary>
+    public static ProjectInfo Read(string root, string path, string? content = null)
     {
         var full = Files.Child(root, path);
         var directory = Path.GetDirectoryName(full)!;
-        var document = XDocument.Load(full);
+        var document = content is null ? XDocument.Load(full) : XDocument.Parse(content);
         IEnumerable<XElement> Items(string name) => document.Descendants().Where(x => x.Name.LocalName == name);
         string Relative(string include) => Path.GetRelativePath(root, Path.GetFullPath(Path.Combine(directory, include)));
         return new()
@@ -149,13 +152,50 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
             {
                 if (catalog is not null) await git.Git(settings.RepositoryRoot, "worktree", "remove", "--force", catalog);
             }
+            await AddPackageDependencies(plan, compiled);
         }
         var ignored = selected.Count - frontend.Count - compiled.Count;
         if (excluded.Count != 0) plan.Notes.Add($"{excluded.Count} file(s) excluded from this deployment and automatic updates. Excluded build inputs use baseline contents.");
         if (ignored > 0) plan.Notes.Add($"{ignored} other changed file(s) are not deployed (documentation, SQL, config, etc.). No database scripts are executed.");
         if (plan.Projects.Count == 0) plan.Notes.Add("No changed compiled projects: no DLL builds or copies.");
         else plan.Notes.Add("Only projects owning changed compiled files are built. Unchanged dependencies and consumers are not rebuilt or deployed.");
+        var packages = plan.Projects.SelectMany(project => project.PackageDependencies).Select(Path.GetFileName).Distinct(Files.Comparer).ToList();
+        if (packages.Count != 0)
+            plan.Notes.Add($"Changed package references also deploy {string.Join(", ", packages)}. Other package DLLs on the webfarm are not replaced.");
         return plan;
+    }
+
+    /// <summary>
+    /// A project file that adds or bumps a package reference needs that package's DLL on the webfarm too, or the new project DLL
+    /// runs against the old package. References the project file did not change are already deployed and are never republished.
+    /// </summary>
+    private async Task AddPackageDependencies(Plan plan, List<Change> compiled)
+    {
+        var built = plan.Projects.Select(project => project.Assembly + ".dll").ToHashSet(Files.Comparer);
+        var packages = new Dictionary<string, (string Path, string Project)>(Files.Comparer);
+        foreach (var project in plan.Projects.Where(project => compiled.Any(change => !change.Deleted &&
+            Files.Comparer.Equals(change.Path.Replace('/', '\\'), project.RelativePath))))
+        {
+            var path = project.RelativePath.Replace('\\', '/');
+            var baseline = (await git.Git(settings.RepositoryRoot, "ls-tree", "--name-only", plan.Baseline, "--", path)).Length == 0 ? null :
+                ProjectInfo.Read(settings.RepositoryRoot, project.RelativePath,
+                    await git.Git(settings.RepositoryRoot, "show", plan.Baseline + ":" + path));
+            foreach (var hint in project.Hints.Distinct(Files.Comparer))
+            {
+                var name = Path.GetFileName(hint);
+                var package = Path.GetRelativePath(settings.RepositoryRoot, Path.GetFullPath(
+                    Path.Combine(settings.RepositoryRoot, Path.GetDirectoryName(project.RelativePath)!, hint)));
+                if (hint.Contains('$') || !package.StartsWith(@"packages\", StringComparison.OrdinalIgnoreCase) ||
+                    !Path.GetExtension(name).Equals(".dll", StringComparison.OrdinalIgnoreCase) || built.Contains(name)) continue;
+                if (baseline?.Hints.Contains(hint, Files.Comparer) == true &&
+                    baseline.HintVersions.GetValueOrDefault(hint) == project.HintVersions.GetValueOrDefault(hint)) continue;
+                if (packages.TryGetValue(name, out var other) && !Files.Comparer.Equals(other.Path, package))
+                    plan.Errors.Add($"{other.Project} and {project.RelativePath} deploy different copies of {name} ({other.Path} and {package}). " +
+                        "Reference the same package version before deploying.");
+                packages.TryAdd(name, (package, project.RelativePath));
+                project.PackageDependencies.Add(hint);
+            }
+        }
     }
 
     internal static List<ProjectInfo> BuildOrder(List<ProjectInfo> projects, List<Change> changes, List<string> errors)

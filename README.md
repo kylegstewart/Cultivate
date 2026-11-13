@@ -15,7 +15,8 @@ cultivate
   build, and anything that blocks deployment. Nothing is deployed until you confirm.
 - **Changed projects only.** Only projects that own changed compiled files are built (Debug,
   `BuildProjectReferences=false`, inside an isolated snapshot). Unchanged dependencies are never
-  rebuilt or copied.
+  rebuilt or copied. When a changed project file adds or bumps a NuGet package reference, such as
+  MeyerObjects moving to a new BusinessLogic, that package's DLL is copied with the project.
 - **Safe to undo.** Originals are backed up and SHA-256 verified. **Restore** puts them back.
   Edits made to the webfarm by anything else block the restore instead of being overwritten.
 - **Your checkout is never touched.** No branch switches, commits, pushes, SQL, or site config.

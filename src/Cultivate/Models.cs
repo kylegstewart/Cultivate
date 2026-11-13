@@ -190,6 +190,11 @@ internal sealed class Plan
     public List<string> Notes { get; init; } = [];
     public List<string> Errors { get; init; } = [];
     public bool CanDeploy => Errors.Count == 0;
+
+    /// <summary>The webfarm files a build publishes: each changed project's DLL and the DLLs of packages whose references changed.</summary>
+    public HashSet<string> RuntimePaths() => Projects.Select(project => @"bin\" + project.Assembly + ".dll")
+        .Concat(Projects.SelectMany(project => project.PackageDependencies).Select(hint => @"bin\" + Path.GetFileName(hint)))
+        .ToHashSet(Files.Comparer);
 }
 internal sealed class DeploymentState
 {
@@ -218,6 +223,6 @@ internal sealed class DeploymentState
 internal sealed record JournalEntry(string RelativePath);
 internal sealed record UpdatedFile(string RelativePath, string Change)
 {
-    internal const string Built = "Built and copied", Reused = "Copied (unchanged build)", Synced = "Synced",
+    internal const string Built = "Built and copied", Reused = "Copied (unchanged build)", Package = "Copied (changed package)", Synced = "Synced",
         Deleted = "Deleted", Restored = "Restored original", Kept = "Kept (changed outside Cultivate)";
 }
