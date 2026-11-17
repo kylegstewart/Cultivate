@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.21 — 2026-11-17
+
 - Fix: Open solution prepares a worktree's dependencies before Visual Studio loads it, so projects no longer open with
   unresolved references. Files Git ignores, such as `packages\` and `bin\MeyerObjects.dll`, are copied from the
   repository's main checkout, and NuGet packages the main checkout lacks too are restored. Nothing that would show in
