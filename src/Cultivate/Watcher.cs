@@ -83,6 +83,8 @@ internal static class Watcher
                     lastAttempt = stable.Fingerprint;
                     var plan = await planner.Create(target, excludedPaths: state.ExcludedPaths);
                     if (!plan.CanDeploy) throw new InvalidOperationException(string.Join("\n", plan.Errors));
+                    if (LegacyWatcher.ForWorker(settings, LegacyWatcher.Running(settings.WebfarmRoot)) is { } stopped)
+                        await File.AppendAllTextAsync(log, $"{DateTime.Now:O} {stopped}\n");
                     var activation = pipeline.Activate(plan, message => File.AppendAllText(log, $"{DateTime.Now:O} {message}\n"), watch: false, workerUpdate: true);
                     while (!activation.IsCompleted)
                     {

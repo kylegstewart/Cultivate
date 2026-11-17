@@ -15,8 +15,9 @@ internal static class Program
           list                                    List worktrees and branches (JSON)
           status                                  Show the active deployment (JSON)
           plan --worktree PATH | --branch NAME    Preview a deployment plan (JSON)
-          activate --worktree PATH | --branch NAME --yes [--once] [--no-warmup]
-                                                  Build and deploy; --once disables automatic updates
+          activate --worktree PATH | --branch NAME --yes [--once] [--no-warmup] [--stop-legacy-watcher]
+                                                  Build and deploy; --once disables automatic updates;
+                                                  --stop-legacy-watcher ends the old WebfarmFileSync watcher first
           restore --yes                           Stop updates and restore the original webfarm files
           warmup [--url URL] [--timeout SECONDS] [--json]
                                                   Request the dev site until it answers and report errors
@@ -26,7 +27,7 @@ internal static class Program
                 [--repository PATH] [--webfarm PATH] [--base-branch NAME]
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
                 [--worktrees PATH] [--site-url URL] [--warmup true|false]
-                [--sql-mirror PATH]
+                [--sql-mirror PATH] [--stop-legacy-watcher true|false]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
@@ -97,6 +98,8 @@ internal static class Program
                     var plan = await new Planner(settings, git, bridge).Create(target);
                     if (args[0] == "plan") { Print(plan); return plan.CanDeploy ? 0 : 2; }
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Activation requires --yes or an interactive confirmation.");
+                    if (LegacyWatcher.ForCommand(settings, args.Contains("--stop-legacy-watcher"), LegacyWatcher.Running(settings.WebfarmRoot)) is { } stopped)
+                        Console.Error.WriteLine(stopped);
                     var activated = await new Pipeline(settings, git, bridge).Activate(plan, message => Console.Error.WriteLine(message), !args.Contains("--once") && settings.WatchSavedFiles);
                     await Warmup.AfterActivationCommand(settings, activated, args);
                     Print(activated);

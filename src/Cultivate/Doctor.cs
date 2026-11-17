@@ -115,7 +115,9 @@ internal static class Doctor
         }
 
         if (Process.GetProcessesByName("WebfarmFileSync").Length != 0)
-            Report("warn", "The old WebfarmFileSync watcher is running. Close it before activating with Cultivate.");
+            Report("warn", "The old WebfarmFileSync watcher is running and could overwrite deployments. " + (settings.StopLegacyWatcher
+                ? "Activation and automatic updates stop it without asking (stop-legacy-watcher is on)."
+                : "Activation offers to stop it (stop-legacy-watcher is off; 'cultivate setup --stop-legacy-watcher true' stops it without asking)."));
 
         if (problems.Count == 0 && missing.Count == 0)
         {
