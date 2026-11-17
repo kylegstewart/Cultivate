@@ -48,15 +48,20 @@ internal static partial class SelfTest
         Check(measured.LastWrite == new DateTimeOffset(old), "last activity ignores files under bin, obj, packages, node_modules, .vs and .git");
         Check(TidySizes.Measure(Path.Combine(root, "missing")).Bytes == 0, "measuring a folder that is gone counts nothing instead of failing");
 
-        var cache = Path.Combine(root, "cache", "worktree-sizes.json");
-        var measuredAt = new DateTimeOffset(2026, 11, 16, 8, 30, 0, TimeSpan.Zero);
-        TidySizes.Save(cache, [new(worktree, 12345, measuredAt), new(Path.Combine(root, "deleted"), 99, measuredAt)]);
+        var cache = Path.Combine(root, "cache", "worktree-scans.json");
+        var scannedAt = new DateTimeOffset(2026, 11, 16, 8, 30, 0, TimeSpan.Zero);
+        var state = new CheckoutStatus(2, 1, scannedAt.AddDays(-3), "Work in progress");
+        TidySizes.Save(cache, [new(worktree, "abc123", 12345, new DateTimeOffset(old), state, scannedAt),
+            new(Path.Combine(root, "deleted"), "abc123", 99, null, state, scannedAt)]);
         var loaded = TidySizes.Load(cache);
-        Check(loaded.Count == 1 && loaded[worktree.ToUpperInvariant()] is { Bytes: 12345 } size && size.Measured == measuredAt,
-            "the size cache keeps each existing worktree's bytes and measuring time and drops worktrees that are gone");
+        Check(loaded.Count == 1 && loaded[worktree.ToUpperInvariant()] is { Bytes: 12345, Head: "abc123" } scan && scan.Scanned == scannedAt &&
+            scan.LastWrite == new DateTimeOffset(old) && scan.Status == state,
+            "the scan cache keeps each existing worktree's size, last write, state, HEAD and scan time, and drops worktrees that are gone");
+        File.WriteAllText(cache, """[{ "Path": "C:\\old", "Bytes": 5, "Measured": "2026-11-16T08:30:00Z" }]""");
+        Check(TidySizes.Load(cache).Count == 0, "an entry without a HEAD or state, like the old size-only cache, is scanned again");
         File.WriteAllText(cache, "{ not json");
         Check(TidySizes.Load(cache).Count == 0 && TidySizes.Load(Path.Combine(root, "no cache.json")).Count == 0,
-            "a damaged or missing size cache means sizes are measured again");
+            "a damaged or missing scan cache means worktrees are scanned again");
         Check(TidySizes.Format(1536L << 20) == "1.5 GB" && TidySizes.Format(600L << 20) == "600 MB" && TidySizes.Format(10) == "10 B",
             "sizes are shown in GB, MB, KB or bytes");
     }
@@ -100,12 +105,20 @@ internal static partial class SelfTest
         Check(new TidyGuard(null, @"C:\", @"C:\fixture\worktrees\big\bin\Debug").Check(big)?.Reason.Contains("Cultivate is running") == true &&
             new TidyGuard(new DeploymentState { Active = false, SourceRoot = live.Path }, @"C:\", @"C:\").Check(live) is null,
             "a worktree holding the running program is protected, and an inactive deployment protects nothing");
-        Check(list.Sort == TidySort.Largest && list.Rows.All(row => row.Measuring && row.Checking) && list.Matches.Count == 8,
-            "every worktree is listed at once, before any size or state is known");
+        Check(list.Sort == TidySort.Largest && list.Rows.All(row => row.Bytes is null && row.Status is null) && list.Matches.Count == 8,
+            "every worktree is listed before any size or state is known");
 
-        list.SetCachedSize(new(small.Path, 40L << 20, now.AddDays(-2)));
-        Check(Row(small) is { Approximate: true, Bytes: 40L << 20, Measuring: true },
-            "a size from an earlier visit is shown as approximate until the worktree is measured again");
+        var saved = new Dictionary<string, TidyScan>(Files.Comparer)
+        {
+            [small.Path] = new(small.Path, small.Head, 40L << 20, now.AddDays(-4), new(0, 0, now.AddDays(-5), "Saved"), now.AddDays(-2)),
+            [medium.Path] = new(medium.Path, "moved since", 1, null, new(0, 0, null, ""), now)
+        };
+        Check(WorktreeTidy.Unscanned(list.Rows, saved).Select(row => row.Path)
+                .SequenceEqual(list.Rows.Where(row => row.Path != small.Path).Select(row => row.Path)),
+            "a visit scans only worktrees with no saved scan, or whose HEAD has moved since it was saved");
+        list.SetScan(saved[small.Path]);
+        Check(Row(small) is { Bytes: 40L << 20, Status.Subject: "Saved" } && Row(small).Scanned == now.AddDays(-2) &&
+            Row(small).LastActivity == now.AddDays(-4), "a saved scan fills in a worktree's size, state, last activity and scan time");
         var sizes = new Dictionary<Checkout, long>
         {
             [big] = 6L << 30, [medium] = 600L << 20, [small] = 50L << 20, [live] = 2L << 30, [here] = 300L << 20, [locked] = 1L << 30, [markup] = 10L << 20
@@ -123,9 +136,7 @@ internal static partial class SelfTest
             [live] = new(0, 0, now.AddDays(-1), "Live"), [here] = new(0, 0, now.AddDays(-50), "Here"),
             [locked] = new(0, 0, now.AddDays(-200), "Locked"), [markup] = new(0, 0, now.AddDays(-10), "Markup")
         };
-        foreach (var (checkout, status) in statuses) list.Post(screen => screen.SetStatus(checkout.Path, status));
-        Check(Row(big).Status is null && list.ApplyPosted() && Row(big).Status is { Clean: true } && !list.ApplyPosted(),
-            "background results wait in a queue until the screen applies them on its own thread");
+        foreach (var (checkout, status) in statuses) list.SetStatus(checkout.Path, status);
         list.SetSize(medium.Path, new(600L << 20, now.AddDays(-2)), now);
         Check(Row(medium).LastActivity == now.AddDays(-2) && Row(big).LastActivity == now.AddDays(-100),
             "last activity is the later of the last commit and the newest file write");
@@ -219,6 +230,9 @@ internal static partial class SelfTest
             "the highlighted row says what deleting would lose and that a branch keeps its unpushed commits, while the state column shows both counts");
         losses.HandleKey(new('\0', ConsoleKey.F4, false, false, false), 5);
         Check(losses.Matches.Single().Checkout.Branch == "12345-2", "a detached worktree with unpushed commits is not safe to delete");
+        losses.SetStatusError(unmeasured.Path, "fatal: unreadable");
+        Check(losses.Rows.Single(row => row.Path == unmeasured.Path) is { Status: null, Safe: false, StateText: "unknown" } && losses.Matches.Count == 0,
+            "a worktree whose state could not be read again is no longer shown as safe from its earlier state");
 
         Highlight(big);
         Key(ConsoleKey.Spacebar, ' ');
@@ -263,7 +277,7 @@ internal static partial class SelfTest
             var screen = Capture(list.Render(width, height), width, height);
             var lines = screen.Split('\n');
             Check(lines.Length <= height && lines.All(line => line.Length <= width), $"the tidy screen fits {width}x{height} without wrapping");
-            Check(screen.Contains("Esc") && screen.Contains("Space") && screen.Contains("F3") && screen.Contains("smallest") &&
+            Check(screen.Contains("Esc") && screen.Contains("Space") && screen.Contains("F3") && screen.Contains("F5") && screen.Contains("smallest") &&
                 screen.Contains("HIGHLIGHTED WORKTREE"), $"the tidy screen keeps its sort and keys visible at {width}x{height}");
             Check(lines.Count(line => line.Contains("Alpha / big-work")) == 1, $"tidy rows do not wrap at {width}x{height}");
         }
@@ -275,22 +289,23 @@ internal static partial class SelfTest
         var filtered = new TidyList([big], guard, () => now);
         filtered.HandleKey(new('\0', ConsoleKey.F3, false, false, false), 5);
         var empty = Capture(filtered.Render(80, 24), 80, 24);
-        Check(empty.Contains("No worktrees match") && empty.Contains("100 MB or more") && empty.Contains("measuring 1"),
-            "an empty result shows the active filter and how many worktrees are still being measured");
+        Check(empty.Contains("No worktrees match") && empty.Contains("100 MB or more"), "an empty result shows the active filter");
 
         using (var output = new StringWriter())
         {
             var screen = new TidyList([big, medium, live], guard, () => now);
+            screen.SetSize(medium.Path, new(7L << 30, null), now);
             var keys = new Queue<ConsoleKeyInfo?>([null, new(' ', ConsoleKey.Spacebar, false, false, false), new('\0', ConsoleKey.Delete, false, false, false)]);
-            screen.Post(model => model.SetSize(medium.Path, new(7L << 30, null), now));
-            var chosen = screen.Show(LiveConsole(output), () => keys.Dequeue());
-            Check(chosen?.Select(row => row.Path).SequenceEqual([big.Path]) == true && output.ToString().Contains("7.0 GB"),
-                "the screen applies sizes that arrive while it waits for keys and returns the selection to review");
+            Check(screen.Show(LiveConsole(output), () => keys.Dequeue()) == TidyCommand.Review &&
+                screen.Selected.Select(row => row.Path).SequenceEqual([big.Path]) && output.ToString().Contains("7.0 GB"),
+                "the screen shows saved sizes, waits for keys, and asks to review the selection");
         }
         using (var output = new StringWriter())
         {
             var screen = new TidyList([big], guard, () => now);
-            Check(screen.Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false)) is null,
+            Check(screen.Show(LiveConsole(output), () => new('\0', ConsoleKey.F5, false, false, false)) == TidyCommand.Rescan,
+                "F5 asks to scan every worktree again");
+            Check(screen.Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false)) == TidyCommand.Back,
                 "Esc leaves the tidy screen without deleting anything");
         }
     }
@@ -494,7 +509,8 @@ internal static partial class SelfTest
             entries.Single(entry => entry.Detached) is { Safe: false, Unpushed: 2 } && entries.Single(entry => entry.Branch == "locked-work") is { Safe: false },
             "the JSON marks a branch with unpushed commits safe, and a detached worktree's commits or a locked worktree unsafe");
         Check(entries.Single(entry => entry.Branch == "locked-work").Protected?.Contains("locked") == true &&
-            TidySizes.Load(cache).ContainsKey(Folder("later-work")), "the JSON names protected worktrees, and measured sizes are cached");
+            TidySizes.Load(cache).GetValueOrDefault(Folder("later-work")) is { Bytes: > 0, Status.Uncommitted: 1, Head.Length: 40 },
+            "the JSON names protected worktrees, and each measured worktree's scan is saved for the Tidy screen");
         var quick = await WorktreeTidy.Entries(git, await WorktreeCatalog.Discover(settings, git), guard, sizes: false, cache);
         using var unsized = JsonDocument.Parse(JsonSerializer.Serialize(quick, Files.Json));
         Check(unsized.RootElement.EnumerateArray().All(entry => !entry.TryGetProperty("Bytes", out _) && !entry.TryGetProperty("LastActivity", out _) &&

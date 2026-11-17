@@ -26,29 +26,26 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
     {
         var checkouts = await AnsiConsole.Status().StartAsync("Finding every repository's worktrees...", _ => WorktreeCatalog.Discover(settings, git));
         var list = new TidyList(checkouts, TidyGuard.Current(state), () => DateTimeOffset.Now);
-        var sizes = new ConcurrentDictionary<string, TidySize>(TidySizes.Load(TidySizes.CachePath), Files.Comparer);
+        var scans = TidySizes.Load(TidySizes.CachePath);
         foreach (var row in list.Rows)
-            if (sizes.TryGetValue(row.Path, out var size)) list.SetCachedSize(size);
-        var work = Start(list, sizes);
-        try
+            if (scans.TryGetValue(row.Path, out var scan)) list.SetScan(scan);
+        await Scan(list, scans, Unscanned(list.Rows, scans));
+        while (true)
         {
-            while (true)
+            switch (list.Show(AnsiConsole.Console, ReadKey))
             {
-                var chosen = list.Show(AnsiConsole.Console, ReadKey);
-                if (chosen is null) return;
-                // A worktree being measured or checked holds open handles that would make its removal fail.
-                await work.Stop();
-                var removed = await Delete(chosen, state);
-                foreach (var path in removed) sizes.TryRemove(path, out _);
-                list.Remove(removed);
-                TidySizes.Save(TidySizes.CachePath, sizes.Values);
-                work = Start(list, sizes);
+                case TidyCommand.Rescan:
+                    await Scan(list, scans, list.Rows.ToList());
+                    break;
+                case TidyCommand.Review:
+                    var removed = await Delete(list.Selected.ToArray(), state);
+                    foreach (var path in removed) scans.Remove(path);
+                    list.Remove(removed);
+                    TidySizes.Save(TidySizes.CachePath, scans.Values);
+                    break;
+                default:
+                    return;
             }
-        }
-        finally
-        {
-            await work.Stop();
-            TidySizes.Save(TidySizes.CachePath, sizes.Values);
         }
     }
 
@@ -62,69 +59,80 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
         return null;
     }
 
-    private sealed class Work(Task task, CancellationTokenSource cancel)
-    {
-        private bool stopped;
+    /// <summary>The worktrees a visit scans: ones with no saved scan, and ones whose HEAD has moved since. F5 scans every one again.</summary>
+    internal static List<TidyRow> Unscanned(IEnumerable<TidyRow> rows, IReadOnlyDictionary<string, TidyScan> scans) =>
+        rows.Where(row => !scans.TryGetValue(row.Path, out var scan) || scan.Head != row.Checkout.Head).ToList();
 
-        public async Task Stop()
+    /// <summary>
+    /// The loading screen: measures and checks <paramref name="rows"/> all at once, shows the results in the list, and saves them
+    /// so the next visit only scans worktrees that are new or have moved. A worktree that could not be fully read is not saved.
+    /// </summary>
+    private async Task Scan(TidyList list, Dictionary<string, TidyScan> scans, IReadOnlyList<TidyRow> rows)
+    {
+        if (rows.Count == 0) return;
+        AnsiConsole.Clear();
+        AnsiConsole.Write(TerminalStyle.Header("TIDY WORKTREES", rows.Count == list.Rows.Count
+            ? "Scanning every worktree once; later visits only scan new ones."
+            : $"Scanning {rows.Count} new or changed worktree{(rows.Count == 1 ? "" : "s")}."));
+        var measured = new ConcurrentDictionary<string, TidyMeasurement>(Files.Comparer);
+        var statuses = new ConcurrentDictionary<string, CheckoutStatus>(Files.Comparer);
+        var sizeErrors = new ConcurrentDictionary<string, string>(Files.Comparer);
+        var statusErrors = new ConcurrentDictionary<string, string>(Files.Comparer);
+        int sized = 0, read = 0;
+        string Progress() => $"Scanning worktrees: {Volatile.Read(ref sized)} of {rows.Count} measured, {Volatile.Read(ref read)} of {rows.Count} checked...";
+        await AnsiConsole.Status().StartAsync(Progress(), context =>
         {
-            if (stopped) return;
-            stopped = true;
-            cancel.Cancel();
-            await task;
-            cancel.Dispose();
-        }
-    }
-
-    /// <summary>Measures sizes (worktrees with no size first) and reads states in the background, posting each result to the screen.</summary>
-    private Work Start(TidyList list, ConcurrentDictionary<string, TidySize> sizes)
-    {
-        var cancel = new CancellationTokenSource();
-        var rows = list.Rows.ToList();
-        var measuring = Measure(rows.Where(row => row.Measuring).OrderBy(row => row.Bytes is not null).Select(row => row.Path).ToList(),
-            (path, measurement) =>
+            void Sized()
             {
-                var measured = DateTimeOffset.Now;
-                sizes[path] = new(path, measurement.Bytes, measured);
-                list.Post(screen => screen.SetSize(path, measurement, measured));
-            },
-            (path, error) => list.Post(screen => screen.SetSizeError(path, error)), cancel.Token);
-        var checking = Check(git, rows.Where(row => row.Checking).Select(row => row.Checkout).ToList(),
-            (path, status) => list.Post(screen => screen.SetStatus(path, status)),
-            (path, error) => list.Post(screen => screen.SetStatusError(path, error)), cancel.Token);
-        return new(Task.WhenAll(measuring.ContinueWith(_ => TidySizes.Save(TidySizes.CachePath, sizes.Values), TaskScheduler.Default), checking), cancel);
-    }
-
-    internal static async Task Measure(IReadOnlyList<string> paths, Action<string, TidyMeasurement> measured, Action<string, string> failed, CancellationToken cancel)
-    {
-        try
+                Interlocked.Increment(ref sized);
+                context.Status(Progress());
+            }
+            void Checked()
+            {
+                Interlocked.Increment(ref read);
+                context.Status(Progress());
+            }
+            return Task.WhenAll(
+                Measure(rows.Select(row => row.Path).ToList(), (path, measurement) => { measured[path] = measurement; Sized(); },
+                    (path, error) => { sizeErrors[path] = error; Sized(); }),
+                Check(git, rows.Select(row => row.Checkout).ToList(), (path, status) => { statuses[path] = status; Checked(); },
+                    (path, error) => { statusErrors[path] = error; Checked(); }));
+        });
+        var now = DateTimeOffset.Now;
+        foreach (var row in rows)
         {
-            await Parallel.ForEachAsync(paths, new ParallelOptions { MaxDegreeOfParallelism = MeasureWorkers, CancellationToken = cancel }, (path, token) =>
+            if (measured.TryGetValue(row.Path, out var measurement) && statuses.TryGetValue(row.Path, out var status))
             {
-                try { measured(path, TidySizes.Measure(path, token)); }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { failed(path, exception.Message); }
-                return ValueTask.CompletedTask;
-            });
+                scans[row.Path] = new(row.Path, row.Checkout.Head, measurement.Bytes, measurement.LastWrite, status, now);
+                list.SetScan(scans[row.Path]);
+                continue;
+            }
+            scans.Remove(row.Path);
+            if (measured.TryGetValue(row.Path, out measurement)) list.SetSize(row.Path, measurement, now);
+            else list.SetSizeError(row.Path, sizeErrors.GetValueOrDefault(row.Path, ""));
+            if (statuses.TryGetValue(row.Path, out status)) list.SetStatus(row.Path, status);
+            else list.SetStatusError(row.Path, statusErrors.GetValueOrDefault(row.Path, ""));
         }
-        catch (OperationCanceledException) { }
+        TidySizes.Save(TidySizes.CachePath, scans.Values);
     }
 
-    internal static async Task Check(GitRepository git, IReadOnlyList<Checkout> checkouts, Action<string, CheckoutStatus> done,
-        Action<string, string> failed, CancellationToken cancel)
-    {
-        try
+    internal static Task Measure(IReadOnlyList<string> paths, Action<string, TidyMeasurement> measured, Action<string, string> failed) =>
+        Parallel.ForEachAsync(paths, new ParallelOptions { MaxDegreeOfParallelism = MeasureWorkers }, (path, _) =>
         {
-            await Parallel.ForEachAsync(checkouts, new ParallelOptions { MaxDegreeOfParallelism = StatusWorkers, CancellationToken = cancel }, async (checkout, _) =>
+            try { measured(path, TidySizes.Measure(path)); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { failed(path, exception.Message); }
+            return ValueTask.CompletedTask;
+        });
+
+    internal static Task Check(GitRepository git, IReadOnlyList<Checkout> checkouts, Action<string, CheckoutStatus> done, Action<string, string> failed) =>
+        Parallel.ForEachAsync(checkouts, new ParallelOptions { MaxDegreeOfParallelism = StatusWorkers }, async (checkout, _) =>
+        {
+            try { done(checkout.Path, await WorktreeCatalog.Status(git, checkout)); }
+            catch (Exception exception) when (exception is InvalidOperationException or IOException or FormatException or System.ComponentModel.Win32Exception)
             {
-                try { done(checkout.Path, await WorktreeCatalog.Status(git, checkout)); }
-                catch (Exception exception) when (exception is InvalidOperationException or IOException or FormatException or System.ComponentModel.Win32Exception)
-                {
-                    failed(checkout.Path, exception.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "");
-                }
-            });
-        }
-        catch (OperationCanceledException) { }
-    }
+                failed(checkout.Path, exception.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "");
+            }
+        });
 
     /// <summary>Reviews the chosen worktrees, asks for confirmation, and deletes them. Returns the paths that were removed.</summary>
     private async Task<List<string>> Delete(TidyRow[] chosen, DeploymentState? state)
@@ -185,14 +193,16 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
         var statuses = new ConcurrentDictionary<string, CheckoutStatus>(Files.Comparer);
         var errors = new ConcurrentDictionary<string, string>(Files.Comparer);
         var measured = new ConcurrentDictionary<string, TidyMeasurement>(Files.Comparer);
-        await Task.WhenAll(Check(git, linked, (path, status) => statuses[path] = status, (path, error) => errors[path] = error, CancellationToken.None),
+        await Task.WhenAll(Check(git, linked, (path, status) => statuses[path] = status, (path, error) => errors[path] = error),
             sizes ? Measure(linked.Select(checkout => checkout.Path).ToList(), (path, measurement) => measured[path] = measurement,
-                (_, _) => { }, CancellationToken.None) : Task.CompletedTask);
+                (_, _) => { }) : Task.CompletedTask);
         if (sizes)
         {
             var cache = TidySizes.Load(cachePath ??= TidySizes.CachePath);
             var now = DateTimeOffset.Now;
-            foreach (var (path, measurement) in measured) cache[path] = new(path, measurement.Bytes, now);
+            foreach (var checkout in linked)
+                if (measured.TryGetValue(checkout.Path, out var measurement) && statuses.TryGetValue(checkout.Path, out var status))
+                    cache[checkout.Path] = new(checkout.Path, checkout.Head, measurement.Bytes, measurement.LastWrite, status, now);
             TidySizes.Save(cachePath, cache.Values);
         }
         return linked.Select(checkout =>
