@@ -5,6 +5,22 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: after a deployment, Cultivate requests the dev site and waits for it to answer, so the recompilation no longer
+  lands on your first page load. A progress bar shows the wait (Esc stops waiting), and the result reports the status or the
+  compile, parser, or server error with its file and line. The site address is read from the webfarm's IIS bindings
+  (`SiteUrl`; change it with `cultivate setup --site-url`, or turn the warm-up off with `--warmup false`).
+  `cultivate warmup` runs the same check on demand, and `cultivate activate --no-warmup` skips it.
+- Feature: Ticket workspaces on the home screen groups every repository's worktrees by ticket number (or by branch name
+  for work without a ticket). A workspace shows each checkout's uncommitted and unpushed work, its pull request and
+  checks (through the GitHub CLI), and whether the ticket's SQL files folder matches the SQL repository's changes. From
+  there you can open all its solutions, preview the webfarm deployment, and open the ticket page, pull requests, or SQL
+  files folder. `cultivate tickets [--ticket KEY] [--prs]` prints the same as JSON.
+- Feature: Tidy worktrees on the home screen lists every repository's worktrees with their size, age, and state. Sort by
+  size, age, or name (Tab), filter by text, age (F2), size (F3), or safe to delete (F4), select with Space or Ctrl+A,
+  and delete with Del. Deleting asks first, asks again before losing uncommitted work, never touches a main checkout,
+  the deployed worktree, or a locked worktree, and always keeps branches. `cultivate worktrees [--sizes]` prints the
+  list as JSON.
+
 ## 1.1.21 — 2026-11-17
 
 - Fix: Open solution prepares a worktree's dependencies before Visual Studio loads it, so projects no longer open with
