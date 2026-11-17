@@ -175,8 +175,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             var mainSolution = SelectSolution(root);
             var ide = await Settings.FindVisualStudio()
                 ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution.");
-            await AnsiConsole.Status().StartAsync("Opening the main worktree solution...", _ =>
-                SolutionOpener.Open(ide, mainSolution, []));
+            await Open(ide, mainSolution, [], "Opening the main worktree solution...");
             return;
         }
         if (target is null) return;
@@ -202,8 +201,28 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 new Planner(settings, git, bridge).Create(target with { Worktree = root }, _ => Task.FromResult(new Dictionary<string, string>())));
             files = SolutionOpener.FilesToOpen(root, solution, ChangesToOpen(plan));
         }
-        await AnsiConsole.Status().StartAsync("Opening the solution and changed source files...", _ =>
-            SolutionOpener.Open(visualStudio, solution, files));
+        await Open(visualStudio, solution, files, "Opening the solution and changed source files...");
+    }
+
+    /// <summary>Fills in the solution's missing ignored references first, so Visual Studio loads its projects with them resolved.</summary>
+    private async Task Open(string visualStudio, string solution, List<string> files, string status)
+    {
+        SolutionDependencies.Result prepared;
+        try
+        {
+            prepared = await AnsiConsole.Status().StartAsync("Preparing the solution's dependencies...", context =>
+                SolutionDependencies.Prepare(git, settings.MSBuild, solution, message => context.Status(Escape(message) + "...")));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // Missing references only cost IntelliSense, so they never stop the solution from opening.
+            prepared = new(0, 0, 0, ["Could not prepare the solution's dependencies: " + exception.Message]);
+        }
+        await AnsiConsole.Status().StartAsync(status, _ => SolutionOpener.Open(visualStudio, solution, files));
+        if (prepared.Warnings.Count == 0) return;
+        if (prepared.Summary is { } summary) AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]{Escape(summary)}[/]");
+        foreach (var warning in prepared.Warnings) AnsiConsole.MarkupLine($"[{TerminalStyle.Gold}]{Escape(warning)}[/]");
+        Pause();
     }
 
     private static string SelectSolution(string root)

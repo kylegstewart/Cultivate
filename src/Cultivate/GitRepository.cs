@@ -102,14 +102,19 @@ internal sealed class GitRepository(Settings settings)
         {
             var common = await Git(checkout, "rev-parse", "--path-format=absolute", "--git-common-dir");
             if (!repositories.Add(Files.Full(common))) continue;
-            // Git lists the primary worktree first; branch names and folder layout need not match it.
-            var listing = await Git(checkout, "worktree", "list", "--porcelain", "-z");
-            var first = listing.Split('\0', 2)[0];
-            if (!first.StartsWith("worktree ", StringComparison.Ordinal)) continue;
-            var root = Files.Full(first[9..]);
-            if (Directory.Exists(root) && SolutionOpener.Solutions(root).Count != 0) roots.Add(root);
+            var root = await MainWorktree(checkout);
+            if (root is not null && Directory.Exists(root) && SolutionOpener.Solutions(root).Count != 0) roots.Add(root);
         }
         return roots.OrderBy(Path.GetFileName, Files.Comparer).ThenBy(root => root, Files.Comparer).ToList();
+    }
+
+    /// <summary>The primary checkout of the repository that <paramref name="checkout"/> belongs to.</summary>
+    public async Task<string?> MainWorktree(string checkout)
+    {
+        // Git lists the primary worktree first; branch names and folder layout need not match it.
+        var listing = await Git(checkout, "worktree", "list", "--porcelain", "-z");
+        var first = listing.Split('\0', 2)[0];
+        return first.StartsWith("worktree ", StringComparison.Ordinal) ? Files.Full(first[9..]) : null;
     }
 
     /// <summary>The branch a checkout's changes are compared against: origin's default branch, else main or master.</summary>

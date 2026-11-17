@@ -5,6 +5,11 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: Open solution prepares a worktree's dependencies before Visual Studio loads it, so projects no longer open with
+  unresolved references. Files Git ignores, such as `packages\` and `bin\MeyerObjects.dll`, are copied from the
+  repository's main checkout, and NuGet packages the main checkout lacks too are restored. Nothing that would show in
+  `git status` is created, and existing files are never overwritten.
+
 ## 1.1.20 — 2026-11-13
 
 - Feature: a changed project file that adds or bumps a NuGet package reference now deploys that package's DLL

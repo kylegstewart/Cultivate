@@ -290,7 +290,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         catch (BadImageFormatException) { return null; }
     }
 
-    private static void CopyDirectory(string source, string destination)
+    internal static void CopyDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
         foreach (var path in Directory.EnumerateFileSystemEntries(source))
