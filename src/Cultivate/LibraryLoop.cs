@@ -269,7 +269,7 @@ internal sealed partial class LibraryLoop(Settings settings, GitRepository git)
         var current = XDocument.Load(full);
         var gitPath = path.Replace('\\', '/');
         var baseline = (await git.Git(library.Worktree, "ls-tree", "--name-only", library.Baseline, "--", ":(literal)" + gitPath)).Length == 0 ? null :
-            XDocument.Parse((await git.Git(library.Worktree, "show", library.Baseline + ":" + gitPath)).TrimStart('﻿'));
+            XDocument.Parse((await git.Git(library.Worktree, "show", library.Baseline + ":" + gitPath)).TrimStart('\uFEFF'));
         var assembly = Value(current, "AssemblyName") ?? Path.GetFileNameWithoutExtension(path);
         var frameworks = (Value(current, "TargetFrameworks") ?? Value(current, "TargetFramework") ?? "")
             .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
