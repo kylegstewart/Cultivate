@@ -74,14 +74,15 @@ internal static class Watcher
             var target = new Target(state.Branch, string.IsNullOrEmpty(state.SourceRoot) ? null : state.SourceRoot, state.SourceRef);
             try
             {
-                var inspected = await git.Inspect(target);
-                if (inspected.Fingerprint != state.Fingerprint && inspected.Fingerprint != lastAttempt)
+                var fingerprint = await LibraryLoop.Fingerprint(git, target, state.Libraries);
+                if (fingerprint != state.Fingerprint && fingerprint != lastAttempt)
                 {
                     await Task.Delay(800);
-                    var stable = await git.Inspect(target);
-                    if (stable.Fingerprint != inspected.Fingerprint) continue;
-                    lastAttempt = stable.Fingerprint;
-                    var plan = await planner.Create(target, excludedPaths: state.ExcludedPaths);
+                    var stable = await LibraryLoop.Fingerprint(git, target, state.Libraries);
+                    if (stable != fingerprint) continue;
+                    lastAttempt = stable;
+                    var plan = await planner.Create(target, excludedPaths: state.ExcludedPaths,
+                        libraries: state.Libraries.Select(library => library.Worktree));
                     if (!plan.CanDeploy) throw new InvalidOperationException(string.Join("\n", plan.Errors));
                     var activation = pipeline.Activate(plan, message => File.AppendAllText(log, $"{DateTime.Now:O} {message}\n"), watch: false, workerUpdate: true);
                     while (!activation.IsCompleted)

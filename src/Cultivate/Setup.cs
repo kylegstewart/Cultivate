@@ -17,13 +17,13 @@ internal static class Setup
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                 throw new InvalidOperationException($"{name} needs a value.");
             var value = args[index + 1].Trim().Trim('"');
-            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup") && !Path.IsPathFullyQualified(value))
+            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--library-repositories") && !Path.IsPathFullyQualified(value))
                 throw new InvalidOperationException($"{name} needs an absolute path, not '{value}'.");
             return value;
         }
         var settings = await Settings.Read();
         var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
-            "--site-url", "--warmup", "--sql-mirror" };
+            "--site-url", "--warmup", "--sql-mirror", "--library-repositories" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -48,6 +48,7 @@ internal static class Setup
         if (Option("--warmup") is { } warmup)
             settings.WarmUpAfterDeploy = bool.TryParse(warmup, out var enabled) ? enabled : throw new InvalidOperationException("--warmup expects true or false.");
         if (Option("--sql-mirror") is { } mirror) settings.SqlMirrorRoot = Files.Full(mirror);
+        if (Option("--library-repositories") is { } libraries) settings.LibraryRepositories = LibraryLoop.ParseRepositories(libraries);
         GuardActive(active, previousFarm, settings.WebfarmRoot);
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n  " + string.Join("\n  ", problems));
@@ -100,6 +101,9 @@ internal static class Setup
         var mirror = Ask("[bold]SQL files folder[/] with a subfolder per ticket (Ticket workspaces compares it; blank for none)",
             settings.SqlMirrorRoot, value => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path.", optional: true);
         settings.SqlMirrorRoot = mirror.Length == 0 ? "" : Files.Full(mirror);
+        settings.LibraryRepositories = LibraryLoop.ParseRepositories(Ask(
+            "[bold]Library repositories[/] whose matching worktrees can deploy with MyMeyer (separate with ;, or none)",
+            string.Join(";", settings.LibraryRepositories ?? []), LibraryLoop.RepositoriesProblem, optional: true));
 
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n" + string.Join("\n", problems));

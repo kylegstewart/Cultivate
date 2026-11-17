@@ -44,7 +44,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     files.Add(new(destination, artifact.RelativePath));
                 }
             }
-            else if (plan.Projects.Count != 0)
+            else if (runtimePaths.Count != 0)
             {
                 stage = "Build";
                 files.AddRange(await Build(plan, snapshot, run, progress));
@@ -58,7 +58,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 }
             }
             stage = "Source validation";
-            if ((await git.Inspect(plan.Target)).Fingerprint != plan.Fingerprint)
+            if (await LibraryLoop.Fingerprint(git, plan.Target, LibraryLoop.Sources(plan)) != plan.Fingerprint)
                 throw new InvalidOperationException("The selected source changed during the build. Nothing was deployed. Preview again.");
             stage = "Deploy";
             progress("Deploying the verified set; journaling originals for restoration");
@@ -68,14 +68,17 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 plan.Target.Branch, plan.Fingerprint, ExpectedToken = previous?.Token ?? "",
                 WatchEnabled = watch || workerUpdate,
                 plan.BuildFingerprint, plan.ExcludedPaths, RuntimeFiles = runtimeFiles, WorkerUpdate = workerUpdate,
+                Libraries = LibraryLoop.Sources(plan),
                 Files = files.Select(x => new { x.Source, x.RelativePath, x.Delete, Hash = x.Delete ? null : Files.Hash(x.Source) }).ToList()
             });
             var state = result.Deserialize<DeploymentState>(Files.Json) ?? throw new InvalidDataException("Deployment did not return its state.");
             var deployed = new HashSet<string>(files.Select(file => file.RelativePath), StringComparer.OrdinalIgnoreCase);
             var projectFiles = plan.Projects.Select(project => @"bin\" + project.Assembly + ".dll").ToHashSet(Files.Comparer);
+            var libraryFiles = LibraryLoop.Assemblies(plan).Select(assembly => @"bin\" + assembly + ".dll").ToHashSet(Files.Comparer);
             state.Updated = files.Select(file => new UpdatedFile(file.RelativePath,
                     file.Delete ? UpdatedFile.Deleted :
                     !runtimeFiles.Any(x => Files.Comparer.Equals(x.RelativePath, file.RelativePath)) ? UpdatedFile.Synced :
+                    libraryFiles.Contains(file.RelativePath) ? reuse ? UpdatedFile.Reused : UpdatedFile.Library :
                     !projectFiles.Contains(file.RelativePath) ? UpdatedFile.Package :
                     reuse ? UpdatedFile.Reused : UpdatedFile.Built))
                 // The bridge restores the previous version's files that this one no longer deploys, unless they changed outside Cultivate.
@@ -123,11 +126,16 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 ["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets"),
                 ["ReferencePath"] = seeds
             };
-            var internalNames = plan.Projects.Select(x => x.Assembly).ToHashSet(Files.Comparer);
+            context = new("Library build") { Log = Path.Combine(run, "build.log") };
+            var libraryFiles = await new LibraryLoop(settings, git).Build(plan, snapshot, run, seeds, progress);
+            // Capture.targets points every reference to a built library assembly at that build, whatever version the project declares.
+            if (libraryFiles.Count != 0) environment["CultivateLibraryDirectory"] = Path.Combine(run, "libraries") + "\\";
+            var libraryNames = LibraryLoop.Assemblies(plan).ToHashSet(Files.Comparer);
+            var internalNames = plan.Projects.Select(x => x.Assembly).Concat(libraryNames).ToHashSet(Files.Comparer);
             foreach (var project in plan.Projects)
             {
                 context = new("Reference preparation") { Project = project.RelativePath, Log = Path.Combine(run, "build.log") };
-                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, environment, run);
+                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, libraryNames, environment, run);
                 context = context with { Stage = "Project evaluation" };
                 var full = Files.Child(snapshot, project.RelativePath);
                 var metadataText = await Commands.Run(settings.MSBuild,
@@ -187,6 +195,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 var identity = AssemblyName.GetAssemblyName(targetPath);
                 if (!Files.Comparer.Equals(identity.Name, project.Assembly))
                     throw new InvalidDataException($"Unexpected assembly identity for {targetPath}.");
+                LibraryLoop.VerifyReferences(targetPath, plan);
                 File.Copy(targetPath, Path.Combine(seeds, Path.GetFileName(targetPath)), true);
                 // Projects can share an output folder, so keep each changed package's DLL before a later build replaces it.
                 foreach (var hint in project.PackageDependencies)
@@ -205,7 +214,10 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             }
             context = new("Artifact verification") { Log = Path.Combine(run, "build.log") };
             progress("Verifying only the changed projects' own DLLs and changed packages");
-            return Artifacts.Collect(run, snapshot, plan.Projects);
+            var collected = Artifacts.Collect(run, snapshot, plan.Projects);
+            if (libraryFiles.FirstOrDefault(library => collected.Any(file => Files.Comparer.Equals(file.RelativePath, library.RelativePath))) is { } duplicate)
+                throw new InvalidDataException($"A library build and a changed MyMeyer project both produce {duplicate.RelativePath}.");
+            return collected.Concat(libraryFiles).ToList();
         }
         catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
             UnauthorizedAccessException or JsonException)
@@ -216,7 +228,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
     }
 
     private async Task Prepare(ProjectInfo project, string snapshot, string sourceRoot, string seeds, HashSet<string> internalNames,
-        Dictionary<string, string> environment, string run)
+        HashSet<string> libraryNames, Dictionary<string, string> environment, string run)
     {
         var directory = Path.GetDirectoryName(Files.Child(snapshot, project.RelativePath))!;
         var originalDirectory = Path.GetDirectoryName(Files.Child(sourceRoot, project.RelativePath))!;
@@ -224,6 +236,8 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         foreach (var relative in project.Hints.Concat(project.Imports))
         {
             if (relative.Contains('$')) continue;
+            // A library this run builds replaces its package, whose version may not be published yet.
+            if (project.Hints.Contains(relative) && libraryNames.Contains(Path.GetFileNameWithoutExtension(relative))) continue;
             var destination = Path.GetFullPath(Path.Combine(directory, relative));
             var packageRoot = Path.Combine(snapshot, "packages") + "\\";
             if (!destination.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase)) continue;

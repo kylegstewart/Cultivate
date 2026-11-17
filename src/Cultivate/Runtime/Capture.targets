@@ -14,4 +14,23 @@
                       Lines="@(_CultivateProjectArtifact->'$(CultivateRunDirectory)\captured\$(MSBuildProjectName)\%(Filename)%(Extension)')"
                       Overwrite="true" Encoding="UTF-8" />
   </Target>
+  <!-- Library in the loop: a reference to an assembly this run built from a library worktree compiles against that build,
+       whatever version or HintPath the project declares. Only Cultivate's throwaway snapshot builds set the directory. -->
+  <Target Name="CultivateLibraryReferences" BeforeTargets="ResolveAssemblyReferences"
+          Condition="'$(CultivateRunDirectory)' != '' and '$(CultivateLibraryDirectory)' != ''">
+    <ItemGroup>
+      <_CultivateLibraryReference Include="@(Reference)">
+        <CultivateName>$([System.String]::Copy('%(Identity)').Split(',')[0].Trim())</CultivateName>
+      </_CultivateLibraryReference>
+      <_CultivateLibraryReference Remove="@(_CultivateLibraryReference)"
+                                  Condition="!Exists('$(CultivateLibraryDirectory)%(CultivateName).dll')" />
+      <Reference Remove="@(_CultivateLibraryReference)" />
+      <Reference Include="@(_CultivateLibraryReference->'%(CultivateName)')">
+        <HintPath>$(CultivateLibraryDirectory)%(_CultivateLibraryReference.CultivateName).dll</HintPath>
+        <SpecificVersion>false</SpecificVersion>
+      </Reference>
+    </ItemGroup>
+    <Message Importance="high" Condition="'@(_CultivateLibraryReference)' != ''"
+             Text="Cultivate: %(_CultivateLibraryReference.CultivateName) compiles against the library build in $(CultivateLibraryDirectory)" />
+  </Target>
 </Project>

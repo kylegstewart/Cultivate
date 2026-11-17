@@ -78,8 +78,10 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
     internal static bool IsExcluded(string path) => Excluded().IsMatch(path);
 
     public async Task<Plan> Create(Target target, Func<string, Task<Dictionary<string, string>>>? mapping = null,
-        IEnumerable<string>? excludedPaths = null)
+        IEnumerable<string>? excludedPaths = null, IEnumerable<string>? libraries = null)
     {
+        var libraryErrors = new List<string>();
+        var detection = new LibraryLoop(settings, git).Detect(target, (libraries ?? []).ToList(), libraryErrors);
         var inspected = await git.Inspect(target);
         var excluded = (excludedPaths ?? []).Select(path => path.Replace('\\', '/'))
             .Select(path => inspected.Changes.FirstOrDefault(change => Files.Comparer.Equals(change.Path, path))?.Path ?? path)
@@ -90,6 +92,7 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
             Target = target, Commit = inspected.Commit, Baseline = inspected.Baseline,
             Changes = inspected.Changes, Fingerprint = inspected.Fingerprint, ExcludedPaths = excluded
         };
+        LibraryLoop.Apply(plan, await detection, libraryErrors);
         var selected = plan.Changes.Where(change => !excluded.Contains(change.Path.Replace('\\', '/'), Files.Comparer)).ToList();
         if (target.Ref == "refs/heads/" + settings.BaseBranch || target.Branch == settings.BaseBranch ||
             target.Remote && target.Branch.EndsWith("/" + settings.BaseBranch, StringComparison.OrdinalIgnoreCase))
@@ -126,6 +129,7 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
                     Files.Hash(Files.Child(target.Worktree, change.Path));
                 buildHash.AppendData(Encoding.UTF8.GetBytes(change.Path + "\0" + content + "\0"));
             }
+            foreach (var library in plan.Libraries.Where(library => library.Included)) buildHash.AppendData(Encoding.UTF8.GetBytes(library.BuildInputs));
             plan.BuildFingerprint = Convert.ToHexString(buildHash.GetHashAndReset());
         }
         if (compiled.Count != 0)
@@ -162,6 +166,7 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
         var packages = plan.Projects.SelectMany(project => project.PackageDependencies).Select(Path.GetFileName).Distinct(Files.Comparer).ToList();
         if (packages.Count != 0)
             plan.Notes.Add($"Changed package references also deploy {string.Join(", ", packages)}. Other package DLLs on the webfarm are not replaced.");
+        LibraryLoop.Check(plan);
         return plan;
     }
 
@@ -171,7 +176,8 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
     /// </summary>
     private async Task AddPackageDependencies(Plan plan, List<Change> compiled)
     {
-        var built = plan.Projects.Select(project => project.Assembly + ".dll").ToHashSet(Files.Comparer);
+        var built = plan.Projects.Select(project => project.Assembly + ".dll")
+            .Concat(LibraryLoop.Assemblies(plan).Select(assembly => assembly + ".dll")).ToHashSet(Files.Comparer);
         var packages = new Dictionary<string, (string Path, string Project)>(Files.Comparer);
         foreach (var project in plan.Projects.Where(project => compiled.Any(change => !change.Deleted &&
             Files.Comparer.Equals(change.Path.Replace('/', '\\'), project.RelativePath))))
