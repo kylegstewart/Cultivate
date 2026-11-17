@@ -15,13 +15,18 @@ internal static class Program
           list                                    List worktrees and branches (JSON)
           status                                  Show the active deployment (JSON)
           plan --worktree PATH | --branch NAME    Preview a deployment plan (JSON)
-          activate --worktree PATH | --branch NAME --yes [--once]
+          activate --worktree PATH | --branch NAME --yes [--once] [--no-warmup]
                                                   Build and deploy; --once disables automatic updates
           restore --yes                           Stop updates and restore the original webfarm files
+          warmup [--url URL] [--timeout SECONDS] [--json]
+                                                  Request the dev site until it answers and report errors
+          tickets                                 List each ticket's worktrees across repositories (JSON)
+          worktrees                               List every worktree with its size and age (JSON)
           setup                                   Configure interactively, or pass any of:
                 [--repository PATH] [--webfarm PATH] [--base-branch NAME]
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
-                [--worktrees PATH]
+                [--worktrees PATH] [--site-url URL] [--warmup true|false]
+                [--sql-mirror PATH]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
@@ -92,8 +97,13 @@ internal static class Program
                     var plan = await new Planner(settings, git, bridge).Create(target);
                     if (args[0] == "plan") { Print(plan); return plan.CanDeploy ? 0 : 2; }
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Activation requires --yes or an interactive confirmation.");
-                    Print(await new Pipeline(settings, git, bridge).Activate(plan, message => Console.Error.WriteLine(message), !args.Contains("--once") && settings.WatchSavedFiles));
+                    var activated = await new Pipeline(settings, git, bridge).Activate(plan, message => Console.Error.WriteLine(message), !args.Contains("--once") && settings.WatchSavedFiles);
+                    await Warmup.AfterActivationCommand(settings, activated, args);
+                    Print(activated);
                     break;
+                case "warmup": return await Warmup.Command(settings, args);
+                case "tickets": return await TicketWorkspaces.Command(settings, git, args);
+                case "worktrees": return await WorktreeTidy.Command(settings, git, args);
                 case "restore":
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Restoration requires --yes or the interactive menu.");
                     Print(await bridge.Call("Restore"));

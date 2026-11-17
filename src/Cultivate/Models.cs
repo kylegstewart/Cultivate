@@ -72,6 +72,14 @@ internal sealed class Settings
     public string StateRoot { get; set; } = "";
     /// <summary>Folder whose worktrees, from any repository, can be opened with Open solution.</summary>
     public string WorktreesRoot { get; set; } = "";
+    /// <summary>Address of the dev site, requested after a deployment so the first page load is not the one that waits for recompilation.</summary>
+    public string SiteUrl { get; set; } = "";
+    /// <summary>Whether an activation requests <see cref="SiteUrl"/> afterwards and reports what the site answered.</summary>
+    public bool WarmUpAfterDeploy { get; set; } = true;
+    /// <summary>Folder holding one subfolder of SQL files per ticket or branch, compared with each ticket's SQL repository changes.</summary>
+    public string SqlMirrorRoot { get; set; } = "";
+    /// <summary>Ticket page address; {0} is replaced with the ticket number.</summary>
+    public string TicketUrl { get; set; } = "https://mymeyer.meyerdistributing.com/it/ticket-list?ticketNum={0}";
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
@@ -120,6 +128,13 @@ internal sealed class Settings
             var guess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Documents", "GitHub", "t3-worktrees");
             if (Directory.Exists(guess)) WorktreesRoot = guess;
         }
+        if (string.IsNullOrWhiteSpace(SiteUrl) && !string.IsNullOrWhiteSpace(WebfarmRoot)) SiteUrl = Warmup.SuggestSiteUrl(WebfarmRoot);
+        if (string.IsNullOrWhiteSpace(SqlMirrorRoot) && !string.IsNullOrWhiteSpace(RepositoryRoot) &&
+            Path.GetDirectoryName(Files.Full(RepositoryRoot)) is { } clones)
+        {
+            var guess = Path.Combine(clones, "SQL", "SPs");
+            if (Directory.Exists(guess)) SqlMirrorRoot = guess;
+        }
     }
 
     public List<string> Problems()
@@ -137,6 +152,8 @@ internal sealed class Settings
         else if (!File.Exists(MSBuild)) problems.Add($"Configured MSBuild was not found: {MSBuild}");
         if (string.IsNullOrWhiteSpace(StateRoot) || !Path.IsPathFullyQualified(StateRoot))
             problems.Add("StateRoot must be an absolute folder for the deployment journal and backups.");
+        if (!string.IsNullOrWhiteSpace(SiteUrl) && !(Uri.TryCreate(SiteUrl, UriKind.Absolute, out var site) && site.Scheme is "http" or "https"))
+            problems.Add("SiteUrl must be the http or https address of your dev site, for example https://mywebfarm-dev02.example.com/.");
         return problems;
     }
 
@@ -219,6 +236,8 @@ internal sealed class DeploymentState
     public List<string> Kept { get; set; } = [];
     /// <summary>What the activation that returned this state changed on the webfarm. Not stored by the bridge.</summary>
     public List<UpdatedFile> Updated { get; set; } = [];
+    /// <summary>What the dev site answered when it was requested after this activation. Not stored by the bridge.</summary>
+    public WarmupResult? WarmUp { get; set; }
 }
 internal sealed record JournalEntry(string RelativePath);
 internal sealed record UpdatedFile(string RelativePath, string Change)

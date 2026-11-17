@@ -5,12 +5,14 @@ namespace Cultivate;
 
 internal sealed class Terminal(Settings settings, GitRepository git, Bridge bridge)
 {
-    private static string Escape(string value) => Markup.Escape(value);
+    internal static string Escape(string value) => Markup.Escape(value);
     private const string UpdateAction = "Update Cultivate";
     internal static IReadOnlyList<MenuAction> HomeActions { get; } =
     [
         new("Update my webfarm", "Browse versions and preview their changed files before deploying anything."),
         new("Open solution", "Open a repository's main solution, or a worktree or local branch with its changed source files."),
+        new("Ticket workspaces", "See one ticket's worktrees, pull requests, and SQL files across every repository, and open them together."),
+        new("Tidy worktrees", "Sort and filter every repository's worktrees by size and age, then delete the ones you choose."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
         new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
         new("Exit", "Close this menu without stopping active automatic updates.")
@@ -33,7 +35,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         return actions;
     }
 
-    private static string Select(string title, IEnumerable<MenuAction> choices) => new ActionPicker(choices).Show(title).Label;
+    internal static string Select(string title, IEnumerable<MenuAction> choices) => new ActionPicker(choices).Show(title).Label;
 
     internal static List<(Change Change, string Action)> ActionableChanges(Plan plan)
     {
@@ -128,6 +130,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         break;
                     case "Update my webfarm": await Choose(state); break;
                     case "Open solution": await OpenSolution(state); break;
+                    case "Ticket workspaces": await new TicketWorkspaces(settings, git, bridge, this).Run(state); break;
+                    case "Tidy worktrees": await new WorktreeTidy(settings, git).Run(state); break;
                     case "Restore original webfarm files":
                         if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))
                         {
@@ -179,11 +183,20 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             return;
         }
         if (target is null) return;
+        await OpenTarget(target, others.Contains(target));
+    }
+
+    /// <summary>
+    /// Opens a checkout's solution with its changed source files. A MyMeyer checkout opens the files of its deployment plan;
+    /// one from another repository has no plan, so <paramref name="otherRepository"/> opens every changed source file under its solution.
+    /// </summary>
+    internal async Task OpenTarget(Target target, bool otherRepository)
+    {
         var visualStudio = await Settings.FindVisualStudio()
             ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution and its changed files.");
         string solution;
         List<string> files;
-        if (others.Contains(target))
+        if (otherRepository)
         {
             // Another repository has no deployment plan, so every changed source file under its solution opens.
             var root = target.Worktree!;
@@ -239,7 +252,12 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     {
         var targets = await AnsiConsole.Status().StartAsync("Finding worktrees and cached branches...", _ => git.Targets());
         var target = new VersionPicker(targets, state).Show();
-        if (target is null) return;
+        if (target is not null) await Preview(target, state);
+    }
+
+    /// <summary>The deployment preview of one MyMeyer version, through to its activation.</summary>
+    internal async Task Preview(Target target, DeploymentState? state)
+    {
         var planner = new Planner(settings, git, bridge);
         var excluded = state?.Active == true && state.SourceRef == target.Ref &&
             Files.Comparer.Equals(state.SourceRoot, target.Worktree ?? "") ? state.ExcludedPaths : [];
@@ -310,6 +328,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             AnsiConsole.Write(UpdatedFiles(activated, settings.WebfarmRoot));
             AnsiConsole.MarkupLine(watch ? "[grey]Saved changes update automatically after successful builds; closing this menu keeps updates running.[/]" :
                 "[grey]This is a one-time deployment. Later saves will not be published.[/]");
+            await Warmup.AfterActivation(settings, activated);
             Pause();
             return;
         }
@@ -332,7 +351,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     // Pause's blank line and prompt, plus the cursor.
     private const int PauseLines = 3;
 
-    private static void Pause()
+    internal static void Pause()
     {
         AnsiConsole.MarkupLine($"\n[{TerminalStyle.Gold}]Press any key[/] [{TerminalStyle.Muted}]to continue[/]");
         Console.ReadKey(true);
