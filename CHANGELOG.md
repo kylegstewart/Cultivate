@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.24 — 2026-11-17
+
 - Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to
   stop it once, to always stop it without asking (`StopLegacyWatcher`; `cultivate setup --stop-legacy-watcher true`),
   or to cancel. With the setting on, automatic updates stop it too. `cultivate activate --stop-legacy-watcher` stops it
