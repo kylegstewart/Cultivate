@@ -5,6 +5,19 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to
+  stop it once, to always stop it without asking (`StopLegacyWatcher`; `cultivate setup --stop-legacy-watcher true`),
+  or to cancel. With the setting on, automatic updates stop it too. `cultivate activate --stop-legacy-watcher` stops it
+  for one activation. A watcher started again during an activation still blocks the publish.
+- Feature: a ticket's library changes can be tested before a package is published. When the MyMeyer worktree you
+  preview has a worktree on the same ticket (or the same branch name) in a library repository such as
+  Libraries--BusinessLogic, the preview lists it. Choose library changes to build its changed projects from a snapshot,
+  compile the changed MyMeyer projects against that build, and deploy the library DLL with them. It is left out unless
+  you include it, it only replaces a DLL the webfarm already has, nothing is packed or published, and Restore returns
+  the original DLL. Automatic updates rebuild when a library file is saved. Library repositories are found beside the
+  MyMeyer checkout (`LibraryRepositories`; `cultivate setup --library-repositories`), and `cultivate plan` and
+  `activate` take `--library PATH` or `--libraries`.
+
 ## 1.1.23 — 2026-11-17
 
 - Improvement: Tidy worktrees opens almost at once after the first visit. The first visit scans every worktree's size and

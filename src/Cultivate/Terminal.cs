@@ -18,7 +18,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         new("Exit", "Close this menu without stopping active automatic updates.")
     ];
 
-    internal static List<MenuAction> PreviewActions(bool canDeploy, bool hasSelectableChanges = false)
+    internal static List<MenuAction> PreviewActions(bool canDeploy, bool hasSelectableChanges = false, bool hasLibraries = false)
     {
         var actions = new List<MenuAction>();
         if (canDeploy)
@@ -30,6 +30,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         }
         if (hasSelectableChanges)
             actions.Add(new("Choose files to deploy", "Uncheck files to exclude them from activation and automatic updates; check them again to include them."));
+        if (hasLibraries)
+            actions.Add(new(LibraryLoop.ChooseAction, "Build a matching library worktree's changed projects and deploy their DLLs with this version, or leave them out."));
         actions.Add(new("Show every changed file", "Show all Git changes, including files with no deployment action."));
         actions.Add(new("Back", "Return home without deploying this version."));
         return actions;
@@ -261,8 +263,9 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         var planner = new Planner(settings, git, bridge);
         var excluded = state?.Active == true && state.SourceRef == target.Ref &&
             Files.Comparer.Equals(state.SourceRoot, target.Worktree ?? "") ? state.ExcludedPaths : [];
+        var libraries = LibraryLoop.Kept(state, target);
         var plan = await AnsiConsole.Status().StartAsync("Inspecting changed files, frontend mappings, and owning projects...", _ =>
-            planner.Create(target, excludedPaths: excluded));
+            planner.Create(target, excludedPaths: excluded, libraries: libraries));
         while (true)
         {
             AnsiConsole.Clear();
@@ -292,10 +295,18 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     string.Concat(p.PackageDependencies.Select(hint => $"\n    + {Escape(Path.GetFileName(hint))}  " +
                         $"[{TerminalStyle.Muted}]changed package {Escape(p.HintVersions.GetValueOrDefault(hint) ?? hint)}[/]"))))),
                 "CHANGED PROJECTS ONLY"));
+            if (plan.Libraries.Count != 0) AnsiConsole.Write(LibraryLoop.Card(plan));
             foreach (var note in plan.Notes) AnsiConsole.MarkupLine($"[grey]{Escape(note)}[/]");
             foreach (var error in plan.Errors) AnsiConsole.MarkupLine($"[red]{Escape(error)}[/]");
-            var action = Select("[bold]Preview only[/] - choose an action", PreviewActions(plan.CanDeploy, selectable.Count != 0));
+            var action = Select("[bold]Preview only[/] - choose an action", PreviewActions(plan.CanDeploy, selectable.Count != 0, plan.Libraries.Count != 0));
             if (action == "Back") return;
+            if (action == LibraryLoop.ChooseAction)
+            {
+                libraries = LibraryLoop.Choose(plan);
+                plan = await AnsiConsole.Status().StartAsync("Updating library changes and owning projects...", _ =>
+                    planner.Create(target, excludedPaths: excluded, libraries: libraries));
+                continue;
+            }
             if (action == "Choose files to deploy")
             {
                 AnsiConsole.Clear();
@@ -309,7 +320,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 excluded = plan.ExcludedPaths.Where(path => !selectable.Contains(path, Files.Comparer))
                     .Concat(selectable.Where(path => !included.Contains(path))).ToList();
                 plan = await AnsiConsole.Status().StartAsync("Updating selected files and owning projects...", _ =>
-                    planner.Create(target, excludedPaths: excluded));
+                    planner.Create(target, excludedPaths: excluded, libraries: libraries));
                 continue;
             }
             if (action == "Show every changed file")
@@ -320,6 +331,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 continue;
             }
             if (!AnsiConsole.Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
+            if (!StopLegacyWatcher()) continue;
             var watch = action == "Activate and automatically update saved changes";
             var activated = await AnsiConsole.Status().StartAsync("Preparing activation...", context =>
                 new Pipeline(settings, git, bridge).Activate(plan, message => context.Status(Escape(message)), watch));
@@ -332,6 +344,30 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             Pause();
             return;
         }
+    }
+
+    /// <summary>Stops the old watcher that would block this activation, asking first unless the setting says not to; false to cancel.</summary>
+    private bool StopLegacyWatcher()
+    {
+        var running = LegacyWatcher.Running(settings.WebfarmRoot);
+        var action = LegacyWatcher.Decide(running.Count, settings.StopLegacyWatcher, canAsk: true);
+        if (action == LegacyWatcherAction.None) return true;
+        if (action == LegacyWatcherAction.Ask)
+        {
+            var ids = string.Join(", ", running.Select(process => process.Id));
+            var choice = Select($"The old [{TerminalStyle.Gold}]WebfarmFileSync[/] watcher is running and could overwrite this deployment", [
+                new("Stop it and continue", $"End WebfarmFileSync (process {ids}) and deploy. Cultivate asks again next time."),
+                new("Always stop it without asking", "Save this choice, then stop it now, at later activations, and before automatic updates."),
+                new("Cancel", "Return to the preview without deploying or stopping anything.")]);
+            if (choice == "Cancel") return false;
+            if (choice == "Always stop it without asking")
+            {
+                settings.StopLegacyWatcher = true;
+                settings.Save();
+            }
+        }
+        AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]{Escape(LegacyWatcher.Stop(running))}[/]");
+        return true;
     }
 
     /// <summary>Every webfarm file the activation wrote, deleted, or restored, with what happened to it.</summary>

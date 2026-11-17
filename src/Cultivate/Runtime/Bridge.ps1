@@ -44,7 +44,10 @@ $result = & (Get-Module Cultivate.Journal) {
     if ($configured -and (Get-WorkspacePath $configured) -eq $context.Root) {
         $legacy = @(Get-CimInstance Win32_Process -Filter "Name='WebfarmFileSync.exe'" |
             Where-Object { $_.SessionId -eq (Get-Process -Id $PID).SessionId })
-        if ($legacy.Count) { throw 'Close the old WebfarmFileSync watcher before activating Cultivate. It could overwrite this deployment.' }
+        if ($legacy.Count) {
+            throw ("The old WebfarmFileSync watcher (process $(@($legacy | ForEach-Object { $_.ProcessId }) -join ', ')) is running and could overwrite this deployment. " +
+                "Activate again to let Cultivate stop it, or close it yourself. 'cultivate setup --stop-legacy-watcher true' stops it without asking.")
+        }
     }
     if ($Action -eq 'Check') {
         return (Invoke-WorkspaceLock $context {
@@ -101,6 +104,10 @@ $result = & (Get-Module Cultivate.Journal) {
         $excludedPaths = @()
         if ($payload.PSObject.Properties.Name -contains 'ExcludedPaths') { $excludedPaths = @($payload.ExcludedPaths) }
         $state | Add-Member -NotePropertyName ExcludedPaths -NotePropertyValue $excludedPaths -Force
+        # Library worktrees built with this version; the saved-file worker watches them too.
+        $libraries = @()
+        if ($payload.PSObject.Properties.Name -contains 'Libraries') { $libraries = @($payload.Libraries) }
+        $state | Add-Member -NotePropertyName Libraries -NotePropertyValue $libraries -Force
         $state.WatchEnabled = $payload.WatchEnabled
         $state.LastError = $null
         $state.Active = $false

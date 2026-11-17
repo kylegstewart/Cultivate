@@ -189,22 +189,7 @@ internal sealed class GitRepository(Settings settings)
         await Git(settings.RepositoryRoot, "worktree", "add", "--detach", root, plan.Commit);
         try
         {
-            if (plan.Target.Worktree is not null)
-            {
-                var names = await Git(plan.Target.Worktree, "diff", "--name-only", "--no-renames", "-z", plan.Commit, "--");
-                var untracked = await Git(plan.Target.Worktree, "ls-files", "--others", "--exclude-standard", "-z");
-                foreach (var path in (names + "\0" + untracked).Split('\0', StringSplitOptions.RemoveEmptyEntries).Distinct(Files.Comparer))
-                {
-                    var source = Files.Child(plan.Target.Worktree, path);
-                    var destination = Files.Child(root, path);
-                    if (!File.Exists(source)) File.Delete(destination);
-                    else
-                    {
-                        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                        File.Copy(source, destination, true);
-                    }
-                }
-            }
+            if (plan.Target.Worktree is not null) await Overlay(plan.Target.Worktree, plan.Commit, root);
             // Exclusions affect build inputs too: a selected file can share a DLL with an excluded file.
             foreach (var path in plan.ExcludedPaths)
             {
@@ -215,7 +200,7 @@ internal sealed class GitRepository(Settings settings)
                 else
                     await Git(root, "restore", "--source", plan.Baseline, "--worktree", "--", literal);
             }
-            if ((await Inspect(plan.Target)).Fingerprint != plan.Fingerprint)
+            if (await LibraryLoop.Fingerprint(this, plan.Target, LibraryLoop.Sources(plan)) != plan.Fingerprint)
                 throw new InvalidOperationException("Files changed while taking the snapshot. Preview again; nothing has been deployed.");
             return root;
         }
@@ -223,6 +208,24 @@ internal sealed class GitRepository(Settings settings)
         {
             await Git(settings.RepositoryRoot, "worktree", "remove", "--force", root);
             throw;
+        }
+    }
+
+    /// <summary>Copies every saved file of <paramref name="worktree"/> that differs from <paramref name="commit"/> into a checkout of that commit.</summary>
+    public async Task Overlay(string worktree, string commit, string root)
+    {
+        var names = await Git(worktree, "diff", "--name-only", "--no-renames", "-z", commit, "--");
+        var untracked = await Git(worktree, "ls-files", "--others", "--exclude-standard", "-z");
+        foreach (var path in (names + "\0" + untracked).Split('\0', StringSplitOptions.RemoveEmptyEntries).Distinct(Files.Comparer))
+        {
+            var source = Files.Child(worktree, path);
+            var destination = Files.Child(root, path);
+            if (!File.Exists(source)) File.Delete(destination);
+            else
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(source, destination, true);
+            }
         }
     }
 }

@@ -15,8 +15,12 @@ internal static class Program
           list                                    List worktrees and branches (JSON)
           status                                  Show the active deployment (JSON)
           plan --worktree PATH | --branch NAME    Preview a deployment plan (JSON)
-          activate --worktree PATH | --branch NAME --yes [--once] [--no-warmup]
-                                                  Build and deploy; --once disables automatic updates
+          activate --worktree PATH | --branch NAME --yes [--once] [--no-warmup] [--stop-legacy-watcher]
+                                                  Build and deploy; --once disables automatic updates;
+                                                  --stop-legacy-watcher ends the old WebfarmFileSync watcher first
+              plan | activate ... [--library PATH]... [--libraries]
+                                                  Also build and deploy a matching library worktree
+                                                  (repeatable), or every detected match
           restore --yes                           Stop updates and restore the original webfarm files
           warmup [--url URL] [--timeout SECONDS] [--json]
                                                   Request the dev site until it answers and report errors
@@ -26,7 +30,8 @@ internal static class Program
                 [--repository PATH] [--webfarm PATH] [--base-branch NAME]
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
                 [--worktrees PATH] [--site-url URL] [--warmup true|false]
-                [--sql-mirror PATH]
+                [--sql-mirror PATH] [--stop-legacy-watcher true|false]
+                [--library-repositories PATH;PATH|none]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
@@ -94,9 +99,11 @@ internal static class Program
                     var target = targets.FirstOrDefault(x => worktree is not null && x.Worktree is not null && Files.Comparer.Equals(Files.Full(x.Worktree), Files.Full(worktree)) ||
                         worktree is null && reference is not null && x.Worktree is null && (x.Branch == reference || x.Ref == reference))
                         ?? throw new InvalidOperationException("Select a known --worktree <absolute path> or --branch <name>. Use list to see choices.");
-                    var plan = await new Planner(settings, git, bridge).Create(target);
+                    var plan = await new Planner(settings, git, bridge).Create(target, libraries: LibraryLoop.Requested(args));
                     if (args[0] == "plan") { Print(plan); return plan.CanDeploy ? 0 : 2; }
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Activation requires --yes or an interactive confirmation.");
+                    if (LegacyWatcher.ForCommand(settings, args.Contains("--stop-legacy-watcher"), LegacyWatcher.Running(settings.WebfarmRoot)) is { } stopped)
+                        Console.Error.WriteLine(stopped);
                     var activated = await new Pipeline(settings, git, bridge).Activate(plan, message => Console.Error.WriteLine(message), !args.Contains("--once") && settings.WatchSavedFiles);
                     await Warmup.AfterActivationCommand(settings, activated, args);
                     Print(activated);
