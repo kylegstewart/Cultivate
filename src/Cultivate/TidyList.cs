@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using Spectre.Console;
 using Spectre.Console.Rendering;
@@ -7,7 +6,7 @@ namespace Cultivate;
 
 internal enum TidySort { Largest, Smallest, Oldest, Newest, Name }
 
-internal enum TidyCommand { None, Review, Back }
+internal enum TidyCommand { None, Review, Rescan, Back }
 
 /// <summary>What must never be deleted: the active deployment's worktree, the one this terminal or Cultivate runs in, and locked ones.</summary>
 internal sealed record TidyGuard(DeploymentState? State, string CurrentFolder, string Program)
@@ -42,9 +41,8 @@ internal sealed class TidyRow(Checkout checkout, (string Reason, string Tag)? pr
     public string? Protection { get; } = protection?.Reason;
     public string? Tag { get; } = protection?.Tag;
     public long? Bytes { get; internal set; }
-    /// <summary>The size came from an earlier visit and is shown until the worktree is measured again.</summary>
-    public bool Approximate { get; internal set; }
-    public DateTimeOffset? SizedAt { get; internal set; }
+    /// <summary>When the size was measured, which may be an earlier visit's scan.</summary>
+    public DateTimeOffset? Scanned { get; internal set; }
     public string? SizeError { get; internal set; }
     /// <summary>The newest write among the worktree's own files, known once its size walk finishes.</summary>
     public DateTimeOffset? LastWrite { get; internal set; }
@@ -60,8 +58,6 @@ internal sealed class TidyRow(Checkout checkout, (string Reason, string Tag)? pr
     /// <summary>"Repository / branch", as every tidy screen names a worktree.</summary>
     internal static string NameOf(Checkout checkout) => $"{checkout.Repository} / {BranchOf(checkout)}";
 
-    public bool Measuring => (Bytes is null || Approximate) && SizeError is null;
-    public bool Checking => Status is null && StatusError is null;
     /// <summary>What deleting this worktree would lose, once its state is known.</summary>
     public TidyLoss? Loss => Status is { } status ? TidyLoss.Of(Checkout, status) : null;
     public bool Safe => Protection is null && Loss is { None: true };
@@ -77,7 +73,7 @@ internal sealed class TidyRow(Checkout checkout, (string Reason, string Tag)? pr
 
 /// <summary>
 /// The Tidy worktrees screen: every linked worktree with its size, age, and state, sorted, filtered, and selected by size and date.
-/// Sizes and states arrive later through <see cref="Post"/>, so the list appears at once and fills in while it stays responsive.
+/// Sizes and states come from the saved scans (see <see cref="TidyScan"/>), so the list appears at once; F5 scans every worktree again.
 /// </summary>
 internal sealed class TidyList
 {
@@ -86,7 +82,6 @@ internal sealed class TidyList
     private readonly List<TidyRow> rows;
     private readonly Func<DateTimeOffset> clock;
     private readonly HashSet<string> selected = new(Files.Comparer);
-    private readonly ConcurrentQueue<Action<TidyList>> posted = new();
     internal IReadOnlyList<TidyRow> Rows => rows;
     internal IReadOnlyList<TidyRow> Matches { get; private set; } = [];
     internal int Index { get; private set; }
@@ -110,29 +105,12 @@ internal sealed class TidyList
 
     internal static int PageSize(int height) => Math.Clamp(height - 18, 3, 40);
 
-    /// <summary>Queues a change from background work; the screen applies it on its own thread.</summary>
-    internal void Post(Action<TidyList> change) => posted.Enqueue(change);
-
-    internal bool ApplyPosted()
-    {
-        var applied = false;
-        while (posted.TryDequeue(out var change))
-        {
-            change(this);
-            applied = true;
-        }
-        return applied;
-    }
-
     private TidyRow? Row(string path) => rows.FirstOrDefault(row => Files.Comparer.Equals(row.Path, path));
 
-    internal void SetCachedSize(TidySize size)
+    internal void SetScan(TidyScan scan)
     {
-        if (Row(size.Path) is not { Bytes: null } row) return;
-        row.Bytes = size.Bytes;
-        row.SizedAt = size.Measured;
-        row.Approximate = true;
-        Refresh();
+        SetSize(scan.Path, new(scan.Bytes, scan.LastWrite), scan.Scanned);
+        SetStatus(scan.Path, scan.Status);
     }
 
     internal void SetSize(string path, TidyMeasurement measurement, DateTimeOffset measured)
@@ -140,8 +118,7 @@ internal sealed class TidyList
         if (Row(path) is not { } row) return;
         row.Bytes = measurement.Bytes;
         row.LastWrite = measurement.LastWrite;
-        row.SizedAt = measured;
-        row.Approximate = false;
+        row.Scanned = measured;
         row.SizeError = null;
         Refresh();
     }
@@ -149,6 +126,8 @@ internal sealed class TidyList
     internal void SetSizeError(string path, string error)
     {
         if (Row(path) is not { } row) return;
+        row.Bytes = null;
+        row.LastWrite = null;
         row.SizeError = error;
         Refresh();
     }
@@ -164,6 +143,7 @@ internal sealed class TidyList
     internal void SetStatusError(string path, string error)
     {
         if (Row(path) is not { } row) return;
+        row.Status = null;
         row.StatusError = error;
         Refresh();
     }
@@ -212,6 +192,7 @@ internal sealed class TidyList
                 SafeOnly = !SafeOnly;
                 Refresh();
                 break;
+            case ConsoleKey.F5: return TidyCommand.Rescan;
             case ConsoleKey.Spacebar:
                 if (Highlighted is not { } row) break;
                 if (row.Protection is not null) Notice = row.Protection;
@@ -326,28 +307,23 @@ internal sealed class TidyList
             var item = Matches[row];
             var highlighted = row == Index;
             Style Cell(string color) => highlighted ? TerminalStyle.Selection : new Style(Color.FromHex(color));
-            var size = item.Bytes is { } bytes ? (item.Approximate ? "~" : "") + TidySizes.Format(bytes) : item.SizeError is null ? "…" : "?";
+            var size = item.Bytes is { } bytes ? TidySizes.Format(bytes) : item.SizeError is null ? "…" : "?";
             var age = item.LastActivity is { } activity ? AgeText(now - activity) : "…";
             table.AddRow(TerminalStyle.Line(highlighted ? ">" : "", Cell(TerminalStyle.Text)),
                 TerminalStyle.Line(item.Tag ?? (selected.Contains(item.Path) ? "[x]" : "[ ]"),
                     Cell(item.Tag is not null ? TerminalStyle.Gold : selected.Contains(item.Path) ? TerminalStyle.Accent : TerminalStyle.Muted)),
                 TerminalStyle.Line(item.Name, Cell(TerminalStyle.Text)),
-                TerminalStyle.Line(size, Cell(item.Approximate ? TerminalStyle.Muted : TerminalStyle.Text)),
+                TerminalStyle.Line(size, Cell(TerminalStyle.Text)),
                 TerminalStyle.Line(age, Cell(TerminalStyle.Text)),
                 TerminalStyle.Line(item.StateText, Cell(item.Loss is { None: false } || item.StatusError is not null ? TerminalStyle.Gold : TerminalStyle.Muted)));
         }
 
         var chosen = Selected;
-        var measuring = rows.Count(row => row.Measuring);
-        var checking = rows.Count(row => row.Checking);
         var summary = (Matches.Count == 0 ? "0 listed" : $"{start + 1}-{end} of {Matches.Count}") +
             $"  ·  listed {TidySizes.Format(Matches.Sum(row => row.Bytes ?? 0))}  ·  {chosen.Count} selected ({TidySizes.Format(chosen.Sum(row => row.Bytes ?? 0))})";
-        var progress = measuring + checking == 0 ? "" : "  ·  " + string.Join(", ",
-            new[] { measuring == 0 ? "" : $"measuring {measuring}", checking == 0 ? "" : $"checking {checking}" }.Where(part => part.Length != 0));
         var notice = Notice.Length != 0 ? Gold(Clip(Notice, line)) :
             Muted(Clip(rows.Count == 0 ? "No linked worktrees were found. Main checkouts are never listed." :
-                measuring != 0 ? "Sizes fill in as worktrees are measured; ~ marks a size from an earlier visit." :
-                "Nothing is deleted until you review the selection and confirm.", line));
+                "Sizes and states are saved from each worktree's last scan; F5 scans them all again.", line));
 
         var content = new List<IRenderable>
         {
@@ -356,7 +332,7 @@ internal sealed class TidyList
                 new Style(Color.FromHex(Query.Length == 0 ? TerminalStyle.Muted : TerminalStyle.Accent))),
             OneLine(filters, line),
             table,
-            OneLine(Terminal.Escape(Clip(summary, line - progress.Length)) + Gold(progress), line),
+            OneLine(Terminal.Escape(Clip(summary, line)), line),
             OneLine(notice, line),
             TerminalStyle.Card(Details(Highlighted, now, width - 4), "HIGHLIGHTED WORKTREE"),
             OneLine(Keys(width, first: true), line),
@@ -371,14 +347,14 @@ internal sealed class TidyList
         if (width >= 100)
             return first
                 ? string.Join("   ", Key("Space", "select"), Key("Ctrl+A", "select listed"), Key("Ctrl+D", "clear selection"), Key("Del", "review and delete"), Key("Esc", "back"))
-                : string.Join("   ", Key("Tab", "sort"), Key("F2", "age"), Key("F3", "size"), Key("F4", "safe only"), Muted("arrows/PgUp/PgDn/Home/End move"), Key("Ctrl+U", "clear search"));
+                : string.Join("   ", Key("Tab", "sort"), Key("F2", "age"), Key("F3", "size"), Key("F4", "safe only"), Key("F5", "rescan"), Muted("arrows/PgUp/PgDn"), Key("Ctrl+U", "clear search"));
         if (width >= 80)
             return first
                 ? string.Join("  ", Key("Space", "select"), Key("Ctrl+A", "all listed"), Key("Ctrl+D", "clear"), Key("Del", "review & delete"), Key("Esc", "back"))
-                : string.Join("  ", Key("Tab", "sort"), Key("F2", "age"), Key("F3", "size"), Key("F4", "safe only"), Key("Ctrl+U", "clear search"));
+                : string.Join("  ", Key("Tab", "sort"), Key("F2", "age"), Key("F3", "size"), Key("F4", "safe only"), Key("F5", "rescan"), Key("Ctrl+U", "clear search"));
         return first
             ? string.Join("  ", Key("Space", "select"), Key("Ctrl+A", "all"), Key("Ctrl+D", "none"), Key("Del", "delete"), Key("Esc", "back"))
-            : string.Join("  ", Key("Tab", "sort"), Key("F2", "age"), Key("F3", "size"), Key("F4", "safe"), Key("Ctrl+U", "clear"));
+            : string.Join("  ", Key("Tab", "sort"), Key("F2", "age"), Key("F3", "size"), Key("F4", "safe"), Key("F5", "scan"), Key("Ctrl+U", "clear"));
     }
 
     private static IRenderable Details(TidyRow? row, DateTimeOffset now, int width)
@@ -387,8 +363,8 @@ internal sealed class TidyList
             return new Rows(TerminalStyle.Line("No worktrees match."),
                 TerminalStyle.Line(Clip("Ctrl+U clears the search; F2, F3 and F4 change the filters.", width)), new Text(""), new Text(""));
         string Date(DateTimeOffset value) => value.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
-        var size = row.Bytes is not { } bytes ? row.SizeError is null ? "Measuring size…" : "Size unknown: " + row.SizeError :
-            row.Approximate ? $"~{TidySizes.Format(bytes)} on {Date(row.SizedAt!.Value)}, measuring again" : TidySizes.Format(bytes);
+        var size = row.Bytes is not { } bytes ? row.SizeError is null ? "Size not measured" : "Size unknown: " + row.SizeError :
+            TidySizes.Format(bytes) + (row.Scanned is { } scanned ? $" (scanned {Date(scanned)})" : "");
         var activity = row.LastActivity is not { } last ? "last activity: checking…" :
             $"last activity {Date(last)} ({AgeText(now - last)} ago, {(row.LastWrite is { } write && write == last ? "file saved" : "commit")})";
         var state = row.Protection ?? (row.Status is not { } status
@@ -405,7 +381,8 @@ internal sealed class TidyList
                 row.StatusError is not null ? TerminalStyle.Gold : TerminalStyle.Muted))));
     }
 
-    internal TidyRow[]? Show(IAnsiConsole console, Func<ConsoleKeyInfo?> readKey)
+    /// <summary>Shows the list until a key asks to review the selection, scan again, or go back, and returns that command.</summary>
+    internal TidyCommand Show(IAnsiConsole console, Func<ConsoleKeyInfo?> readKey)
     {
         console.Clear();
         return console.Live(Render(console.Profile.Width, console.Profile.Height))
@@ -416,15 +393,11 @@ internal sealed class TidyList
                 var size = (console.Profile.Width, console.Profile.Height);
                 while (true)
                 {
-                    var key = readKey();
-                    var changed = ApplyPosted();
-                    if (key is { } pressed)
+                    var changed = false;
+                    if (readKey() is { } pressed)
                     {
-                        switch (HandleKey(pressed, PageSize(console.Profile.Height)))
-                        {
-                            case TidyCommand.Back: return null;
-                            case TidyCommand.Review: return Selected.ToArray();
-                        }
+                        var command = HandleKey(pressed, PageSize(console.Profile.Height));
+                        if (command != TidyCommand.None) return command;
                         changed = true;
                     }
                     if (!changed && size == (console.Profile.Width, console.Profile.Height)) continue;

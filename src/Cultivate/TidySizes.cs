@@ -7,15 +7,18 @@ namespace Cultivate;
 /// <summary>A worktree's measured size and the newest write among its own files, or null when it holds none.</summary>
 internal sealed record TidyMeasurement(long Bytes, DateTimeOffset? LastWrite);
 
-/// <summary>A size remembered from an earlier visit, shown until the worktree is measured again.</summary>
-internal sealed record TidySize(string Path, long Bytes, DateTimeOffset Measured);
+/// <summary>
+/// A worktree's size and state as last scanned, saved so later visits show it without scanning again.
+/// <see cref="Head"/> is the commit it was scanned at; a worktree whose HEAD has moved since is scanned again.
+/// </summary>
+internal sealed record TidyScan(string Path, string Head, long Bytes, DateTimeOffset? LastWrite, CheckoutStatus Status, DateTimeOffset Scanned);
 
 internal static class TidySizes
 {
     /// <summary>Build output, restored packages, and Git's own files change without anyone working in the worktree.</summary>
     internal static readonly HashSet<string> InactiveFolders = new([".git", "bin", "obj", "packages", "node_modules", ".vs"], Files.Comparer);
 
-    internal static string CachePath => Path.Combine(Files.Home, "worktree-sizes.json");
+    internal static string CachePath => Path.Combine(Files.Home, "worktree-scans.json");
 
     // Hidden and system files take space too; only links are skipped, so a junction's target is never counted.
     private static readonly EnumerationOptions Options = new()
@@ -26,7 +29,7 @@ internal static class TidySizes
     private readonly record struct Entry(bool Directory, string? Path, bool Inactive, long Length, DateTimeOffset LastWrite);
 
     /// <summary>Totals every file under <paramref name="root"/> without following junctions or symbolic links.</summary>
-    internal static TidyMeasurement Measure(string root, CancellationToken cancel = default)
+    internal static TidyMeasurement Measure(string root)
     {
         long bytes = 0;
         DateTimeOffset? newest = null;
@@ -34,7 +37,6 @@ internal static class TidySizes
         folders.Push((root, false));
         while (folders.Count != 0)
         {
-            cancel.ThrowIfCancellationRequested();
             var (folder, inactive) = folders.Pop();
             try
             {
@@ -57,26 +59,26 @@ internal static class TidySizes
         return new(bytes, newest);
     }
 
-    internal static Dictionary<string, TidySize> Load(string path)
+    internal static Dictionary<string, TidyScan> Load(string path)
     {
         try
         {
-            var sizes = JsonSerializer.Deserialize<List<TidySize>>(File.ReadAllText(path), Files.Json) ?? [];
-            return sizes.Where(size => size.Path.Length != 0).DistinctBy(size => size.Path, Files.Comparer)
-                .ToDictionary(size => size.Path, Files.Comparer);
+            var scans = JsonSerializer.Deserialize<List<TidyScan>>(File.ReadAllText(path), Files.Json) ?? [];
+            return scans.Where(scan => scan.Path is { Length: > 0 } && scan.Head is not null && scan.Status is not null)
+                .DistinctBy(scan => scan.Path, Files.Comparer).ToDictionary(scan => scan.Path, Files.Comparer);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
-            return new(Files.Comparer); // A missing or damaged cache only means sizes are measured again.
+            return new(Files.Comparer); // A missing or damaged cache only means worktrees are scanned again.
         }
     }
 
-    /// <summary>Saves the sizes of worktrees that still exist; a failed save only costs the next visit its head start.</summary>
-    internal static void Save(string path, IEnumerable<TidySize> sizes)
+    /// <summary>Saves the scans of worktrees that still exist; a failed save only means the next visit scans them again.</summary>
+    internal static void Save(string path, IEnumerable<TidyScan> scans)
     {
         try
         {
-            Files.WriteJson(path, sizes.Where(size => Directory.Exists(size.Path)).OrderBy(size => size.Path, Files.Comparer).ToList());
+            Files.WriteJson(path, scans.Where(scan => Directory.Exists(scan.Path)).OrderBy(scan => scan.Path, Files.Comparer).ToList());
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
     }

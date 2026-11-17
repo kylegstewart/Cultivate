@@ -5,6 +5,11 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: Tidy worktrees opens almost at once after the first visit. The first visit scans every worktree's size and
+  state behind a loading screen and saves the results; later visits read them back and only scan worktrees that are new
+  or whose HEAD has moved. F5 scans every worktree again, and the highlighted worktree shows when it was last scanned.
+  Deleting still re-reads each selected worktree's state before anything is removed.
+
 ## 1.1.22 — 2026-11-17
 
 - Feature: after a deployment, Cultivate requests the dev site and waits for it to answer, so the recompilation no longer
