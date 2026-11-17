@@ -26,7 +26,8 @@ internal static class WorktreeCatalog
     /// <summary>Reads a checkout's state without taking Git's optional locks, so it never blocks work going on in that checkout.</summary>
     public static async Task<CheckoutStatus> Status(GitRepository git, Checkout checkout)
     {
-        var changes = await git.Git(checkout.Path, "--no-optional-locks", "status", "--porcelain", "--no-renames", "-z");
+        // With core.fsmonitor on, status would start a file-watching daemon in every checkout it reads, and that daemon keeps the folder in use.
+        var changes = await git.Git(checkout.Path, "-c", "core.fsmonitor=false", "--no-optional-locks", "status", "--porcelain", "--no-renames", "-z");
         var unpushed = await git.Git(checkout.Path, "rev-list", "--count", "HEAD", "--not", "--remotes");
         var commit = (await git.Git(checkout.Path, "log", "-1", "--format=%cI%x00%s")).Split('\0', 2);
         return new(changes.Split('\0', StringSplitOptions.RemoveEmptyEntries).Length, int.Parse(unpushed),
