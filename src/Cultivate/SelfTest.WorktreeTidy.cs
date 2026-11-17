@@ -196,8 +196,29 @@ internal static partial class SelfTest
         Key(ConsoleKey.F3);
         Check(list.Age == 0 && list.Size == 0, "the filters return to any");
         Key(ConsoleKey.F4);
-        Check(list.SafeOnly && Names() == "big-work,12345,fix[red]", "F4 lists only clean, unprotected worktrees that are safe to delete");
+        Check(list.SafeOnly && Names() == "big-work,12345-2,12345,fix[red]",
+            "F4 lists only unprotected worktrees that would lose nothing, including a branch with unpushed commits");
         Key(ConsoleKey.F4);
+
+        var loose = new Checkout("Alpha", @"C:\fixture\Alpha", @"C:\fixture\worktrees\loose", "", "fedcba9876543210", false, true, false);
+        var losses = new TidyList([unmeasured, loose, medium], guard, () => now);
+        losses.SetStatus(unmeasured.Path, new(0, 2, now, "Ahead"));
+        losses.SetStatus(loose.Path, new(0, 2, now, "Loose"));
+        losses.SetStatus(medium.Path, new(2, 1, now, "Medium"));
+        string Card(int index)
+        {
+            losses.HandleKey(new('\0', ConsoleKey.Home, false, false, false), 5);
+            for (var step = 0; step < index; step++) losses.HandleKey(new('\0', ConsoleKey.DownArrow, false, false, false), 5);
+            return Capture(losses.Render(160, 30), 160, 30);
+        }
+        Check(losses.Matches.Select(row => row.Checkout.Branch).SequenceEqual(["", "medium-work", "12345-2"]) &&
+            Card(0).Contains("Deleting it would lose 2 commits that are on no branch or remote.") &&
+            Card(1).Contains("Deleting it would lose 2 uncommitted changes.  Its 1 unpushed commit stays on branch medium-work.") &&
+            Card(2).Contains("Safe to delete: nothing would be lost.  Its 2 unpushed commits stay on branch 12345-2.") &&
+            Card(2).Contains("2 unpushed") && Card(0).Contains("2 unpushed"),
+            "the highlighted row says what deleting would lose and that a branch keeps its unpushed commits, while the state column shows both counts");
+        losses.HandleKey(new('\0', ConsoleKey.F4, false, false, false), 5);
+        Check(losses.Matches.Single().Checkout.Branch == "12345-2", "a detached worktree with unpushed commits is not safe to delete");
 
         Highlight(big);
         Key(ConsoleKey.Spacebar, ' ');
@@ -276,18 +297,23 @@ internal static partial class SelfTest
 
     private static void CheckTidyReview()
     {
-        Checkout Worktree(string branch) => new("Alpha", @"C:\fixture\Alpha", $@"C:\fixture\worktrees\{branch}", branch, "0123456", false, false, false);
+        Checkout Worktree(string branch, bool detached = false) => new("Alpha", @"C:\fixture\Alpha", $@"C:\fixture\worktrees\{branch}",
+            detached ? "" : branch, "0123456789", false, detached, false);
         var clean = new TidyCandidate(Worktree("clean"), new(0, 0, null, ""), 1L << 30);
+        var ahead = new TidyCandidate(Worktree("ahead"), new(0, 2, null, ""), 256L << 20);
         var dirty = new TidyCandidate(Worktree("dirty[x]"), new(3, 1, null, ""), 512L << 20);
+        var loose = new TidyCandidate(Worktree("loose", detached: true), new(0, 2, null, ""), 256L << 20);
         var unknown = new TidyCandidate(Worktree("broken"), null, null, "Its state could not be read: fatal");
-        var review = new TidyReview([clean, dirty, unknown]);
-        Check(review.Safe.SequenceEqual([clean]) && review.Risky.SequenceEqual([dirty]) && review.Unreadable.SequenceEqual([unknown]),
-            "the review separates clean worktrees from those holding work that exists nowhere else");
+        var review = new TidyReview([clean, ahead, dirty, loose, unknown]);
+        Check(review.Safe.SequenceEqual([clean, ahead]) && review.Risky.SequenceEqual([dirty, loose]) && review.Unreadable.SequenceEqual([unknown]),
+            "the review counts a branch worktree with unpushed commits as safe and a detached one with unpushed commits as risky");
         var screen = Capture(review.Render(), 200, 60);
-        Check(screen.Contains("Delete 2 worktrees and free 1.5 GB") && screen.Contains("WORK THAT WOULD BE LOST (1)") &&
-            screen.Contains("3 uncommitted changes and 1 unpushed commit would be lost") && screen.Contains("dirty[x]") &&
-            screen.Contains("NOT DELETED (1)") && screen.Contains("Branches are always kept"),
-            "the review shows the total to free, what each risky worktree would lose, and what cannot be deleted");
+        Check(screen.Contains("Delete 4 worktrees and free 2.0 GB") && screen.Contains("SAFE TO DELETE (2)") &&
+            screen.Contains("Its 2 unpushed commits stay on branch ahead.") && screen.Contains("WORK THAT WOULD BE LOST (2)") &&
+            screen.Contains("3 uncommitted changes would be lost.") && screen.Contains("Its 1 unpushed commit stays on branch dirty[x].") &&
+            screen.Contains("2 commits that are on no branch or remote would be lost.") && !screen.Contains("unpushed commit would be lost") &&
+            !screen.Contains("unpushed commits would be lost") && screen.Contains("NOT DELETED (1)") && screen.Contains("Branches are always kept"),
+            "the review states only what is really lost, and says unpushed commits on a branch stay on it");
 
         var asked = new List<string>();
         Func<string, bool> Answers(params bool[] answers)
@@ -298,14 +324,30 @@ internal static partial class SelfTest
         }
         var (targets, kept) = TidyRemoval.Confirm(review, Answers(false));
         Check(targets.Count == 0 && kept.Count == 0 && asked.Count == 1, "declining the first confirmation deletes nothing");
+        Check(asked.Single() == "Delete 4 worktrees and free 2.0 GB?", "the first confirmation names the count and the space freed");
         (targets, kept) = TidyRemoval.Confirm(review, Answers(true, false));
-        Check(targets.Single() is { Force: false } target && target.Checkout == clean.Checkout && kept.SequenceEqual([dirty]) && asked.Count == 2 &&
-            asked[1].Contains("lost"), "declining the second confirmation still deletes the clean worktrees and keeps the risky ones");
+        Check(targets.Select(item => item.Checkout).SequenceEqual([clean.Checkout, ahead.Checkout]) && targets.All(item => !item.Force) &&
+            kept.SequenceEqual([dirty, loose]) && asked.Count == 2,
+            "declining the second confirmation still deletes the safe worktrees and keeps the risky ones");
+        Check(asked[1] == "Also delete the 2 worktrees listed under work that would be lost? " +
+            "Their uncommitted changes and commits that are on no branch or remote will be lost for good.",
+            "the second confirmation names only what would really be lost");
         (targets, kept) = TidyRemoval.Confirm(review, Answers(true, true));
-        Check(targets.Count == 2 && targets.Single(item => item.Force).Checkout == dirty.Checkout && kept.Count == 0,
-            "only worktrees whose loss was confirmed are removed with --force");
-        (targets, _) = TidyRemoval.Confirm(new TidyReview([clean]), Answers(true));
-        Check(targets.Count == 1 && asked.Count == 1, "a selection of clean worktrees needs one confirmation");
+        Check(targets.Count == 4 && targets.Where(item => item.Force).Select(item => item.Checkout).SequenceEqual([dirty.Checkout, loose.Checkout]) &&
+            kept.Count == 0, "only worktrees whose loss was confirmed are removed with --force");
+        TidyRemoval.Confirm(new TidyReview([dirty]), Answers(true, false));
+        Check(asked[1].EndsWith("Its uncommitted changes will be lost for good.", StringComparison.Ordinal),
+            "a branch worktree's unpushed commits are not called lost in the second confirmation");
+        (targets, _) = TidyRemoval.Confirm(new TidyReview([clean, ahead]), Answers(true));
+        Check(targets.Count == 2 && targets.All(item => !item.Force) && asked.Count == 1,
+            "safe worktrees, including a branch with unpushed commits, need one confirmation and no --force");
+        var detached = Worktree("loose", detached: true);
+        Check(TidyLoss.Of(detached, new(1, 2, null, "")).ToString() == "1 uncommitted change and 2 commits that are on no branch or remote" &&
+            TidyLoss.Of(ahead.Checkout, new(0, 5, null, "")).None && TidyLoss.Of(ahead.Checkout, new(0, 5, null, "")).ToString() == "nothing" &&
+            TidyLoss.Of(detached, new(0, 3, null, "")).Exceeds(TidyLoss.Of(detached, new(0, 2, null, ""))) &&
+            !TidyLoss.Of(ahead.Checkout, new(0, 3, null, "")).Exceeds(TidyLoss.Of(ahead.Checkout, new(0, 0, null, ""))) &&
+            TidyLoss.Of(ahead.Checkout, new(1, 0, null, "")).Exceeds(TidyLoss.Of(ahead.Checkout, new(0, 0, null, ""))),
+            "only uncommitted changes, and a detached worktree's unpushed commits, count as lost or as becoming riskier");
         Check(TidyRemoval.Confirm(new TidyReview([unknown]), Answers()).Targets.Count == 0 && asked.Count == 0,
             "worktrees whose state cannot be read are never offered for deletion");
     }
@@ -337,9 +379,20 @@ internal static partial class SelfTest
         // Git then cannot delete the long path below itself, which exercises deleting the folder directly.
         await git.Git(alpha, "config", "core.longpaths", "false");
         string Folder(string name) => Path.Combine(settings.WorktreesRoot, "Alpha", name);
-        foreach (var name in new[] { "clean-work", "dirty-work", "later-work", "locked-work", "long-work", "open-work" })
+        foreach (var name in new[] { "clean-work", "dirty-work", "later-work", "locked-work", "long-work", "open-work", "ahead-work", "spare-work" })
             await git.Git(alpha, "worktree", "add", "-b", name, Folder(name));
+        await git.Git(alpha, "worktree", "add", "--detach", Folder("detached-work"));
         await git.Git(alpha, "worktree", "lock", Folder("locked-work"));
+        async Task<string> Commit(string name, string file)
+        {
+            File.WriteAllText(Path.Combine(Folder(name), file), file);
+            await git.Git(Folder(name), "add", "-A");
+            await git.Git(Folder(name), "commit", "-m", "Local " + file);
+            return await git.Git(Folder(name), "rev-parse", "HEAD");
+        }
+        var aheadCommit = await Commit("ahead-work", "ahead.txt");
+        await Commit("spare-work", "spare.txt");
+        await Commit("detached-work", "loose.txt");
         var keep = Path.Combine(root, "shared packages");
         Directory.CreateDirectory(keep);
         File.WriteAllText(Path.Combine(keep, "keep.txt"), "must survive");
@@ -352,16 +405,23 @@ internal static partial class SelfTest
         File.WriteAllText(Path.Combine(deep, "deep.txt"), "long path");
 
         var checkouts = await WorktreeCatalog.Discover(settings, git);
-        Checkout Find(string name) => checkouts.Single(checkout => checkout.Branch == name);
+        Checkout Find(string name) => name == "detached-work"
+            ? checkouts.Single(checkout => Files.Comparer.Equals(checkout.Path, Files.Full(Folder(name))))
+            : checkouts.Single(checkout => checkout.Branch == name);
         var guard = new TidyGuard(null, root, Path.Combine(root, "program"));
         var candidates = new List<TidyCandidate>();
-        foreach (var name in new[] { "clean-work", "dirty-work", "later-work" })
+        foreach (var name in new[] { "clean-work", "dirty-work", "later-work", "ahead-work", "detached-work" })
             candidates.Add(new(Find(name), await WorktreeCatalog.Status(git, Find(name)), TidySizes.Measure(Find(name).Path).Bytes));
         var review = new TidyReview(candidates);
-        Check(review.Safe.Select(candidate => candidate.Checkout.Branch).SequenceEqual(["clean-work", "later-work"]) &&
-            review.Risky.Single().Checkout.Branch == "dirty-work", "the review of real worktrees puts the one with an untracked file apart");
+        Check(candidates[3].Status is { Unpushed: 1, Uncommitted: 0 } && candidates[4].Status is { Unpushed: 1, Uncommitted: 0 } &&
+            candidates[4].Checkout.Detached, "the fixture has a branch worktree and a detached worktree, each with one unpushed commit");
+        Check(review.Safe.Select(candidate => candidate.Checkout.Path).SequenceEqual(new[] { "clean-work", "later-work", "ahead-work" }.Select(name => Find(name).Path)) &&
+            review.Risky.Select(candidate => candidate.Checkout.Path).SequenceEqual(new[] { "dirty-work", "detached-work" }.Select(name => Find(name).Path)),
+            "the review of real worktrees puts an untracked file and a detached worktree's commit apart, and a branch's unpushed commit with the safe ones");
         var answers = new Queue<bool>([true, false]);
         var (targets, kept) = TidyRemoval.Confirm(review, _ => answers.Dequeue());
+        Check(answers.Count == 0 && targets.Count == 3 && targets.All(target => !target.Force),
+            "the safe worktrees are confirmed once and removed without --force");
         File.WriteAllText(Path.Combine(Folder("later-work"), "late.txt"), "saved after the review");
         var results = await TidyRemoval.RemoveAll(git, targets, guard);
         var listing = await git.Git(alpha, "worktree", "list", "--porcelain");
@@ -373,11 +433,23 @@ internal static partial class SelfTest
         Check(results.Single(result => result.Checkout.Branch == "later-work") is { Removed: false } later && later.Message.Contains("1 uncommitted change") &&
             Directory.Exists(Folder("later-work")) && File.Exists(Path.Combine(Folder("later-work"), "late.txt")),
             "a worktree that gained changes after the review is skipped, with the reason");
-        Check(kept.Single().Checkout.Branch == "dirty-work" && Directory.Exists(Folder("dirty-work")) && Listed("dirty-work"),
-            "a dirty worktree is kept when its loss is not confirmed");
-        Check(Capture(TidyRemoval.Summary(results, kept), 120, 30) is var summary && summary.Contains("Removed 1 of 3 worktrees") &&
-            summary.Contains("Every branch was kept") && summary.Contains("Not removed") &&
-            summary.Contains("you chose to keep its 1 uncommitted change"), "the summary counts removals and explains every worktree left in place");
+        Check(results.Single(result => result.Checkout.Branch == "ahead-work").Removed && !Directory.Exists(Folder("ahead-work")) &&
+            !Listed("ahead-work") && await git.Git(alpha, "rev-parse", "--verify", "refs/heads/ahead-work") == aheadCommit,
+            "a branch worktree with an unpushed commit is removed, and its branch still holds that commit");
+        Check(kept.Select(candidate => candidate.Checkout.Path).SequenceEqual([Find("dirty-work").Path, Find("detached-work").Path]) &&
+            Directory.Exists(Folder("dirty-work")) && Listed("dirty-work") && Directory.Exists(Folder("detached-work")) && Listed("detached-work"),
+            "a dirty worktree and a detached worktree with unpushed commits are kept when their loss is not confirmed");
+        Check(Capture(TidyRemoval.Summary(results, kept), 160, 30) is var summary && summary.Contains("Removed 2 of 5 worktrees") &&
+            summary.Contains("Every branch was kept with all its commits, pushed or not") && summary.Contains("Not removed") &&
+            summary.Contains("you chose to keep its 1 uncommitted change.") &&
+            summary.Contains("you chose to keep its 1 commit that is on no branch or remote."),
+            "the summary counts removals and explains every worktree left in place");
+
+        var detachedTarget = new TidyTarget(Find("detached-work"), candidates[4].Status!, true, null);
+        await Commit("detached-work", "second.txt");
+        var detachedResult = await TidyRemoval.Remove(git, detachedTarget, guard);
+        Check(!detachedResult.Removed && detachedResult.Message.Contains("2 commits that are on no branch or remote") && Directory.Exists(Folder("detached-work")),
+            "a detached worktree that gained a commit after its loss was confirmed is skipped");
 
         answers = new Queue<bool>([true, true]);
         (targets, _) = TidyRemoval.Confirm(new TidyReview([candidates[1]]), _ => answers.Dequeue());
@@ -414,9 +486,13 @@ internal static partial class SelfTest
         using var sized = JsonDocument.Parse(JsonSerializer.Serialize(entries, Files.Json));
         var first = sized.RootElement.EnumerateArray().First(entry => entry.GetProperty("Branch").GetString() == "later-work");
         Check(sized.RootElement.GetArrayLength() == entries.Count && entries.All(entry => entry.Path != Files.Full(alpha)) &&
-            new[] { "Repository", "Branch", "Ticket", "Path", "Protected", "LastCommit", "Status", "Uncommitted", "Unpushed", "Bytes", "LastActivity" }
+            new[] { "Repository", "Branch", "Ticket", "Path", "Protected", "LastCommit", "Status", "Uncommitted", "Unpushed", "Safe", "Bytes", "LastActivity" }
                 .All(name => first.TryGetProperty(name, out _)) && first.GetProperty("Status").GetString() == "1 uncommitted" &&
-            first.GetProperty("Bytes").GetInt64() > 0, "worktrees --sizes prints every linked worktree with its state, size, and last activity");
+            !first.GetProperty("Safe").GetBoolean() && first.GetProperty("Bytes").GetInt64() > 0,
+            "worktrees --sizes prints every linked worktree with its state, safety, size, and last activity");
+        Check(entries.Single(entry => entry.Branch == "spare-work") is { Safe: true, Unpushed: 1, Uncommitted: 0, Status: "1 unpushed" } &&
+            entries.Single(entry => entry.Detached) is { Safe: false, Unpushed: 2 } && entries.Single(entry => entry.Branch == "locked-work") is { Safe: false },
+            "the JSON marks a branch with unpushed commits safe, and a detached worktree's commits or a locked worktree unsafe");
         Check(entries.Single(entry => entry.Branch == "locked-work").Protected?.Contains("locked") == true &&
             TidySizes.Load(cache).ContainsKey(Folder("later-work")), "the JSON names protected worktrees, and measured sizes are cached");
         var quick = await WorktreeTidy.Entries(git, await WorktreeCatalog.Discover(settings, git), guard, sizes: false, cache);

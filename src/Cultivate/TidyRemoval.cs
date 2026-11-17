@@ -7,6 +7,8 @@ namespace Cultivate;
 internal sealed record TidyCandidate(Checkout Checkout, CheckoutStatus? Status, long? Bytes, string? Error = null)
 {
     public string Name => TidyRow.NameOf(Checkout);
+    public TidyLoss? Loss => Error is null && Status is { } status ? TidyLoss.Of(Checkout, status) : null;
+    public string? KeptOnBranch => Status is { } status ? TidyLoss.KeptOnBranch(Checkout, status) : null;
 }
 
 /// <summary>A worktree the developer confirmed deleting, with the state they confirmed; <see cref="Force"/> only when they accepted losing its work.</summary>
@@ -14,13 +16,13 @@ internal sealed record TidyTarget(Checkout Checkout, CheckoutStatus Confirmed, b
 
 internal sealed record TidyResult(Checkout Checkout, bool Removed, long? Bytes, string Message);
 
-/// <summary>The selection split into clean worktrees and those holding work that exists nowhere else.</summary>
+/// <summary>The selection split into worktrees that lose nothing when deleted and those holding work that exists nowhere else.</summary>
 internal sealed class TidyReview(IEnumerable<TidyCandidate> candidates)
 {
     private readonly List<TidyCandidate> all = candidates.ToList();
-    public IReadOnlyList<TidyCandidate> Safe => all.Where(candidate => candidate is { Error: null, Status.Clean: true }).ToList();
-    public IReadOnlyList<TidyCandidate> Risky => all.Where(candidate => candidate is { Error: null, Status.Clean: false }).ToList();
-    public IReadOnlyList<TidyCandidate> Unreadable => all.Where(candidate => candidate.Error is not null || candidate.Status is null).ToList();
+    public IReadOnlyList<TidyCandidate> Safe => all.Where(candidate => candidate.Loss is { None: true }).ToList();
+    public IReadOnlyList<TidyCandidate> Risky => all.Where(candidate => candidate.Loss is { None: false }).ToList();
+    public IReadOnlyList<TidyCandidate> Unreadable => all.Where(candidate => candidate.Loss is null).ToList();
 
     internal static string Total(IEnumerable<TidyCandidate> candidates)
     {
@@ -48,19 +50,21 @@ internal sealed class TidyReview(IEnumerable<TidyCandidate> candidates)
                     new Markup(Terminal.Escape(item.Checkout.Path) + note(item)));
             return table;
         }
+        string Kept(TidyCandidate item) => item.KeptOnBranch is { } kept ? $"\n[{TerminalStyle.Muted}]{Terminal.Escape(kept)}[/]" : "";
         if (Safe.Count != 0)
         {
             content.Add(new Text(""));
-            content.Add(new Markup($"[{TerminalStyle.Accent}]CLEAN ({Safe.Count})[/]  [{TerminalStyle.Muted}]No uncommitted changes and no unpushed commits.[/]"));
-            content.Add(Rows(Safe, _ => ""));
+            content.Add(new Markup($"[{TerminalStyle.Accent}]SAFE TO DELETE ({Safe.Count})[/]  " +
+                $"[{TerminalStyle.Muted}]No uncommitted changes, and every commit stays on its branch. Nothing would be lost.[/]"));
+            content.Add(Rows(Safe, Kept));
         }
         if (Risky.Count != 0)
         {
             content.Add(new Text(""));
             content.Add(new Markup($"[bold {TerminalStyle.Gold}]WORK THAT WOULD BE LOST ({Risky.Count})[/]"));
-            content.Add(new Markup($"[{TerminalStyle.Gold}]These worktrees hold changes that exist nowhere else. Deleting them loses that work for good; " +
-                "it needs its own confirmation.[/]"));
-            content.Add(Rows(Risky, item => $"\n[{TerminalStyle.Gold}]{Terminal.Escape(TidyList.Loss(item.Status!))} would be lost.[/]"));
+            content.Add(new Markup($"[{TerminalStyle.Gold}]These worktrees hold work that exists nowhere else. Deleting them loses it for good, " +
+                "so they need their own confirmation.[/]"));
+            content.Add(Rows(Risky, item => $"\n[{TerminalStyle.Gold}]{Terminal.Escape(item.Loss!.ToString())} would be lost.[/]" + Kept(item)));
         }
         if (Unreadable.Count != 0)
         {
@@ -87,10 +91,16 @@ internal static class TidyRemoval
             return ([], []);
         var targets = review.Safe.Select(candidate => new TidyTarget(candidate.Checkout, candidate.Status!, false, candidate.Bytes)).ToList();
         if (review.Risky.Count == 0) return (targets, []);
-        if (!confirm($"Also delete the {TidyReview.Plural(review.Risky.Count, "worktree")} with work that exists nowhere else? " +
-                "Their uncommitted changes and unpushed commits will be lost for good."))
-            return (targets, review.Risky.ToList());
-        targets.AddRange(review.Risky.Select(candidate => new TidyTarget(candidate.Checkout, candidate.Status!, true, candidate.Bytes)));
+        var risky = review.Risky;
+        var lost = string.Join(" and ", new[]
+        {
+            risky.Any(candidate => candidate.Loss!.Uncommitted != 0) ? "uncommitted changes" : "",
+            risky.Any(candidate => candidate.Loss!.Commits != 0) ? "commits that are on no branch or remote" : ""
+        }.Where(part => part.Length != 0));
+        if (!confirm($"Also delete the {TidyReview.Plural(risky.Count, "worktree")} listed under work that would be lost? " +
+                $"{(risky.Count == 1 ? "Its" : "Their")} {lost} will be lost for good."))
+            return (targets, risky.ToList());
+        targets.AddRange(risky.Select(candidate => new TidyTarget(candidate.Checkout, candidate.Status!, true, candidate.Bytes)));
         return (targets, []);
     }
 
@@ -183,8 +193,10 @@ internal static class TidyRemoval
         CheckoutStatus now;
         try { now = await WorktreeCatalog.Status(git, checkout); }
         catch (Exception exception) when (exception is InvalidOperationException or FormatException) { return "its state could not be read: " + GitError(exception); }
-        if (now.Uncommitted > target.Confirmed.Uncommitted || now.Unpushed > target.Confirmed.Unpushed)
-            return $"it now has {TidyList.Loss(now)}, more than when you confirmed ({(target.Confirmed.Clean ? "clean" : TidyList.Loss(target.Confirmed))}).";
+        var confirmed = TidyLoss.Of(checkout, target.Confirmed);
+        if (TidyLoss.Of(checkout, now) is var loss && loss.Exceeds(confirmed))
+            return $"deleting it would now lose {loss}; " +
+                (confirmed.None ? "nothing would have been lost when you confirmed." : $"you confirmed losing only {confirmed}.");
         return null;
     }
 
@@ -247,7 +259,8 @@ internal static class TidyRemoval
         {
             new Markup($"[bold {TerminalStyle.Accent}]Removed {removed.Count} of {TidyReview.Plural(results.Count + kept.Count, "worktree")}[/]" +
                 $"  [{TerminalStyle.Muted}]freed {(removed.Any(result => result.Bytes is null) ? "at least " : "")}{freed}[/]"),
-            new Markup($"[{TerminalStyle.Muted}]Every branch was kept. Delete one you no longer need with git branch -D <name> in its repository.[/]")
+            new Markup($"[{TerminalStyle.Muted}]Every branch was kept with all its commits, pushed or not. " +
+                "Delete a branch you no longer need with git branch -D <name> in its repository.[/]")
         };
         foreach (var result in removed)
             lines.Add(new Markup($"[{TerminalStyle.Accent}]Removed[/]  {Terminal.Escape(TidyRow.NameOf(result.Checkout))}  " +
@@ -255,7 +268,7 @@ internal static class TidyRemoval
         foreach (var result in failed)
             lines.Add(new Markup($"[{TerminalStyle.Gold}]Not removed[/]  {Terminal.Escape(TidyRow.NameOf(result.Checkout))}: {Terminal.Escape(result.Message)}"));
         foreach (var candidate in kept)
-            lines.Add(new Markup($"[{TerminalStyle.Muted}]Kept[/]  {Terminal.Escape(candidate.Name)}: you chose to keep its {Terminal.Escape(TidyList.Loss(candidate.Status!))}."));
+            lines.Add(new Markup($"[{TerminalStyle.Muted}]Kept[/]  {Terminal.Escape(candidate.Name)}: you chose to keep its {Terminal.Escape(candidate.Loss!.ToString())}."));
         return TerminalStyle.Card(new Rows(lines), "TIDY COMPLETE", failed.Count == 0 ? TerminalStyle.Accent : TerminalStyle.Gold);
     }
 }

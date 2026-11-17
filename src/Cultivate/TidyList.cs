@@ -62,7 +62,9 @@ internal sealed class TidyRow(Checkout checkout, (string Reason, string Tag)? pr
 
     public bool Measuring => (Bytes is null || Approximate) && SizeError is null;
     public bool Checking => Status is null && StatusError is null;
-    public bool Safe => Protection is null && Status is { Clean: true };
+    /// <summary>What deleting this worktree would lose, once its state is known.</summary>
+    public TidyLoss? Loss => Status is { } status ? TidyLoss.Of(Checkout, status) : null;
+    public bool Safe => Protection is null && Loss is { None: true };
     public DateTimeOffset? LastActivity => Status?.LastCommit is { } commit
         ? LastWrite is { } write && write > commit ? write : commit : LastWrite;
 
@@ -332,7 +334,7 @@ internal sealed class TidyList
                 TerminalStyle.Line(item.Name, Cell(TerminalStyle.Text)),
                 TerminalStyle.Line(size, Cell(item.Approximate ? TerminalStyle.Muted : TerminalStyle.Text)),
                 TerminalStyle.Line(age, Cell(TerminalStyle.Text)),
-                TerminalStyle.Line(item.StateText, Cell(item.Status is { Clean: false } || item.StatusError is not null ? TerminalStyle.Gold : TerminalStyle.Muted)));
+                TerminalStyle.Line(item.StateText, Cell(item.Loss is { None: false } || item.StatusError is not null ? TerminalStyle.Gold : TerminalStyle.Muted)));
         }
 
         var chosen = Selected;
@@ -391,23 +393,17 @@ internal sealed class TidyList
             $"last activity {Date(last)} ({AgeText(now - last)} ago, {(row.LastWrite is { } write && write == last ? "file saved" : "commit")})";
         var state = row.Protection ?? (row.Status is not { } status
             ? row.StatusError is null ? "Checking for uncommitted changes and unpushed commits…" : "State could not be read: " + row.StatusError
-            : status.Clean ? "Clean: no uncommitted changes or unpushed commits." + (status.Subject.Length == 0 ? "" : "  Last commit: " + status.Subject)
-            : Loss(status) + " would be lost if it were deleted.");
+            : (row.Loss!.None ? "Safe to delete: nothing would be lost." : $"Deleting it would lose {row.Loss}.") +
+                (TidyLoss.KeptOnBranch(row.Checkout, status) is { } kept ? "  " + kept :
+                    row.Loss.None && status.Subject.Length != 0 ? "  Last commit: " + status.Subject : ""));
         return new Rows(
             TerminalStyle.Line(Clip(row.Name + (row.Checkout.Ticket is { } ticket ? $"  ·  ticket {ticket}" : ""), width),
                 new Style(Color.FromHex(TerminalStyle.Accent), decoration: Decoration.Bold)),
             TerminalStyle.Line(Clip(row.Path, width)),
             TerminalStyle.Line(Clip(size + "  ·  " + activity, width)),
-            TerminalStyle.Line(Clip(state, width), new Style(Color.FromHex(row.Protection is not null || row.Status is { Clean: false } ||
+            TerminalStyle.Line(Clip(state, width), new Style(Color.FromHex(row.Protection is not null || row.Loss is { None: false } ||
                 row.StatusError is not null ? TerminalStyle.Gold : TerminalStyle.Muted))));
     }
-
-    /// <summary>"3 uncommitted changes and 2 unpushed commits": what deleting a worktree in this state loses.</summary>
-    internal static string Loss(CheckoutStatus status) => string.Join(" and ", new[]
-    {
-        status.Uncommitted == 0 ? "" : status.Uncommitted == 1 ? "1 uncommitted change" : $"{status.Uncommitted} uncommitted changes",
-        status.Unpushed == 0 ? "" : status.Unpushed == 1 ? "1 unpushed commit" : $"{status.Unpushed} unpushed commits"
-    }.Where(part => part.Length != 0));
 
     internal TidyRow[]? Show(IAnsiConsole console, Func<ConsoleKeyInfo?> readKey)
     {

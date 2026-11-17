@@ -5,9 +5,12 @@ using Spectre.Console;
 
 namespace Cultivate;
 
-/// <summary>One worktree as <c>cultivate worktrees</c> prints it; size and last activity only with <c>--sizes</c>.</summary>
+/// <summary>
+/// One worktree as <c>cultivate worktrees</c> prints it; size and last activity only with <c>--sizes</c>.
+/// <see cref="Safe"/>: not protected, and deleting it would lose nothing (see <see cref="TidyLoss"/>).
+/// </summary>
 internal sealed record TidyEntry(string Repository, string Branch, string? Ticket, string Path, bool Detached, bool Locked, string? Protected,
-    DateTimeOffset? LastCommit, string Status, int? Uncommitted, int? Unpushed, string? StatusError,
+    DateTimeOffset? LastCommit, string Status, int? Uncommitted, int? Unpushed, bool Safe, string? StatusError,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Bytes,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? LastActivity);
 
@@ -196,9 +199,9 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
         {
             var status = statuses.GetValueOrDefault(checkout.Path);
             var measurement = measured.GetValueOrDefault(checkout.Path);
-            var row = new TidyRow(checkout, null) { Status = status, LastWrite = measurement?.LastWrite };
+            var row = new TidyRow(checkout, guard.Check(checkout)) { Status = status, LastWrite = measurement?.LastWrite };
             return new TidyEntry(checkout.Repository, checkout.Branch, checkout.Ticket, checkout.Path, checkout.Detached, checkout.Locked,
-                guard.Check(checkout)?.Reason, status?.LastCommit, status is null ? "unknown" : TidyRow.State(status), status?.Uncommitted, status?.Unpushed,
+                row.Protection, status?.LastCommit, row.StateText == "…" ? "unknown" : row.StateText, status?.Uncommitted, status?.Unpushed, row.Safe,
                 errors.GetValueOrDefault(checkout.Path), measurement?.Bytes, sizes ? row.LastActivity : null);
         }).ToList();
     }
