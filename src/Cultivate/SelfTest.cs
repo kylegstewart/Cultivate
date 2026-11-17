@@ -46,6 +46,7 @@ internal static class SelfTest
                 throw new FileNotFoundException("The self-test needs Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack.", settings.MSBuild);
             await CheckExclusions(home, settings.MSBuild);
             await CheckPackageDependencies(home, settings.MSBuild);
+            await CheckSolutionDependencies(home, settings.MSBuild);
             await CheckBuildHooks(home, settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
@@ -72,31 +73,7 @@ internal static class SelfTest
             var packageId = "Cultivate.RestoreFixture." + Guid.NewGuid().ToString("N");
             var packageName = packageId + ".1.0.0";
             var feed = Path.Combine(home, "feed");
-            Directory.CreateDirectory(feed);
-            using (var package = ZipFile.Open(Path.Combine(feed, packageName + ".nupkg"), ZipArchiveMode.Create))
-            {
-                void Entry(string name, string content)
-                {
-                    using var writer = new StreamWriter(package.CreateEntry(name).Open());
-                    writer.Write(content);
-                }
-                Entry(packageId + ".nuspec", $$"""
-                    <?xml version="1.0"?>
-                    <package><metadata><id>{{packageId}}</id><version>1.0.0</version>
-                      <authors>Cultivate tests</authors><description>Offline restore fixture</description>
-                    </metadata></package>
-                    """);
-                Entry("build/Cultivate.RestoreFixture.props", """
-                    <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-                      <PropertyGroup><CultivateRestoreFixtureImported>true</CultivateRestoreFixtureImported></PropertyGroup>
-                    </Project>
-                    """);
-            }
-            Save("NuGet.Config", $$"""
-                <configuration><packageSources><clear />
-                  <add key="fixture" value="{{System.Security.SecurityElement.Escape(feed)}}" />
-                </packageSources></configuration>
-                """);
+            Save("NuGet.Config", RestoreFixtureFeed(feed, packageId));
             Save(@"Core\packages.config", $$"""
                 <packages><package id="{{packageId}}" version="1.0.0" targetFramework="net471" /></packages>
                 """);
@@ -1598,6 +1575,113 @@ internal static class SelfTest
         var conflict = await planner.Create(new("package-conflict", settings.RepositoryRoot, "refs/heads/package-conflict"));
         Check(!conflict.CanDeploy && conflict.Errors.Any(error => error.Contains($"different copies of {library}.dll")),
             "changed projects that need different copies of one package DLL block activation");
+    }
+
+    /// <summary>Writes an offline feed holding version 1.0.0 of <paramref name="packageId"/> and returns a NuGet.Config that uses only it.</summary>
+    private static string RestoreFixtureFeed(string feed, string packageId)
+    {
+        Directory.CreateDirectory(feed);
+        using (var package = ZipFile.Open(Path.Combine(feed, packageId + ".1.0.0.nupkg"), ZipArchiveMode.Create))
+        {
+            void Entry(string name, string content)
+            {
+                using var writer = new StreamWriter(package.CreateEntry(name).Open());
+                writer.Write(content);
+            }
+            Entry(packageId + ".nuspec", $$"""
+                <?xml version="1.0"?>
+                <package><metadata><id>{{packageId}}</id><version>1.0.0</version>
+                  <authors>Cultivate tests</authors><description>Offline restore fixture</description>
+                </metadata></package>
+                """);
+            Entry("build/Cultivate.RestoreFixture.props", """
+                <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+                  <PropertyGroup><CultivateRestoreFixtureImported>true</CultivateRestoreFixtureImported></PropertyGroup>
+                </Project>
+                """);
+        }
+        return $$"""
+            <configuration><packageSources><clear />
+              <add key="fixture" value="{{System.Security.SecurityElement.Escape(feed)}}" />
+            </packageSources></configuration>
+            """;
+    }
+
+    private static async Task CheckSolutionDependencies(string home, string msbuild)
+    {
+        var main = Path.Combine(home, "dep main");
+        var worktree = Path.Combine(home, "dep trees", "feature");
+        var git = new GitRepository(new Settings { RepositoryRoot = main });
+        async Task G(params string[] args) => _ = await git.Git(main, args);
+        void Save(string root, string path, string content)
+        {
+            var full = Files.Child(root, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+        var restoreId = "Cultivate.Restore." + Guid.NewGuid().ToString("N")[..8]; // NuGet paths stay under MAX_PATH.
+        const string copiedPackage = @"packages\Cultivate.CopiedFixture.1.0.0";
+        Directory.CreateDirectory(main);
+        await G("init", "-q", "-b", "main");
+        await G("config", "user.email", "cultivate-test@localhost");
+        await G("config", "user.name", "Cultivate isolated tests");
+        Save(main, ".gitignore", "bin/\nobj/\npackages/\n");
+        Save(main, "NuGet.Config", RestoreFixtureFeed(Path.Combine(home, "dep feed"), restoreId));
+        Save(main, "Deps.sln", "\r\nProject(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"App\", \"App\\App.csproj\", \"{" + Guid.NewGuid() + "}\"\r\nEndProject\r\n");
+        Save(main, @"App\App.csproj", Project("App", restorePackage: restoreId + ".1.0.0").Replace("<Reference Include=\"System\" />", $"""
+            <Reference Include="System" />
+            <Reference Include="Shared"><HintPath>..\bin\Shared.dll</HintPath></Reference>
+            <Reference Include="Copied"><HintPath>..\{copiedPackage}\lib\net471\Copied.dll</HintPath></Reference>
+            <Reference Include="Visible"><HintPath>..\lib\Visible.dll</HintPath></Reference>
+            <Reference Include="Sibling"><HintPath>..\..\Sibling\Sibling.dll</HintPath></Reference>
+            """));
+        Save(main, @"App\packages.config", $"""<packages><package id="{restoreId}" version="1.0.0" targetFramework="net471" /></packages>""");
+        Save(main, @"App\Value.cs", "public class AppValue { }");
+        await G("add", ".");
+        await G("commit", "-qm", "solution with ignored dependencies");
+        await G("worktree", "add", "-q", "-b", "feature", worktree);
+        try
+        {
+            // The main checkout has built and restored what Git ignores; the new worktree has none of it.
+            Save(main, @"bin\Shared.dll", "main checkout build");
+            Save(main, copiedPackage + @"\lib\net471\Copied.dll", "copied package");
+            Save(main, copiedPackage + @"\Cultivate.CopiedFixture.1.0.0.nupkg", "package archive");
+            Save(main, @"lib\Visible.dll", "untracked, not ignored");
+            var solution = Path.Combine(worktree, "Deps.sln");
+            Check(SolutionDependencies.PackageFolder(@"packages\Name.1.0\lib\net471\Name.dll") == @"packages\Name.1.0" &&
+                SolutionDependencies.PackageFolder(@"bin\Name.dll") is null && SolutionDependencies.PackageFolder(@"packages\Name.1.0") is null,
+                "a NuGet file maps to its versioned package folder, and other paths to none");
+            Check(SolutionDependencies.Missing(worktree, solution).Select(x => x.Path).Order(Files.Comparer).SequenceEqual(
+                [@"bin\Shared.dll", @"lib\Visible.dll", copiedPackage + @"\lib\net471\Copied.dll",
+                 $@"packages\{restoreId}.1.0.0\build\Cultivate.RestoreFixture.props"], Files.Comparer),
+                "a new worktree's missing references are the solution's HintPaths and package imports inside the checkout");
+            var result = await SolutionDependencies.Prepare(git, msbuild, solution);
+            Check(result.Warnings.Count == 0 && result.CopiedFiles == 1 && result.Packages == 1 && result.Restored == 1,
+                "preparing a worktree solution copies one ignored file and one package and restores the package the main checkout lacks");
+            Check(File.ReadAllText(Path.Combine(worktree, @"bin\Shared.dll")) == "main checkout build" &&
+                File.Exists(Path.Combine(worktree, copiedPackage, "Cultivate.CopiedFixture.1.0.0.nupkg")),
+                "ignored build outputs and whole package folders come from the main checkout");
+            Check(File.Exists(Path.Combine(worktree, $@"packages\{restoreId}.1.0.0\build\Cultivate.RestoreFixture.props")),
+                "a package missing from the main checkout too is restored from the NuGet feed into the folder its references expect");
+            Check(!File.Exists(Path.Combine(worktree, @"lib\Visible.dll")) && !Directory.Exists(Path.Combine(home, "dep trees", "Sibling")),
+                "files Git would list as untracked, and references outside the checkout, are never created");
+            Check(await git.Git(worktree, "status", "--porcelain") == "",
+                "preparing dependencies leaves the worktree's Git status unchanged");
+            var again = await SolutionDependencies.Prepare(git, msbuild, solution);
+            Check(again.Summary is null && again.Warnings.Count == 0, "preparing an already prepared solution copies and restores nothing");
+            File.WriteAllText(Path.Combine(worktree, @"bin\Shared.dll"), "worktree build");
+            await SolutionDependencies.Prepare(git, msbuild, solution);
+            Check(File.ReadAllText(Path.Combine(worktree, @"bin\Shared.dll")) == "worktree build",
+                "a worktree's own build output is never overwritten");
+            File.Delete(Path.Combine(main, @"bin\Shared.dll"));
+            var fromMain = await SolutionDependencies.Prepare(git, msbuild, Path.Combine(main, "Deps.sln"));
+            Check(fromMain.CopiedFiles == 0 && fromMain.Packages == 0 && !File.Exists(Path.Combine(main, @"bin\Shared.dll")),
+                "the main checkout has no other checkout to copy from");
+        }
+        finally
+        {
+            await G("worktree", "remove", "--force", worktree);
+        }
     }
 
     private static string Project(string name, string? dependency = null, string? restorePackage = null)

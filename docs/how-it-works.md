@@ -151,6 +151,23 @@ modified.
 overrides are rejected rather than allowed to bypass the redirect. Reload Visual Studio
 solutions after installing or uninstalling so they pick up the change.
 
+## Opening a solution's dependencies
+
+A new worktree lacks every file Git ignores: restored NuGet packages under `packages\`, and DLLs built into a
+shared folder, such as MyMeyer's `bin\MeyerObjects.dll` and `bin\BusinessLogic.dll`. Without them, Visual Studio
+loads the solution's projects with unresolved references and reports errors such as missing `Meyer.Objects`
+namespaces. Before **Open solution** starts Visual Studio, Cultivate:
+
+1. Reads the `HintPath` references and package imports of every project the solution lists, and finds those
+   missing from the checkout. References outside the checkout, such as sibling repositories, are left alone.
+2. Copies the missing ones that Git ignores from the repository's main checkout. A package's whole versioned
+   folder is copied. Files Git would show as untracked are never created, and existing files are never overwritten.
+3. Restores, from the configured NuGet feeds, any `packages.config` package the main checkout doesn't have
+   either. The restore log is kept in `%LOCALAPPDATA%\Meyer\Cultivate\Runs\<run-id>-open`.
+
+A failed copy or restore is reported after the solution opens and never stops it from opening. A copied build
+output is the main checkout's version; build the project if this branch changes it.
+
 ## Visual Studio reference warnings
 
 Cultivate runs MSBuild independently of Visual Studio. You don't need to open a reference's
