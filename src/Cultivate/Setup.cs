@@ -17,12 +17,13 @@ internal static class Setup
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                 throw new InvalidOperationException($"{name} needs a value.");
             var value = args[index + 1].Trim().Trim('"');
-            if (name is not ("--base-branch" or "--watch") && !Path.IsPathFullyQualified(value))
+            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup") && !Path.IsPathFullyQualified(value))
                 throw new InvalidOperationException($"{name} needs an absolute path, not '{value}'.");
             return value;
         }
         var settings = await Settings.Read();
-        var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees" };
+        var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
+            "--site-url", "--warmup", "--sql-mirror" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -42,6 +43,11 @@ internal static class Setup
             settings.WatchSavedFiles = bool.TryParse(watch, out var value) ? value : throw new InvalidOperationException("--watch expects true or false.");
         if (Option("--mapping-assembly") is { } mapping) settings.MappingAssembly = Files.Full(mapping);
         else if (!Files.Comparer.Equals(previousRepository, settings.RepositoryRoot)) settings.MappingAssembly = DefaultMapping(settings.RepositoryRoot);
+        if (Option("--site-url") is { } site) settings.SiteUrl = site;
+        else if (!Files.Comparer.Equals(previousFarm, settings.WebfarmRoot)) settings.SiteUrl = Warmup.SuggestSiteUrl(settings.WebfarmRoot);
+        if (Option("--warmup") is { } warmup)
+            settings.WarmUpAfterDeploy = bool.TryParse(warmup, out var enabled) ? enabled : throw new InvalidOperationException("--warmup expects true or false.");
+        if (Option("--sql-mirror") is { } mirror) settings.SqlMirrorRoot = Files.Full(mirror);
         GuardActive(active, previousFarm, settings.WebfarmRoot);
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n  " + string.Join("\n  ", problems));
@@ -84,6 +90,16 @@ internal static class Setup
         var worktrees = Ask("Default [bold]worktrees folder[/] (Open solution lists its worktrees from any repo; blank for none)",
             settings.WorktreesRoot, value => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path.", optional: true);
         settings.WorktreesRoot = worktrees.Length == 0 ? "" : Files.Full(worktrees);
+        if (!Files.Comparer.Equals(previousFarm, settings.WebfarmRoot) || settings.SiteUrl.Length == 0)
+            settings.SiteUrl = Warmup.SuggestSiteUrl(settings.WebfarmRoot);
+        settings.SiteUrl = Ask("Dev [bold]site address[/] to request after a deployment (blank to skip the warm-up)", settings.SiteUrl,
+            value => Uri.TryCreate(value, UriKind.Absolute, out var address) && address.Scheme is "http" or "https" ? null : "Enter an http or https address.",
+            optional: true);
+        if (settings.SiteUrl.Length != 0)
+            settings.WarmUpAfterDeploy = AnsiConsole.Confirm("Warm up the dev site after each deployment?", settings.WarmUpAfterDeploy);
+        var mirror = Ask("[bold]SQL files folder[/] with a subfolder per ticket (Ticket workspaces compares it; blank for none)",
+            settings.SqlMirrorRoot, value => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path.", optional: true);
+        settings.SqlMirrorRoot = mirror.Length == 0 ? "" : Files.Full(mirror);
 
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n" + string.Join("\n", problems));

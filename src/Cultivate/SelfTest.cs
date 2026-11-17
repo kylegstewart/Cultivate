@@ -4,7 +4,7 @@ using Spectre.Console;
 
 namespace Cultivate;
 
-internal static class SelfTest
+internal static partial class SelfTest
 {
     private static int assertions;
     private static void Check(bool condition, string message)
@@ -40,6 +40,10 @@ internal static class SelfTest
             await CheckSolutions(home);
             await CheckBaseline(home);
             CheckUpdater(home);
+            await CheckWorktreeCatalog(home);
+            await CheckWarmup(home);
+            await CheckTicketWorkspaces(home);
+            await CheckWorktreeTidy(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
             var settings = await Settings.Read();
             if (!File.Exists(settings.MSBuild))
@@ -1042,6 +1046,35 @@ internal static class SelfTest
             "update-apply swaps the files and records the new version" + (apply.ExitCode == 0 ? "" : ": " + errors.Trim()));
     }
 
+    /// <summary>A renderable as plain text at a fixed terminal size.</summary>
+    private static string Capture(Spectre.Console.Rendering.IRenderable renderable, int width, int height)
+    {
+        using var output = new StringWriter();
+        var console = AnsiConsole.Create(new AnsiConsoleSettings
+        {
+            Ansi = AnsiSupport.No, Interactive = InteractionSupport.No, Out = new AnsiConsoleOutput(output),
+            // CI enrichers (e.g. GITHUB_ACTIONS) would otherwise re-enable ANSI and change measured widths.
+            Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
+        });
+        console.Profile.Width = width;
+        console.Profile.Height = height;
+        console.Write(renderable);
+        return output.ToString().Replace("\r", "").TrimEnd('\n');
+    }
+
+    /// <summary>An interactive 100x30 console writing to <paramref name="output"/>, for screens that redraw while reading keys.</summary>
+    private static IAnsiConsole LiveConsole(StringWriter output)
+    {
+        var console = AnsiConsole.Create(new AnsiConsoleSettings
+        {
+            Ansi = AnsiSupport.Yes, Interactive = InteractionSupport.Yes, ColorSystem = ColorSystemSupport.TrueColor,
+            Out = new AnsiConsoleOutput(output), Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
+        });
+        console.Profile.Width = 100;
+        console.Profile.Height = 30;
+        return console;
+    }
+
     private static void CheckTerminal()
     {
         var targets = Enumerable.Range(0, 37).Select(index => new Target(
@@ -1091,20 +1124,6 @@ internal static class SelfTest
         Check(picker.Matches.Count == 0 && picker.Selected is null && picker.Index == 0, "empty results cannot select a version");
         picker = new VersionPicker(targets, new DeploymentState { Active = true, SourceRoot = targets[17].Worktree!, SourceRef = targets[17].Ref });
         Check(picker.Selected == targets[17], "picker initially highlights the active worktree");
-        static string Capture(Spectre.Console.Rendering.IRenderable renderable, int width, int height)
-        {
-            using var output = new StringWriter();
-            var console = AnsiConsole.Create(new AnsiConsoleSettings
-            {
-                Ansi = AnsiSupport.No, Interactive = InteractionSupport.No, Out = new AnsiConsoleOutput(output),
-                // CI enrichers (e.g. GITHUB_ACTIONS) would otherwise re-enable ANSI and change measured widths.
-                Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
-            });
-            console.Profile.Width = width;
-            console.Profile.Height = height;
-            console.Write(renderable);
-            return output.ToString().Replace("\r", "").TrimEnd('\n');
-        }
         static string Render(VersionPicker model, int width, int height) => Capture(model.Render(width, height), width, height);
         Check(Render(picker, 100, 30).Contains("LIVE  agent-017"), "picker marks the actual deployed source");
         picker = new VersionPicker(targets, openSolution: true);
@@ -1206,24 +1225,13 @@ internal static class SelfTest
             "every home and preview action has contextual help");
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
         Check(Terminal.HomeActions.Select(action => action.Label).SequenceEqual(
-            ["Update my webfarm", "Open solution", "Restore original webfarm files", "Settings", "Exit"]),
-            "the homepage uses Update my webfarm and omits refresh, logs, and the guide");
+            ["Update my webfarm", "Open solution", "Ticket workspaces", "Tidy worktrees", "Restore original webfarm files", "Settings", "Exit"]),
+            "the homepage offers deployment, solutions, ticket workspaces, and tidying, and omits refresh, logs, and the guide");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");
         Check(Terminal.PreviewActions(false, true).Any(action => action.Label == "Choose files to deploy"),
             "blocked previews allow excluding files with mapping or ownership errors");
 
-        static IAnsiConsole LiveConsole(StringWriter output)
-        {
-            var console = AnsiConsole.Create(new AnsiConsoleSettings
-            {
-                Ansi = AnsiSupport.Yes, Interactive = InteractionSupport.Yes, ColorSystem = ColorSystemSupport.TrueColor,
-                Out = new AnsiConsoleOutput(output), Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
-            });
-            console.Profile.Width = 100;
-            console.Profile.Height = 30;
-            return console;
-        }
         using (var output = new StringWriter())
         {
             picker = new VersionPicker([targets[0]]);
