@@ -47,14 +47,16 @@ internal static class WorktreeCatalog
         }
         if (settings.WorktreesRoot.Length != 0 && Directory.Exists(settings.WorktreesRoot)) Find(Files.Full(settings.WorktreesRoot), 3, seeds);
         var runs = Path.Combine(Files.Home, "Runs") + "\\";
-        var listings = await Task.WhenAll(seeds.Distinct(Files.Comparer).Select(async seed =>
+        var commons = await Task.WhenAll(seeds.Distinct(Files.Comparer).Select(async seed =>
         {
-            try
-            {
-                var common = Files.Full(await git.Git(seed, "rev-parse", "--path-format=absolute", "--git-common-dir"));
-                return (Common: common, Listing: await git.Git(seed, "worktree", "list", "--porcelain", "-z"));
-            }
-            catch (InvalidOperationException) { return (Common: "", Listing: ""); } // Not a usable repository.
+            try { return (Seed: seed, Common: Files.Full(await git.Git(seed, "rev-parse", "--path-format=absolute", "--git-common-dir"))); }
+            catch (InvalidOperationException) { return (Seed: seed, Common: ""); } // Not a usable repository.
+        }));
+        // Listing is the slow step, and every seed of a repository lists the same worktrees, so each repository is listed once.
+        var listings = await Task.WhenAll(commons.Where(item => item.Common.Length != 0).DistinctBy(item => item.Common, Files.Comparer).Select(async item =>
+        {
+            try { return (item.Common, Listing: await git.Git(item.Seed, "worktree", "list", "--porcelain", "-z")); }
+            catch (InvalidOperationException) { return (item.Common, Listing: ""); }
         }));
         var result = new List<Checkout>();
         foreach (var repository in listings.Where(item => item.Common.Length != 0).DistinctBy(item => item.Common, Files.Comparer))
