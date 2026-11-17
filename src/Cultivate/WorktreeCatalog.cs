@@ -47,11 +47,14 @@ internal static class WorktreeCatalog
         }
         if (settings.WorktreesRoot.Length != 0 && Directory.Exists(settings.WorktreesRoot)) Find(Files.Full(settings.WorktreesRoot), 3, seeds);
         var runs = Path.Combine(Files.Home, "Runs") + "\\";
-        var listings = await Task.WhenAll(seeds.Distinct(Files.Comparer).Select(async seed =>
+        // Starting Git costs far more than reading .git, and a hundred worktrees often share a handful of repositories.
+        var listings = await Task.WhenAll(seeds.Distinct(Files.Comparer).Select(seed => (Seed: seed, Common: CommonDirectory(seed)))
+            .DistinctBy(item => item.Common ?? item.Seed, Files.Comparer).Select(async item =>
         {
+            var seed = item.Seed;
             try
             {
-                var common = Files.Full(await git.Git(seed, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+                var common = item.Common ?? Files.Full(await git.Git(seed, "rev-parse", "--path-format=absolute", "--git-common-dir"));
                 return (Common: common, Listing: await git.Git(seed, "worktree", "list", "--porcelain", "-z"));
             }
             catch (InvalidOperationException) { return (Common: "", Listing: ""); } // Not a usable repository.
@@ -77,6 +80,22 @@ internal static class WorktreeCatalog
             }
         }
         return result.OrderBy(checkout => checkout.Repository, Files.Comparer).ThenBy(checkout => checkout.Path, Files.Comparer).ToList();
+    }
+
+    /// <summary>The repository folder a checkout's .git points to, read without Git, or null when it cannot be read.</summary>
+    private static string? CommonDirectory(string checkout)
+    {
+        var dotGit = Path.Combine(checkout, ".git");
+        try
+        {
+            if (Directory.Exists(dotGit)) return Files.Full(dotGit);
+            var line = File.ReadLines(dotGit).FirstOrDefault();
+            if (line is null || !line.StartsWith("gitdir:", StringComparison.Ordinal)) return null;
+            var gitDirectory = Path.GetFullPath(Path.Combine(checkout, line["gitdir:".Length..].Trim()));
+            var common = Path.Combine(gitDirectory, "commondir");
+            return Files.Full(File.Exists(common) ? Path.Combine(gitDirectory, File.ReadAllText(common).Trim()) : gitDirectory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
     }
 
     private static void Find(string folder, int depth, List<string> found)
