@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.22 — 2026-11-17
+
 - Feature: after a deployment, Cultivate requests the dev site and waits for it to answer, so the recompilation no longer
   lands on your first page load. A progress bar shows the wait (Esc stops waiting), and the result reports the status or the
   compile, parser, or server error with its file and line. The site address is read from the webfarm's IIS bindings
