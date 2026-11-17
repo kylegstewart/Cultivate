@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.23 — 2026-11-17
+
 - Improvement: Tidy worktrees opens almost at once after the first visit. The first visit scans every worktree's size and
   state behind a loading screen and saves the results; later visits read them back and only scan worktrees that are new
   or whose HEAD has moved. F5 scans every worktree again, and the highlighted worktree shows when it was last scanned.
