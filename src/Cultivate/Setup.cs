@@ -17,13 +17,14 @@ internal static class Setup
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                 throw new InvalidOperationException($"{name} needs a value.");
             var value = args[index + 1].Trim().Trim('"');
-            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--stop-legacy-watcher") && !Path.IsPathFullyQualified(value))
+            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--stop-legacy-watcher" or "--library-repositories") &&
+                !Path.IsPathFullyQualified(value))
                 throw new InvalidOperationException($"{name} needs an absolute path, not '{value}'.");
             return value;
         }
         var settings = await Settings.Read();
         var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
-            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher" };
+            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -50,6 +51,7 @@ internal static class Setup
         if (Option("--sql-mirror") is { } mirror) settings.SqlMirrorRoot = Files.Full(mirror);
         if (Option("--stop-legacy-watcher") is { } stopLegacy)
             settings.StopLegacyWatcher = bool.TryParse(stopLegacy, out var stop) ? stop : throw new InvalidOperationException("--stop-legacy-watcher expects true or false.");
+        if (Option("--library-repositories") is { } libraries) settings.LibraryRepositories = LibraryLoop.ParseRepositories(libraries);
         GuardActive(active, previousFarm, settings.WebfarmRoot);
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n  " + string.Join("\n  ", problems));
@@ -62,9 +64,9 @@ internal static class Setup
     public static async Task<Settings> Interactive(Settings settings, DeploymentState? active, bool firstRun = false)
     {
         AnsiConsole.Clear();
-        // The prompts below take about 15 lines; on a shorter terminal the compact header leaves them more room.
+        // The prompts below take about 16 lines; on a shorter terminal the compact header leaves them more room.
         AnsiConsole.Write(new Banner(firstRun ? "WELCOME" : "SETTINGS",
-            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 15));
+            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 16));
         AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]Saved to {Escape(Settings.FilePath)}[/]\n");
         var previousFarm = settings.WebfarmRoot;
         var previousRepository = settings.RepositoryRoot;
@@ -104,6 +106,9 @@ internal static class Setup
         settings.SqlMirrorRoot = mirror.Length == 0 ? "" : Files.Full(mirror);
         settings.StopLegacyWatcher = AnsiConsole.Confirm(
             "Stop the old WebfarmFileSync watcher without asking when it could overwrite a deployment?", settings.StopLegacyWatcher);
+        settings.LibraryRepositories = LibraryLoop.ParseRepositories(Ask(
+            "[bold]Library repositories[/] whose matching worktrees can deploy with MyMeyer (separate with ;, or none)",
+            string.Join(";", settings.LibraryRepositories ?? []), LibraryLoop.RepositoriesProblem, optional: true));
 
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n" + string.Join("\n", problems));

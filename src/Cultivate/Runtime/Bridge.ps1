@@ -104,6 +104,10 @@ $result = & (Get-Module Cultivate.Journal) {
         $excludedPaths = @()
         if ($payload.PSObject.Properties.Name -contains 'ExcludedPaths') { $excludedPaths = @($payload.ExcludedPaths) }
         $state | Add-Member -NotePropertyName ExcludedPaths -NotePropertyValue $excludedPaths -Force
+        # Library worktrees built with this version; the saved-file worker watches them too.
+        $libraries = @()
+        if ($payload.PSObject.Properties.Name -contains 'Libraries') { $libraries = @($payload.Libraries) }
+        $state | Add-Member -NotePropertyName Libraries -NotePropertyValue $libraries -Force
         $state.WatchEnabled = $payload.WatchEnabled
         $state.LastError = $null
         $state.Active = $false

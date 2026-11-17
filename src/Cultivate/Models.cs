@@ -82,8 +82,9 @@ internal sealed class Settings
     public string TicketUrl { get; set; } = "https://mymeyer.meyerdistributing.com/it/ticket-list?ticketNum={0}";
     /// <summary>Stop the old WebfarmFileSync watcher without asking whenever it would overwrite a deployment.</summary>
     public bool StopLegacyWatcher { get; set; }
-    /// <summary>Primary checkouts of the library repositories whose worktrees can be built and deployed with a MyMeyer version.</summary>
-    public List<string> LibraryRepositories { get; set; } = [];
+    /// <summary>Primary checkouts of the library repositories whose worktrees can be built and deployed with a MyMeyer version.
+    /// Null until configured, so it is discovered; an empty list deliberately configures none.</summary>
+    public List<string>? LibraryRepositories { get; set; }
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
@@ -139,6 +140,7 @@ internal sealed class Settings
             var guess = Path.Combine(clones, "SQL", "SPs");
             if (Directory.Exists(guess)) SqlMirrorRoot = guess;
         }
+        if (LibraryRepositories is null && LibraryLoop.Discover(RepositoryRoot) is { Count: > 0 } libraries) LibraryRepositories = libraries;
     }
 
     public List<string> Problems()
@@ -201,7 +203,7 @@ internal sealed class Plan
 {
     public required Target Target { get; init; }
     public required string Commit { get; init; }
-    public required string Fingerprint { get; init; }
+    public required string Fingerprint { get; set; }
     public string Baseline { get; init; } = "";
     public List<string> ExcludedPaths { get; init; } = [];
     public string BuildFingerprint { get; set; } = "";
@@ -210,11 +212,14 @@ internal sealed class Plan
     public List<ProjectInfo> Projects { get; init; } = [];
     public List<string> Notes { get; init; } = [];
     public List<string> Errors { get; init; } = [];
+    /// <summary>Library worktrees matching this version; only included ones are built and deployed.</summary>
+    public List<LibraryChange> Libraries { get; init; } = [];
     public bool CanDeploy => Errors.Count == 0;
 
-    /// <summary>The webfarm files a build publishes: each changed project's DLL and the DLLs of packages whose references changed.</summary>
+    /// <summary>The webfarm files a build publishes: each changed project's DLL, the DLLs of packages whose references changed, and included library DLLs.</summary>
     public HashSet<string> RuntimePaths() => Projects.Select(project => @"bin\" + project.Assembly + ".dll")
         .Concat(Projects.SelectMany(project => project.PackageDependencies).Select(hint => @"bin\" + Path.GetFileName(hint)))
+        .Concat(LibraryLoop.Assemblies(this).Select(assembly => @"bin\" + assembly + ".dll"))
         .ToHashSet(Files.Comparer);
 }
 internal sealed class DeploymentState
@@ -234,6 +239,8 @@ internal sealed class DeploymentState
     public string BuildFingerprint { get; set; } = "";
     public List<RuntimeFile> RuntimeFiles { get; set; } = [];
     public List<string> ExcludedPaths { get; set; } = [];
+    /// <summary>Library worktrees built and deployed with this version, and rebuilt when their files are saved.</summary>
+    public List<LibrarySource> Libraries { get; set; } = [];
     /// <summary>The journaled webfarm files this version deployed.</summary>
     public List<JournalEntry> Files { get; set; } = [];
     /// <summary>Previously deployed files left as is because they changed outside Cultivate. Not stored by the bridge.</summary>
@@ -247,5 +254,5 @@ internal sealed record JournalEntry(string RelativePath);
 internal sealed record UpdatedFile(string RelativePath, string Change)
 {
     internal const string Built = "Built and copied", Reused = "Copied (unchanged build)", Package = "Copied (changed package)", Synced = "Synced",
-        Deleted = "Deleted", Restored = "Restored original", Kept = "Kept (changed outside Cultivate)";
+        Library = "Built and copied (library)", Deleted = "Deleted", Restored = "Restored original", Kept = "Kept (changed outside Cultivate)";
 }
