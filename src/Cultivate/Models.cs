@@ -80,6 +80,10 @@ internal sealed class Settings
     public string SqlMirrorRoot { get; set; } = "";
     /// <summary>Ticket page address; {0} is replaced with the ticket number.</summary>
     public string TicketUrl { get; set; } = "https://mymeyer.meyerdistributing.com/it/ticket-list?ticketNum={0}";
+    /// <summary>Stop the old WebfarmFileSync watcher without asking whenever it would overwrite a deployment.</summary>
+    public bool StopLegacyWatcher { get; set; }
+    /// <summary>Primary checkouts of the library repositories whose worktrees can be built and deployed with a MyMeyer version.</summary>
+    public List<string> LibraryRepositories { get; set; } = [];
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
