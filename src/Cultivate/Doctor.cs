@@ -109,6 +109,9 @@ internal static class Doctor
                 ? $"Mapping assembly: {settings.MappingAssembly}"
                 : $"Mapping assembly not found (frontend deployments need it): {settings.MappingAssembly}");
             Report("ok", $"Deployment journal: {settings.StateRoot}");
+            Report(settings.SiteUrl.Length != 0 ? "ok" : "warn", settings.SiteUrl.Length == 0
+                ? "No dev site address, so deployments are not followed by a warm-up. Set one with 'cultivate setup --site-url URL'."
+                : $"Dev site: {settings.SiteUrl} (warm-up after deployments {(settings.WarmUpAfterDeploy ? "on" : "off")})");
         }
 
         if (Process.GetProcessesByName("WebfarmFileSync").Length != 0)
