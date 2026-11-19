@@ -5,6 +5,20 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: building release files or activating a deployment no longer stops with "Incompatible input DLLs" when two of the projects it
+  builds use different copies of the same DLL (for example `BusinessLogic.dll` 6.29.0 from a package and an older build in a sibling
+  repository). Each project now compiles against its own references, as in Visual Studio, and can no longer silently pick up another
+  project's copy. When a release project's HintPath points outside master (such as a sibling repository's Debug build), it now
+  compiles against the copy the projects it depends on use from master, and `build.log` says whose copy that is, instead of your
+  local build.
+- Improvement: when a project fails to compile, the failure report now says which errors are on lines your version did not
+  change ("Not from your changes: ... line 19 is unchanged from master."). When every error is, it no longer tells you to fix them
+  here: it says the project probably does not compile on master either and how to deploy without it. In the terminal UI, after one
+  project fails to compile and the plan has other work, Cultivate offers (default No) to leave that project's changed code out
+  and return to the preview; its DLL on the webfarm stays as it is and its changed frontend files still deploy. `cultivate plan`
+  and `activate` take `--exclude PATH` (repeatable) with the same meaning as Choose files to deploy, and the MCP `plan`, `build`
+  and `activate` tools take an `exclude` list; MCP `build` errors carry `changed`.
+
 ## 1.1.26 — 2026-11-19
 
 - Feature: build a merged pull request's release files. `cultivate release --pr N` fetches the pull request and master from origin

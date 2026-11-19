@@ -77,6 +77,10 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
 
     internal static bool IsExcluded(string path) => Excluded().IsMatch(path);
 
+    /// <summary>Requested exclusions that are not changed files of <paramref name="plan"/>, which the command line and MCP refuse.</summary>
+    internal static List<string> UnknownExclusions(Plan plan, IEnumerable<string> requested) => requested
+        .Where(path => !plan.Changes.Any(change => Files.Comparer.Equals(change.Path, path.Replace('\\', '/')))).ToList();
+
     public async Task<Plan> Create(Target target, Func<string, Task<Dictionary<string, string>>>? mapping = null,
         IEnumerable<string>? excludedPaths = null, IEnumerable<string>? libraries = null)
     {

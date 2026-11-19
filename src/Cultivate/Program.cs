@@ -23,6 +23,11 @@ internal static class Program
               plan | activate ... [--library PATH]... [--libraries]
                                                   Also build and deploy a matching library worktree
                                                   (repeatable), or every detected match
+              plan | activate ... [--exclude PATH]...
+                                                  Leave a changed file (repository-relative, repeatable) out
+                                                  of this deployment and its automatic updates, like the
+                                                  terminal UI's Choose files to deploy; an excluded build
+                                                  input is built at its baseline contents
           restore --yes                           Stop updates and restore the original webfarm files
           release --pr NUMBER [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies]
                                                   Build a merged pull request's release files from master into
@@ -55,6 +60,17 @@ internal static class Program
 
         Settings: {Settings.FilePath}
         """;
+
+    /// <summary>Every <c>--exclude PATH</c> of a plan or activate command.</summary>
+    internal static List<string> Exclusions(string[] args)
+    {
+        var paths = new List<string>();
+        for (var index = 0; index < args.Length; index++)
+            if (args[index] == "--exclude")
+                paths.Add(index + 1 < args.Length && !args[index + 1].StartsWith("--", StringComparison.Ordinal)
+                    ? args[++index] : throw new InvalidOperationException("--exclude needs a repository-relative path."));
+        return paths;
+    }
 
     public static async Task<int> Main(string[] args)
     {
@@ -117,7 +133,11 @@ internal static class Program
                         targets.FirstOrDefault(x => worktree is not null && x.Worktree is not null && Files.Comparer.Equals(Files.Full(x.Worktree), Files.Full(worktree)) ||
                         worktree is null && reference is not null && x.Worktree is null && (x.Branch == reference || x.Ref == reference))
                         ?? throw new InvalidOperationException("Select one known --worktree <absolute path>, --branch <name>, or --pr <number>. Use list to see choices.");
-                    var plan = await new Planner(settings, git, bridge).Create(target, libraries: LibraryLoop.Requested(args));
+                    var exclude = Exclusions(args);
+                    var plan = await new Planner(settings, git, bridge).Create(target, excludedPaths: exclude, libraries: LibraryLoop.Requested(args));
+                    if (Planner.UnknownExclusions(plan, exclude) is { Count: > 0 } unknown)
+                        throw new InvalidOperationException($"--exclude names a file {target.Branch} did not change: {string.Join(", ", unknown)}. " +
+                            "Pass repository-relative paths from the plan's changes (cultivate plan lists them).");
                     if (args[0] == "plan") { Print(plan); return plan.CanDeploy ? 0 : 2; }
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Activation requires --yes or an interactive confirmation.");
                     if (LegacyWatcher.ForCommand(settings, args.Contains("--stop-legacy-watcher"), LegacyWatcher.Running(settings.WebfarmRoot)) is { } stopped)
