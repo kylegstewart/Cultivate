@@ -206,6 +206,16 @@ internal static partial class SelfTest
         var card = Capture(Warmup.ResultCard(result), 100, 30);
         Check(card.Contains("SITE ERROR") && card.Contains("CS0103") && card.Contains("OrderTotals.cs, line 42"),
             "the result card shows the compile error's message, file, and line");
+        foreach (var outcome in new[] { WarmupOutcome.Ready, WarmupOutcome.Failed, WarmupOutcome.StillWarming, WarmupOutcome.Skipped })
+        {
+            var ended = new WarmupResult(FixtureSite.ToString(), outcome, outcome == WarmupOutcome.Ready, 200, 12, 2, "Done.", "Detail.");
+            using var ansi = new StringWriter();
+            LiveConsole(ansi).Write(Warmup.ResultCard(ended));
+            var plain = Capture(Warmup.ResultCard(ended), 100, 30);
+            Check(ansi.ToString().Contains("\u001b]8;") && ansi.ToString().Contains($";{FixtureSite}\u001b\\") &&
+                ansi.ToString().Contains("\u001b]8;;\u001b\\") && plain.Contains($"{FixtureSite}  ·  2 requests") && !plain.Contains('\u001b'),
+                $"the {outcome} result card links the site address and shows it in full where links are not supported");
+        }
 
         (result, _, _, _) = await Probe((_, _, _) => Task.FromResult(Page(500, ParserPage)));
         Check(result.Error is { Title: "Parser Error", Line: 1 } && result.Error.Message == "Could not load type 'MiscApps.PriceGroupMatrix'." &&
@@ -567,7 +577,8 @@ internal static partial class SelfTest
         {
             await Warmup.AfterActivationCommand(settings, activated, ["activate", "--yes"], Handlers, options, progress, history);
             Check(activated.WarmUp is { Ready: true, Attempts: 2 } && progress.ToString().Contains("Warm-up: recompiling; the last request timed out") &&
-                progress.ToString().Contains("Warm-up: The site is ready"), "activate warms up the site and writes its progress to stderr");
+                progress.ToString().Contains("Warm-up: The site is ready") && !progress.ToString().Contains('\u001b'),
+                "activate warms up the site and writes its progress to stderr as plain text");
             Check(WarmupHistory.Load(history).Compiled.Count == 1 && WarmupHistory.Load(history).Frontend.Count == 0,
                 "a successful warm-up after a DLL deployment is remembered for later estimates");
         }
@@ -585,6 +596,7 @@ internal static partial class SelfTest
             options, output, errors);
         var parsed = JsonSerializer.Deserialize<WarmupResult>(output.ToString(), Files.Json);
         Check(parsed is { Outcome: WarmupOutcome.Failed, Error.Line: 42 } && !answer.Ready && !output.ToString().Contains("Warm-up:") &&
-            errors.ToString().Contains("Warm-up: request 1"), "warmup --json writes the result to stdout and its progress to stderr");
+            errors.ToString().Contains("Warm-up: request 1") && !(output.ToString() + errors).Contains('\u001b'),
+            "warmup --json writes the result to stdout and its progress to stderr, without escape codes");
     }
 }
