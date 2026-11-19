@@ -377,7 +377,7 @@ internal static partial class SelfTest
         var releaseLog = File.ReadAllText(Path.Combine(r24.RunDirectory, "build.log"));
         Check(Listing(Path.Combine(output, "tools")).SequenceEqual(["Kit.dll", "Tools.dll"], Files.Comparer) &&
             References(Path.Combine(output, "tools", "Tools.dll"))["Third"] == "2.0.0.0" && References(Path.Combine(output, "tools", "Kit.dll"))["Third"] == "2.0.0.0" &&
-            Files.Hash(Path.Combine(r24.RunDirectory, @"references\Third.dll")) == Files.Hash(third2) &&
+            new[] { "Kit", "Tools" }.All(name => Files.Hash(Path.Combine(r24.RunDirectory, "references", "projects", name, "Third.dll")) == Files.Hash(third2)) &&
             releaseLog.Contains($"Reference Third.dll: {Path.Combine(r24.RunDirectory, "source", "bin", "Third.dll")}\n") &&
             !r24.OutsideReferences.Any(reference => reference.Name == "Third.dll"),
             "a release compiles against the snapshot's tracked bin copy of a reference before the checkout's, and does not report it as an outside reference");
@@ -399,7 +399,7 @@ internal static partial class SelfTest
             Target = new("dev farm fixture", checkout, "refs/heads/master"), Commit = "", Fingerprint = "", Projects = [ProjectInfo.Read(devSnapshot, @"Tools\Tools.csproj")]
         };
         await new Pipeline(settings, git, new Bridge(settings)).Build(devPlan, devSnapshot, devRun, devProgress.Add);
-        Check(Files.Hash(Path.Combine(devRun, @"references\Third.dll")) == Files.Hash(third1) &&
+        Check(Files.Hash(Path.Combine(devRun, @"references\projects\Tools\Third.dll")) == Files.Hash(third1) &&
             File.ReadAllText(Path.Combine(devRun, "build.log")).Contains($"Reference Third.dll: {Path.Combine(checkout, "bin", "Third.dll")}\n") &&
             devProgress.SequenceEqual(["Preparing references for changed projects only", "Building Tools (1/1)",
                 "Verifying only the changed projects' own DLLs and changed packages"]),
@@ -428,6 +428,98 @@ internal static partial class SelfTest
         Check(p26.Changes.Single() is { Status: ReleaseStatus.ChangedAgain, Commits: [] } && p26.Warnings.Contains(
                 "Page/Lines.js is not exactly as it was on the pull request: the merge itself changed it (for example, resolving a conflict); master's version is used."),
             "a file only the merge changed says so instead of naming no commits");
+
+        // PR 27, the release that stopped with "Incompatible input DLLs": Alpha references Lib 2.0.0 by a package HintPath, and Beta by
+        // ..\bin\Lib.dll, the copy Alpha's build leaves there. Gamma's HintPath names a sibling repository's build outside the snapshot, where the
+        // developer has a stale Lib 1.0.0.
+        var (lib1, lib2) = (await ThirdParty("Lib", "1.0.0"), await ThirdParty("Lib", "2.0.0"));
+        var libPackage = Path.Combine(checkout, @"packages\Lib.2.0.0\lib\net471\Lib.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(libPackage)!);
+        File.Copy(lib2, libPackage);
+        Directory.CreateDirectory(Path.Combine(root, "LibSibling"));
+        File.Copy(lib1, Path.Combine(root, "LibSibling", "Lib.dll"));
+        string Uses(string name, string references) => Project(name).Replace("<Reference Include=\"System\" />", "<Reference Include=\"System\" />" + references);
+        const string loose = "<SpecificVersion>False</SpecificVersion>";
+        const string libName = "Lib, Version={0}, Culture=neutral, processorArchitecture=MSIL";
+        var l0 = await Commit(m26, "lib projects",
+            (@"Alpha\Alpha.csproj", Uses("Alpha", $"""<Reference Include="{string.Format(libName, "2.0.0.0")}"><HintPath>..\packages\Lib.2.0.0\lib\net471\Lib.dll</HintPath></Reference>""")),
+            (@"Alpha\App.config", "<configuration />"), (@"Alpha\Value.cs", "public class AlphaValue { public static int Value => LibValue.Value; }"),
+            (@"Beta\Beta.csproj", Uses("Beta", $"""
+                <Reference Include="Alpha"><HintPath>..\bin\Alpha.dll</HintPath></Reference>
+                <Reference Include="{string.Format(libName, "1.5.0.0")}">{loose}<HintPath>..\bin\Lib.dll</HintPath></Reference>
+                """)),
+            (@"Beta\App.config", "<configuration />"), (@"Beta\Value.cs", "public class BetaValue { public static int Value => AlphaValue.Value + LibValue.Value; }"),
+            (@"Gamma\Gamma.csproj", Uses("Gamma", $"""
+                <Reference Include="Alpha"><HintPath>..\bin\Alpha.dll</HintPath></Reference>
+                <Reference Include="Beta"><HintPath>..\bin\Beta.dll</HintPath></Reference>
+                <Reference Include="{string.Format(libName, "1.0.0.0")}">{loose}<HintPath>..\..\LibSibling\Lib.dll</HintPath></Reference>
+                """)),
+            (@"Gamma\App.config", "<configuration />"), (@"Gamma\Value.cs", "public class GammaValue { public static int Value => 0; }"));
+        var h27 = await Commit(l0, "pr27", (@"Gamma\Value.cs", "public class GammaValue { public static int Value => AlphaValue.Value + BetaValue.Value + LibValue.Value; }"));
+        await Publish(h27, "refs/pull/27/head");
+        var m27 = await Squash(l0, h27, "Gamma uses Lib (#27)");
+        await Publish(m27, "refs/heads/master");
+        Pull(27, "Gamma uses Lib", "gamma", m27, h27);
+        var r27 = await release.Build(await release.Preview(27, new(Folder: Path.Combine(output, "lib"))), _ => { });
+        var libLog = File.ReadAllText(Path.Combine(r27.RunDirectory, "build.log"));
+        Check(r27.SupportProjects.Select(project => project.Assembly).Order().SequenceEqual(["Alpha", "Beta"]) &&
+            References(Path.Combine(output, "lib", "Gamma.dll"))["Lib"] == "2.0.0.0" && !r27.OutsideReferences.Any(reference => reference.Name == "Lib.dll") &&
+            libLog.Contains($"Reference Lib.dll: {Path.Combine(r27.RunDirectory, "source", "bin", "Lib.dll")}\n") &&
+            libLog.Contains($"Reference Lib.dll: {Path.Combine(r27.RunDirectory, "source", "packages", "Lib.2.0.0", "lib", "net471", "Lib.dll")} (Alpha's copy: " +
+                @"Gamma's HintPath ..\..\LibSibling\Lib.dll is not in the snapshot, and Gamma depends on Alpha, which resolved this copy from the snapshot"),
+            "a release project whose HintPath is outside the snapshot compiles against the copy its dependency resolved from the snapshot, " +
+            "not the developer's stale sibling build, does not report it as an outside reference, and build.log says whose copy it is");
+
+        // PR 28: DupA and DupB reference different tracked copies of Dup, DupC a package of Dup by a Reference that is not version-specific,
+        // and DupD a path that resolves nowhere. One shared reference folder refused this build, or let DupC compile against DupB's copy.
+        var (dup1, dup2) = (await ThirdParty("Dup", "1.0.0"), await ThirdParty("Dup", "2.0.0"));
+        var dupPackage = Path.Combine(checkout, @"packages\Dup.1.0.0\lib\net471\Dup.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(dupPackage)!);
+        File.Copy(dup1, dupPackage);
+        await A("checkout", "-q", "--detach", m27);
+        foreach (var (folder, dll) in new[] { ("one", dup1), ("two", dup2) })
+        {
+            Directory.CreateDirectory(Path.Combine(author, "lib", folder));
+            File.Copy(dll, Path.Combine(author, "lib", folder, "Dup.dll"), true);
+        }
+        var dups = new[] { ("DupA", @"..\lib\one\Dup.dll"), ("DupB", @"..\lib\two\Dup.dll"), ("DupC", @"..\packages\Dup.1.0.0\lib\net471\Dup.dll"), ("DupD", @"..\nowhere\Dup.dll") };
+        var d0 = await Commit(null, "dup projects", dups.SelectMany(dup => new (string, string?)[]
+        {
+            ($@"{dup.Item1}\{dup.Item1}.csproj", Uses(dup.Item1, $"""<Reference Include="Dup">{loose}<HintPath>{dup.Item2}</HintPath></Reference>""")),
+            ($@"{dup.Item1}\App.config", "<configuration />"), ($@"{dup.Item1}\Value.cs", $"public class {dup.Item1}Value {{ public static int Value => 0; }}")
+        }).ToArray());
+        var h28 = await Commit(d0, "pr28", dups.Select(dup => ($@"{dup.Item1}\Value.cs", (string?)$"public class {dup.Item1}Value {{ public static int Value => DupValue.Value; }}")).ToArray());
+        await Publish(h28, "refs/pull/28/head");
+        var m28 = await Squash(d0, h28, "Dup values (#28)");
+        await Publish(m28, "refs/heads/master");
+        Pull(28, "Dup values", "dup", m28, h28);
+        string[] dupVersions = ["DupA 1.0.0.0", "DupB 2.0.0.0", "DupC 1.0.0.0", "DupD 1.0.0.0"];
+        var r28 = await release.Build(await release.Preview(28, new(Folder: Path.Combine(output, "dup"))), _ => { });
+        var dupLog = File.ReadAllText(Path.Combine(r28.RunDirectory, "build.log"));
+        Check(dups.Select(dup => $"{dup.Item1} {References(Path.Combine(output, "dup", dup.Item1 + ".dll"))["Dup"]}").SequenceEqual(dupVersions) &&
+            !r28.OutsideReferences.Any(reference => reference.Name == "Dup.dll"),
+            "in a release, projects referencing different copies of a same-named DLL each compile against their own, a later project's HintPath " +
+            "in the snapshot wins over an earlier project's copy, and a project that resolves nothing uses another project's copy from the snapshot");
+        Check(dupLog.Contains(@"(DupA's copy: DupD's HintPath ..\nowhere\Dup.dll is not in the snapshot, and DupA, built earlier in this release, resolved this copy"),
+            "build.log says when a release project uses a copy another project in the release resolved from the snapshot");
+
+        // The same projects built for the dev farm: each its own copy, and DupD only through the last resort.
+        var dupSnapshot = Path.Combine(root, "dup", "source");
+        var dupRun = Path.Combine(root, "dup", "run");
+        await git.Git(root, "clone", "-q", origin, dupSnapshot);
+        Directory.CreateDirectory(dupRun);
+        var dupPlan = new Plan
+        {
+            Target = new("dup fixture", checkout, "refs/heads/master"), Commit = "", Fingerprint = "",
+            Projects = [.. dups.Select(dup => ProjectInfo.Read(dupSnapshot, $@"{dup.Item1}\{dup.Item1}.csproj"))]
+        };
+        var dupOutputs = await new Pipeline(settings, git, new Bridge(settings)).Build(dupPlan, dupSnapshot, dupRun, _ => { });
+        string DupOutput(string name) => dupOutputs.Single(file => Files.Comparer.Equals(file.RelativePath, $@"bin\{name}.dll")).Source;
+        Check(dups.Select(dup => $"{dup.Item1} {References(DupOutput(dup.Item1))["Dup"]}").SequenceEqual(dupVersions) &&
+            File.ReadAllText(Path.Combine(dupRun, "build.log")).Contains($"Reference Dup.dll: {Path.Combine(dupSnapshot, "lib", "one", "Dup.dll")} " +
+                @"(last resort: DupD cannot resolve its HintPath ..\nowhere\Dup.dll, so it uses the copy DupA resolved earlier in this build)"),
+            "a dev farm build compiles each project against its own copy of a same-named DLL, and a reference only an earlier project resolved " +
+            "is used as a last resort, which build.log says");
     }
 
     private static void CheckReleaseNames()

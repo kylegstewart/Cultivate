@@ -162,7 +162,7 @@ internal static partial class SelfTest
                 Projects = [ProjectInfo.Read(relocated, @"Consumer\Consumer.csproj")]
             };
             var externalOutputs = await pipeline.Build(externalPlan, relocated, relocatedRun, _ => { });
-            Check(Files.Hash(Path.Combine(relocatedRun, @"references\Core.dll")) == Files.Hash(newSdk.Source),
+            Check(Files.Hash(Path.Combine(relocatedRun, @"references\projects\Consumer\Core.dll")) == Files.Hash(newSdk.Source),
                 "a relocated worktree uses the declared sibling DLL, not its stale bin cache");
             Check(externalOutputs.Select(file => file.RelativePath).SequenceEqual([@"bin\Consumer.dll"]) &&
                 Files.Hash(Files.Child(settings.WebfarmRoot, @"bin\Core.dll")) == originalHashes[@"bin\Core.dll"],
@@ -187,7 +187,7 @@ internal static partial class SelfTest
             Plan Relocated() => new()
                 { Target = externalPlan.Target, Commit = "", Fingerprint = "", Projects = [ProjectInfo.Read(relocated, @"Consumer\Consumer.csproj")] };
             await pipeline.Build(Relocated(), relocated, staleRun, _ => { });
-            Check(Files.Hash(Path.Combine(staleRun, @"references\Core.dll")) == Files.Hash(binCore),
+            Check(Files.Hash(Path.Combine(staleRun, @"references\projects\Consumer\Core.dll")) == Files.Hash(binCore),
                 "a package HintPath missing after restore uses the bin DLL carrying the declared version");
             File.WriteAllText(Path.Combine(relocated, @"Consumer\Consumer.csproj"),
                 StaleHint(new Version(binVersion.Major + 1, 0, 0, 0)));
@@ -195,7 +195,7 @@ internal static partial class SelfTest
             Directory.CreateDirectory(mismatchRun);
             File.WriteAllText(Path.Combine(relocated, @"Consumer\Value.cs"), "public class ConsumerValue { public static int Value => 1; }");
             await pipeline.Build(Relocated(), relocated, mismatchRun, _ => { });
-            Check(!File.Exists(Path.Combine(mismatchRun, @"references\Core.dll")) &&
+            Check(!File.Exists(Path.Combine(mismatchRun, @"references\projects\Consumer\Core.dll")) &&
                 File.ReadAllText(Path.Combine(mismatchRun, "build.log")).Contains("Unresolved reference Core.dll for Consumer"),
                 "a missing package the code does not use builds like Visual Studio, and a bin DLL with another version is never substituted");
             Save(@"Core\Core.csproj", coreProject.Replace("<Reference Include=\"System\" />", """
