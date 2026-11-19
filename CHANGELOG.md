@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.25 — 2026-11-19
+
 - Improvement: the dev site address in the warm-up result is a link; Ctrl+click it in Windows Terminal to open the site.
 - Improvement: the terminal UI shows an activation's build and deployment stages on the same screen as the site warm-up
   that follows. The build and deployment run as before, and Esc never cancels them.
