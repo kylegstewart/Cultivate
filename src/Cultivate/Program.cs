@@ -24,6 +24,12 @@ internal static class Program
                                                   Also build and deploy a matching library worktree
                                                   (repeatable), or every detected match
           restore --yes                           Stop updates and restore the original webfarm files
+          release --pr NUMBER [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies]
+                                                  Build a merged pull request's release files from master into
+                                                  a folder named after its ticket (JSON); without --yes only
+                                                  previews. --clean first removes files an earlier release
+                                                  wrote there; --reuse-dependencies compiles against your
+                                                  checkout's DLLs instead of building unchanged dependencies
           warmup [--url URL] [--timeout SECONDS] [--json]
                                                   Request the dev site until it answers and report errors
           tickets                                 List each ticket's worktrees across repositories (JSON)
@@ -37,7 +43,7 @@ internal static class Program
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
                 [--worktrees PATH] [--site-url URL] [--warmup true|false]
                 [--sql-mirror PATH] [--stop-legacy-watcher true|false]
-                [--library-repositories PATH;PATH|none] [--cleanup-days N]
+                [--library-repositories PATH;PATH|none] [--cleanup-days N] [--release-root PATH]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
@@ -124,6 +130,7 @@ internal static class Program
                 case "tickets": return await TicketWorkspaces.Command(settings, git, args);
                 case "worktrees": return await WorktreeTidy.Command(settings, git, args);
                 case "cleanup": return await CleanupCommand.Run(settings, git, bridge, args);
+                case "release": return await ReleaseFiles.Command(settings, git, args);
                 case "restore":
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Restoration requires --yes or the interactive menu.");
                     Print(await bridge.Call("Restore"));

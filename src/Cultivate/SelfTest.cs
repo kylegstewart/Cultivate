@@ -38,6 +38,7 @@ internal static partial class SelfTest
         {
             CheckTerminal();
             CheckScreens();
+            CheckReleaseScreens();
             await CheckDiagnostics(home);
             await CheckVisualStudio();
             CheckSolutionFiles(home);
@@ -61,6 +62,7 @@ internal static partial class SelfTest
             await CheckSolutionDependencies(home, settings.MSBuild);
             await CheckBuildHooks(home, settings.MSBuild);
             await CheckLibraryLoop(home, settings.MSBuild);
+            await CheckReleaseFiles(home, settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
             settings.StateRoot = Path.Combine(home, "state");
@@ -1244,8 +1246,9 @@ internal static partial class SelfTest
             "every home and preview action has contextual help");
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
         Check(Terminal.HomeActions.Select(action => action.Label).SequenceEqual(
-            ["Update my webfarm", "Open solution", "Review a pull request", "Ticket workspaces", "Tidy worktrees", "Clean up", "Restore original webfarm files", "Settings", "Exit"]),
-            "the homepage offers deployment, solutions, ticket workspaces, and tidying, and omits refresh, logs, and the guide");
+            ["Update my webfarm", "Open solution", "Review a pull request", "Build release files", "Ticket workspaces", "Tidy worktrees", "Clean up",
+             "Restore original webfarm files", "Settings", "Exit"]),
+            "the homepage offers deployment, solutions, release files, ticket workspaces, and tidying, and omits refresh, logs, and the guide");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");
         Check(Terminal.PreviewActions(false, true).Any(action => action.Label == "Choose files to deploy"),

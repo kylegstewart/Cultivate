@@ -5,6 +5,21 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: build a merged pull request's release files. `cultivate release --pr N` fetches the pull request and master from origin
+  into private refs (your checkout, its branches and `origin/master` are not touched) and previews, as JSON, what master holds for
+  each file the pull request changed: the same, also changed by other merged work, undone, or deleted. With `--yes` it builds the
+  projects that own the changed code from master in a throwaway snapshot, Debug like the dev farm, and writes their DLLs, any
+  package DLL the pull request bumped, and the changed content files (markup, scripts, styles, images, `.ashx` handlers and the
+  like) to one flat folder named after the ticket in your Documents folder, ready to upload to the Code Release Manager. The
+  unchanged projects those DLLs compile against are built from the same snapshot first instead of taken from your checkout's
+  `bin`, and are not copied. The result lists the other merged commits each DLL carries, references that still came from outside
+  the snapshot, and the SQL, config and other files you must release by hand. Files already in the folder are kept and reported;
+  `--clean` removes only unchanged files an earlier run wrote. `--name`, `--out`, `--reuse-dependencies` and
+  `cultivate setup --release-root` adjust it. The GitHub CLI is required. In the terminal UI, the **Build release files** home
+  action lists your recently merged pull requests (or everyone's, or any number you type), shows the preview to check before
+  building, builds with live progress (Esc cancels before anything is written), and ends with a link to the folder and a way to
+  open it in Explorer. It never touches your dev webfarm, so it works without an active deployment.
+
 ## 1.1.25 — 2026-11-19
 
 - Improvement: the dev site address in the warm-up result is a link; Ctrl+click it in Windows Terminal to open the site.

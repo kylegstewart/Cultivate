@@ -175,7 +175,7 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
     /// A project file that adds or bumps a package reference needs that package's DLL on the webfarm too, or the new project DLL
     /// runs against the old package. References the project file did not change are already deployed and are never republished.
     /// </summary>
-    private async Task AddPackageDependencies(Plan plan, List<Change> compiled)
+    internal async Task AddPackageDependencies(Plan plan, List<Change> compiled)
     {
         var built = plan.Projects.Select(project => project.Assembly + ".dll")
             .Concat(LibraryLoop.Assemblies(plan).Select(assembly => assembly + ".dll")).ToHashSet(Files.Comparer);

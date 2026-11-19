@@ -43,12 +43,12 @@ internal static partial class SelfTest
 
         using (var output = new StringWriter())
         {
-            var keys = Keys(3, enter);
+            var keys = Keys(4, enter);
             var chosen = new ActionPicker(Terminal.HomeActions).Show("Actions", LiveConsole(output), _ => keys.Dequeue());
             var text = output.ToString();
             var paints = Paints(text);
             var drawn = Capture(new ActionPicker(Terminal.HomeActions).Render("Actions", 30), 100, 30).Split('\n').Length;
-            Check(chosen == Terminal.HomeActions[4] && paints.Length == 3 && Rows(text).Length == 0 && Touched(paints[0]) == drawn && !text.Contains("\u001b[2J"),
+            Check(chosen == Terminal.HomeActions[5] && paints.Length == 3 && Rows(text).Length == 0 && Touched(paints[0]) == drawn && !text.Contains("\u001b[2J"),
                 "an action menu paints below what the terminal shows, moving only between its own lines");
             Check(Touched(paints[1]) == 3 && Touched(paints[2]) == 3, "moving the menu's highlight rewrites the two rows and the explanation");
             Check(text.Split("\u001b[?2026l").Last().StartsWith($"\r\u001b[{drawn - 1}A\u001b[J", StringComparison.Ordinal),
