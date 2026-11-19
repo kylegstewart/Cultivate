@@ -381,78 +381,11 @@ internal sealed class TidyList
                 row.StatusError is not null ? TerminalStyle.Gold : TerminalStyle.Muted))));
     }
 
-    /// <summary>
-    /// Shows the list until a key asks to review the selection, scan again, or go back, and returns that command.
-    /// <paramref name="readKey"/> waits up to the given milliseconds for a key. Keys already queued, such as a held arrow's repeats, are
-    /// all handled before the next paint, and a paint rewrites only the lines that changed: repainting the whole screen took most of each key.
-    /// Each paint goes to <paramref name="frames"/> in a single write, or to the console's own writer when it is null.
-    /// </summary>
-    internal TidyCommand Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey, TextWriter? frames = null)
+    /// <summary>Shows the list until a key asks to review the selection, scan again, or go back, and returns that command.</summary>
+    internal TidyCommand Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
     {
-        var painter = AnsiConsole.Create(new AnsiConsoleSettings
-        {
-            Ansi = AnsiSupport.Yes, ColorSystem = (ColorSystemSupport)console.Profile.Capabilities.ColorSystem,
-            Out = new AnsiConsoleOutput(frames ?? console.Profile.Out.Writer), Enrichment = new ProfileEnrichment { UseDefaultEnrichers = false }
-        });
-        console.Clear();
-        console.Cursor.Hide();
-        try
-        {
-            List<SegmentLine> painted = [];
-            var size = (Width: 0, Height: 0);
-            var dirty = true;
-            while (true)
-            {
-                if (size != (console.Profile.Width, console.Profile.Height))
-                {
-                    if (painted.Count != 0) console.Clear();
-                    size = (console.Profile.Width, console.Profile.Height);
-                    (painter.Profile.Width, painter.Profile.Height) = size;
-                    painted = [];
-                    dirty = true;
-                }
-                if (dirty) painted = Paint(painter, painted, Render(size.Width, size.Height), size.Width, size.Height);
-                dirty = false;
-                if (readKey(200) is not { } key) continue;
-                for (ConsoleKeyInfo? next = key; next is { } pressed; next = readKey(0))
-                    if (HandleKey(pressed, PageSize(size.Height)) is var command && command != TidyCommand.None) return command;
-                dirty = true;
-            }
-        }
-        finally
-        {
-            console.Clear();
-            console.Cursor.Show();
-        }
-    }
-
-    /// <summary>Writes the lines of <paramref name="frame"/> that differ from <paramref name="painted"/> in one write, and returns the new lines.</summary>
-    private static List<SegmentLine> Paint(IAnsiConsole console, List<SegmentLine> painted, IRenderable frame, int width, int height)
-    {
-        var lines = Segment.SplitLines(frame.GetSegments(console)).Take(height).ToList();
-        static bool Same(SegmentLine left, SegmentLine right) => left.Count == right.Count &&
-            left.Zip(right).All(pair => pair.First.Text == pair.Second.Text && pair.First.Style.Equals(pair.Second.Style));
-        // Terminals that support synchronized output show the changed lines together; others ignore it.
-        var changes = new List<Segment> { Segment.Control("\u001b[?2026h") };
-        for (var row = 0; row < Math.Max(lines.Count, painted.Count); row++)
-        {
-            if (row < lines.Count && row < painted.Count && Same(lines[row], painted[row])) continue;
-            changes.Add(Segment.Control($"\u001b[{row + 1};1H"));
-            if (row >= lines.Count)
-            {
-                changes.Add(Segment.Control("\u001b[2K"));
-                continue;
-            }
-            changes.AddRange(lines[row]);
-            changes.Add(new Segment(new string(' ', Math.Max(0, width - lines[row].CellCount()))));
-        }
-        changes.Add(Segment.Control("\u001b[?2026l"));
-        if (changes.Count > 2) console.Write(new Segments(changes));
-        return lines;
-    }
-
-    private sealed class Segments(List<Segment> segments) : Renderable
-    {
-        protected override IEnumerable<Segment> Render(RenderOptions options, int maxWidth) => segments;
+        var command = TidyCommand.None;
+        KeyScreen.Show(console, Render, (key, height) => (command = HandleKey(key, PageSize(height))) != TidyCommand.None, readKey);
+        return command;
     }
 }

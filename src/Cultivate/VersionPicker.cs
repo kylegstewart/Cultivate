@@ -179,30 +179,19 @@ internal sealed class VersionPicker
         return path.StartsWith(home, StringComparison.OrdinalIgnoreCase) ? "~\\" + path[home.Length..] : path;
     }
 
-    internal Target? Show() => Show(AnsiConsole.Console, () => Console.ReadKey(true));
+    internal Target? Show() => Show(AnsiConsole.Console, KeyScreen.ReadKey);
 
-    internal Target? Show(IAnsiConsole console, Func<ConsoleKeyInfo> readKey)
+    internal Target? Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
     {
-        console.Clear();
-        return console.Live(Render(console.Profile.Width, console.Profile.Height))
-            .AutoClear(true).Overflow(VerticalOverflow.Crop).Cropping(VerticalOverflowCropping.Bottom)
-            .Start(context =>
-            {
-                context.Refresh();
-                while (true)
-                {
-                    var key = readKey();
-                    if (key.Key == ConsoleKey.Escape) return null;
-                    if (key.Key == ConsoleKey.Enter && openSolution && Index < 0)
-                    {
-                        OpenMainWorktree = true;
-                        return null;
-                    }
-                    if (key.Key == ConsoleKey.Enter && Selected is not null) return Selected;
-                    HandleKey(key, VisiblePageSize(console.Profile.Height));
-                    context.UpdateTarget(Render(console.Profile.Width, console.Profile.Height));
-                    context.Refresh();
-                }
-            });
+        Target? chosen = null;
+        KeyScreen.Show(console, Render, (key, height) =>
+        {
+            if (key.Key == ConsoleKey.Escape) return true;
+            if (key.Key == ConsoleKey.Enter && openSolution && Index < 0) return OpenMainWorktree = true;
+            if (key.Key == ConsoleKey.Enter && Selected is not null) return (chosen = Selected) is not null;
+            HandleKey(key, VisiblePageSize(height));
+            return false;
+        }, readKey);
+        return chosen;
     }
 }

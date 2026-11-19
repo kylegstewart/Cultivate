@@ -33,6 +33,7 @@ internal static partial class SelfTest
         try
         {
             CheckTerminal();
+            CheckScreens();
             await CheckDiagnostics(home);
             await CheckVisualStudio();
             CheckSolutionFiles(home);
@@ -865,9 +866,18 @@ internal static partial class SelfTest
             File.WriteAllText(Path.Combine(otherWorktree, @"App\New.cs"), "untracked feature file");
             File.WriteAllText(Path.Combine(otherWorktree, @"Lib\Lib.cs"), "edit outside the solution folder");
             var scoped = new GitRepository(new Settings { RepositoryRoot = root, WorktreesRoot = worktrees });
-            var others = await scoped.OtherWorktrees(await scoped.Targets());
+            var known = await scoped.Targets();
+            Check(scoped.Calls == 2, "listing MyMeyer's versions starts Git twice, for its worktrees and its branches");
+            var others = await scoped.OtherWorktrees(known);
             Check(others.SequenceEqual([new Target("feature", otherWorktree, "refs/heads/feature")]),
                 "the worktrees folder lists other repositories' checkouts once, skipping known MyMeyer worktrees and folders without a solution");
+            var second = Path.Combine(worktrees, "Other", "second look");
+            await git.Git(other, "worktree", "add", "-q", "--detach", second);
+            var head = await git.Git(other, "rev-parse", "HEAD");
+            var calls = scoped.Calls;
+            Check((await scoped.OtherWorktrees(known)).SequenceEqual([others[0], new Target($"(detached {head[..7]})", second, head)]) && scoped.Calls == calls + 1,
+                "two checkouts of one repository in the worktrees folder are read with one Git start");
+            await git.Git(other, "worktree", "remove", "--force", second);
             File.WriteAllText(solution, "main checkout solution");
             await git.Git(other, "checkout", "-qb", "primary-work-in-progress");
             var fromLinkedCheckout = new GitRepository(new Settings { RepositoryRoot = myMeyerWorktree, WorktreesRoot = worktrees });
@@ -1237,7 +1247,7 @@ internal static partial class SelfTest
         using (var output = new StringWriter())
         {
             picker = new VersionPicker([targets[0]]);
-            var selected = picker.Show(LiveConsole(output), () =>
+            var selected = picker.Show(LiveConsole(output), _ =>
             {
                 Check(output.ToString().Contains("VERSION LIBRARY") && output.ToString().Contains("ticket-000"),
                     "the complete version picker renders before waiting for its first key");
@@ -1248,7 +1258,7 @@ internal static partial class SelfTest
         using (var output = new StringWriter())
         {
             picker = new VersionPicker(targets, new DeploymentState { Active = true, SourceRoot = targets[17].Worktree! }, openSolution: true);
-            var selected = picker.Show(LiveConsole(output), () => new('\r', ConsoleKey.Enter, false, false, false));
+            var selected = picker.Show(LiveConsole(output), _ => new('\r', ConsoleKey.Enter, false, false, false));
             Check(selected is null && picker.OpenMainWorktree,
                 "Enter chooses the pinned main solution action even when another checkout is deployed");
         }
@@ -1257,13 +1267,13 @@ internal static partial class SelfTest
             picker = new VersionPicker([], openSolution: true);
             Check(Render(picker, 60, 24).Contains("Open main worktree solution"),
                 "the main solution action remains available without listed branches or worktrees");
-            var selected = picker.Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false));
+            var selected = picker.Show(LiveConsole(output), _ => new('\u001b', ConsoleKey.Escape, false, false, false));
             Check(selected is null && !picker.OpenMainWorktree, "Escape cancels without choosing a main solution");
         }
         using (var output = new StringWriter())
         {
             menu = new ActionPicker(Terminal.HomeActions);
-            var selected = menu.Show("Actions", LiveConsole(output), () =>
+            var selected = menu.Show("Actions", LiveConsole(output), _ =>
             {
                 Check(output.ToString().Contains("Browse versions and preview"),
                     "action menus render the initial explanation before waiting for input");

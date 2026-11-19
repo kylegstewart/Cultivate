@@ -74,51 +74,22 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             throw new InvalidOperationException("Open Cultivate in an interactive terminal, or use list / status / plan for JSON output.");
         // Runs in the background; the notice appears on the first home screen drawn after it finishes.
         var updateCheck = settings.CheckForUpdates && Updater.IsInstalled ? Updater.CheckQuietly() : Task.FromResult<UpdateInfo?>(null);
-        const string section = "DEV LAUNCHPAD", tagline = "Your code. Your workspace. Ready for the farm.";
+        KeyScreen.Buffer(AnsiConsole.Console);
         while (true)
         {
-            var workspace = TerminalStyle.Card(new Rows(
-                new Markup($"[{TerminalStyle.Muted}]REPOSITORY[/]   {Escape(Path.GetFileName(Files.Full(settings.RepositoryRoot)))}"),
-                new Markup($"[{TerminalStyle.Muted}]DESTINATION[/]  {Escape(settings.WebfarmRoot)}")), "CONNECTED WORKSPACE");
-            // The banner is drawn while the status loads, so it plans room for a typical screen: an active deployment and the menu.
-            var banner = new Banner(section, tagline, TerminalStyle.Lines(workspace) + 5 + MenuLines(HomeActions.Count));
-            AnsiConsole.Clear();
-            AnsiConsole.Write(banner);
-            AnsiConsole.Write(workspace);
-            var state = await bridge.Status();
-            var cards = new List<IRenderable>();
-            if (state?.Active == true)
-            {
-                var health = !state.WatchEnabled && state.Mode == "Cultivate" ? "[grey]one-time deployment[/]" :
-                    state.Mode == "Cultivate" && DateTime.TryParse(state.Heartbeat, out var heartbeat) &&
-                    DateTime.UtcNow - heartbeat.ToUniversalTime() < TimeSpan.FromSeconds(20) ? "[green]watching saved files[/]" : "[yellow]no healthy auto-update worker[/]";
-                cards.Add(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]LIVE[/]  {Escape(state.Branch)}\n{Escape(state.SourceRoot.Length == 0 ? state.SourceRef : state.SourceRoot)}\n{health}" +
-                    (string.IsNullOrEmpty(state.LastError) ? "" : $"\n[red]Automatic update failed:[/] {Escape(state.LastError)}")), "ACTIVE DEPLOYMENT", TerminalStyle.Accent));
-            }
-            else cards.Add(TerminalStyle.Card(new Markup(
-                $"[{TerminalStyle.Gold}]READY WHEN YOU ARE[/]\n[{TerminalStyle.Muted}]Choose a version to inspect its files and builds. Nothing deploys until you confirm.[/]"),
-                "NO ACTIVE TEST VERSION"));
+            // The status read takes most of a second, so the screen and menu are drawn first and its card is filled in when it arrives.
+            var status = bridge.Status();
             var update = updateCheck.IsCompletedSuccessfully ? updateCheck.Result : null;
             var actions = HomeActions.ToList();
             if (update is not null)
-            {
-                cards.Add(TerminalStyle.Card(new Markup(
-                    $"[bold {TerminalStyle.Gold}]Cultivate {Escape(update.Version)} is available[/]  [{TerminalStyle.Muted}]you have {Escape(Files.Version)}[/]\n" +
-                    $"[{TerminalStyle.Muted}]Choose Update Cultivate below, or run `cultivate update`.[/]"), "UPDATE AVAILABLE", TerminalStyle.Gold));
                 actions.Insert(actions.Count - 1, new(UpdateAction,
                     $"Download and install {update.Version}, then restart. Active deployments and automatic updates keep running."));
-            }
-            // An update notice or a long error can outgrow that plan; switch to the compact header instead of scrolling the banner away.
-            var below = TerminalStyle.Lines(workspace) + cards.Sum(TerminalStyle.Lines) + MenuLines(actions.Count);
-            if (banner.FitsOn(AnsiConsole.Console) && !new Banner(section, tagline, below).FitsOn(AnsiConsole.Console))
-            {
-                AnsiConsole.Clear();
-                AnsiConsole.Write(TerminalStyle.Header(section, tagline));
-                AnsiConsole.Write(workspace);
-            }
-            foreach (var card in cards) AnsiConsole.Write(card);
-            AnsiConsole.WriteLine();
-            var action = Select("What would you like to do?", actions);
+            var chosen = new ActionPicker(actions).Show("What would you like to do?", AnsiConsole.Console, KeyScreen.ReadKey,
+                (_, _) => Home(status.IsCompletedSuccessfully ? status.Result : null, !status.IsCompletedSuccessfully, update, actions.Count), status);
+            if (chosen?.Label == "Exit") return;
+            // Nothing acts on the deployment until its status is read; a failed read stops here, as it always has.
+            var state = status.IsCompleted ? await status : await AnsiConsole.Status().StartAsync("Reading the active deployment...", _ => status);
+            var action = chosen!.Label;
             try
             {
                 switch (action)
@@ -156,6 +127,43 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 Pause();
             }
         }
+    }
+
+    /// <summary>
+    /// The home screen above its menu of <paramref name="actions"/>: the banner, the workspace, the active deployment, or a placeholder
+    /// while its status is <paramref name="reading"/>, and the update notice.
+    /// </summary>
+    internal IRenderable Home(DeploymentState? state, bool reading, UpdateInfo? update, int actions)
+    {
+        const string section = "DEV LAUNCHPAD", tagline = "Your code. Your workspace. Ready for the farm.";
+        var workspace = TerminalStyle.Card(new Rows(
+            new Markup($"[{TerminalStyle.Muted}]REPOSITORY[/]   {Escape(Path.GetFileName(Files.Full(settings.RepositoryRoot)))}"),
+            new Markup($"[{TerminalStyle.Muted}]DESTINATION[/]  {Escape(settings.WebfarmRoot)}")), "CONNECTED WORKSPACE");
+        var cards = new List<IRenderable>();
+        if (reading)
+            cards.Add(TerminalStyle.Card(new Markup($"[{TerminalStyle.Muted}]Reading the active deployment...[/]"), "ACTIVE DEPLOYMENT"));
+        else if (state?.Active == true)
+        {
+            var health = !state.WatchEnabled && state.Mode == "Cultivate" ? "[grey]one-time deployment[/]" :
+                state.Mode == "Cultivate" && DateTime.TryParse(state.Heartbeat, out var heartbeat) &&
+                DateTime.UtcNow - heartbeat.ToUniversalTime() < TimeSpan.FromSeconds(20) ? "[green]watching saved files[/]" : "[yellow]no healthy auto-update worker[/]";
+            cards.Add(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]LIVE[/]  {Escape(state.Branch)}\n{Escape(state.SourceRoot.Length == 0 ? state.SourceRef : state.SourceRoot)}\n{health}" +
+                (string.IsNullOrEmpty(state.LastError) ? "" : $"\n[red]Automatic update failed:[/] {Escape(state.LastError)}")), "ACTIVE DEPLOYMENT", TerminalStyle.Accent));
+        }
+        else cards.Add(TerminalStyle.Card(new Markup(
+            $"[{TerminalStyle.Gold}]READY WHEN YOU ARE[/]\n[{TerminalStyle.Muted}]Choose a version to inspect its files and builds. Nothing deploys until you confirm.[/]"),
+            "NO ACTIVE TEST VERSION"));
+        if (update is not null)
+            cards.Add(TerminalStyle.Card(new Markup(
+                $"[bold {TerminalStyle.Gold}]Cultivate {Escape(update.Version)} is available[/]  [{TerminalStyle.Muted}]you have {Escape(Files.Version)}[/]\n" +
+                $"[{TerminalStyle.Muted}]Choose Update Cultivate below, or run `cultivate update`.[/]"), "UPDATE AVAILABLE", TerminalStyle.Gold));
+        // The banner needs room for a typical screen, an active deployment and the menu, and for this one; otherwise the compact
+        // header is drawn instead of letting an update notice or a long error scroll the banner away.
+        var below = TerminalStyle.Lines(workspace) + Math.Max(5 + MenuLines(HomeActions.Count), cards.Sum(TerminalStyle.Lines) + MenuLines(actions));
+        var rows = new List<IRenderable> { new Banner(section, tagline, below), workspace };
+        rows.AddRange(cards);
+        rows.Add(new Text(""));
+        return new Rows(rows);
     }
 
     private async Task OpenSolution(DeploymentState? state)
