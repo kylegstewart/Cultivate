@@ -84,7 +84,7 @@ internal static class WorktreeCatalog
     }
 
     /// <summary>The repository folder a checkout's .git points to, read without Git, or null when it cannot be read.</summary>
-    private static string? CommonDirectory(string checkout)
+    internal static string? CommonDirectory(string checkout)
     {
         var dotGit = Path.Combine(checkout, ".git");
         try

@@ -290,15 +290,35 @@ internal static class Warmup
         };
     }
 
-    /// <summary>Shown in the terminal UI after an activation's summary.</summary>
-    internal static Task AfterActivation(Settings settings, DeploymentState activated)
+    /// <summary>Runs an activation in the terminal UI on <paramref name="screen"/>, which shows its stage and carries on into the warm-up.</summary>
+    internal static DeploymentState Activate(Settings settings, WarmupScreen screen, Func<Action<string>, Task<DeploymentState>> activate)
+    {
+        var activation = Task.Run(() => activate(screen.ReportStage));
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            return screen.Activate(AnsiConsole.Console, PollKey, activation, activated => ShouldWarmUp(settings, activated, out _),
+                () => stopwatch.Elapsed, Thread.Sleep);
+        }
+        finally
+        {
+            // Normally the activation has already finished; if the screen failed, the build or deployment still runs to its end first.
+            try { activation.Wait(); }
+            catch (AggregateException) { }
+        }
+    }
+
+    private static ConsoleKeyInfo? PollKey() => Console.KeyAvailable ? Console.ReadKey(true) : null;
+
+    /// <summary>Shown in the terminal UI after an activation's summary, on the activation's <paramref name="screen"/> when there is one.</summary>
+    internal static Task AfterActivation(Settings settings, DeploymentState activated, WarmupScreen? screen = null)
     {
         try
         {
             if (!ShouldWarmUp(settings, activated, out var url)) return Task.CompletedTask;
             var compiled = ChangedBin(activated);
             var history = WarmupHistory.Load(HistoryPath);
-            var result = Interactive(url, WarmupOptions.DefaultLimit, history.Estimate(compiled));
+            var result = Interactive(url, WarmupOptions.DefaultLimit, history.Estimate(compiled), screen);
             activated.WarmUp = result;
             if (result.Ready) history.Record(compiled, result.Seconds, HistoryPath);
             AnsiConsole.Write(ResultCard(result));
@@ -402,17 +422,16 @@ internal static class Warmup
     }
 
     /// <summary>The progress screen, with the probe running on a background task until the site answers or Esc stops it.</summary>
-    private static WarmupResult Interactive(Uri url, TimeSpan limit, TimeSpan? estimate)
+    private static WarmupResult Interactive(Uri url, TimeSpan limit, TimeSpan? estimate, WarmupScreen? activation = null)
     {
         using var handler = CreateHandler(url);
         using var cancel = new CancellationTokenSource();
-        var screen = new WarmupScreen(url, estimate, SnakePath);
+        var screen = activation?.WarmUp(url, estimate) ?? new WarmupScreen(url, estimate, SnakePath);
         var probe = Task.Run(() => Run(url, handler, WarmupOptions.Real(limit), screen.Report, cancel.Token));
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            return screen.Show(AnsiConsole.Console, () => Console.KeyAvailable ? Console.ReadKey(true) : null, probe, cancel,
-                () => stopwatch.Elapsed, Thread.Sleep);
+            return screen.Show(AnsiConsole.Console, PollKey, probe, cancel, () => stopwatch.Elapsed, Thread.Sleep);
         }
         finally
         {
@@ -439,7 +458,10 @@ internal static class Warmup
         };
         var lines = new List<string> { $"[bold {color}]{Markup.Escape(result.Summary)}[/]" };
         if (result.Detail.Length != 0) lines.Add(Markup.Escape(result.Detail));
-        lines.Add($"[{TerminalStyle.Muted}]{Markup.Escape(result.Url)}  ·  {result.Attempts} request{(result.Attempts == 1 ? "" : "s")}  ·  {result.Seconds:0} s[/]");
-        return TerminalStyle.Card(new Markup(string.Join("\n", lines)), title, color);
+        var muted = new Style(Color.FromHex(TerminalStyle.Muted));
+        // Spectre drops the link where the terminal cannot show one, so the visible text is the whole address.
+        var footer = new Paragraph(result.Url, muted, new Link(result.Url))
+            .Append($"  ·  {result.Attempts} request{(result.Attempts == 1 ? "" : "s")}  ·  {result.Seconds:0} s", muted);
+        return TerminalStyle.Card(new Rows(new Markup(string.Join("\n", lines)), footer), title, color);
     }
 }

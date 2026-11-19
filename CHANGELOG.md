@@ -5,6 +5,43 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: the dev site address in the warm-up result is a link; Ctrl+click it in Windows Terminal to open the site.
+- Improvement: the terminal UI shows an activation's build and deployment stages on the same screen as the site warm-up
+  that follows. The build and deployment run as before, and Esc never cancels them.
+- Improvement: Tidy worktrees responds to keys at once. Moving the highlight, paging, selecting, typing a search,
+  sorting and filtering now redraw only the lines that changed, in a single write, instead of the whole screen; a key
+  is picked up the moment it is pressed instead of on the next 20 ms check; and a held arrow key's repeats are handled
+  together, so the list stops where you let go.
+- Improvement: the other screens respond as quickly. The home menu, every action menu, the version and solution
+  pickers and the Ticket workspaces list redraw only the lines a key changes, in one write, and a held arrow stops
+  where you let go. The home screen appears at once, filling in the active deployment when its status arrives;
+  nothing that acts on the deployment starts before it has. Update my webfarm, Open solution and Ticket workspaces
+  start fewer Git processes before they open, and screens write to the terminal in one piece instead of many small
+  ones.
+- Feature: Cultivate cleans up after itself. Once a day, in the background of the terminal UI and the saved-file worker,
+  it removes build and plan runs older than 7 days, bridge logs and incident reports older than 14 days, and leftovers
+  older than a day (stale worker settings, interrupted requests, self-tests and updates), and has Git forget snapshot
+  worktrees whose run is gone. The deployment journal and its backups, the active deployment's run and worker, and
+  anything a recent error report names are always kept, and a run another program is using is left in place. The new
+  Clean up home action shows what would go and removes it, and separately lists the worktrees unused for 14 days
+  (`CleanupDays`; `cultivate setup --cleanup-days`) that lose nothing when deleted, deleting them only after you
+  confirm; branches are kept. `cultivate cleanup` prints the same as JSON without changing anything; `--yes` removes
+  Cultivate's files, `--worktrees --yes` also deletes those worktrees, and `--days N` sets the age. The self-test now
+  keeps its runs, logs and worker files in its own fixture folder instead of Cultivate's data folder.
+- Feature: review a pull request on your dev webfarm without creating a branch or worktree. Choose Review a pull request
+  on the home screen to pick one of MyMeyer's open pull requests (or type any number, including a closed or merged one),
+  or run `cultivate plan --pr N` and `cultivate activate --pr N --yes`. Each preview fetches the pull request's current
+  head from origin into a private ref and compares it with the branch it targets; the preview, `status`, and the home
+  screen name it as "PR #N: title". The list and the title, author, and base branch come from the GitHub CLI (`gh`);
+  without it a pull request can still be reviewed by number, compared with your base branch. Restore removes the
+  fetched refs.
+- Feature: `cultivate mcp` serves Cultivate to coding agents (Claude Code, Codex, T3 Code) as a Model Context Protocol
+  server over stdio. Agents can list worktrees and ticket workspaces, preview a plan, build only the changed projects
+  without deploying (compile errors come back with file, line, code and project), activate, request the site, check
+  status and restore, with progress for long steps. Activate and restore need `confirm: true`, an activation is
+  one-time unless automatic updates are asked for, and only one runs at a time. `cultivate mcp --read-only` leaves out
+  activate and restore so an agent cannot change the webfarm.
+
 ## 1.1.24 — 2026-11-17
 
 - Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to

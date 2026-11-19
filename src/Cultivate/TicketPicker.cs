@@ -155,25 +155,18 @@ internal sealed class TicketPicker
             new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
     }
 
-    internal TicketWorkspace? Show() => Show(AnsiConsole.Console, () => Console.ReadKey(true));
+    internal TicketWorkspace? Show() => Show(AnsiConsole.Console, KeyScreen.ReadKey);
 
-    internal TicketWorkspace? Show(IAnsiConsole console, Func<ConsoleKeyInfo> readKey)
+    internal TicketWorkspace? Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
     {
-        console.Clear();
-        return console.Live(Render(console.Profile.Width, console.Profile.Height))
-            .AutoClear(true).Overflow(VerticalOverflow.Crop).Cropping(VerticalOverflowCropping.Bottom)
-            .Start(context =>
-            {
-                context.Refresh();
-                while (true)
-                {
-                    var key = readKey();
-                    if (key.Key == ConsoleKey.Escape) return null;
-                    if (key.Key == ConsoleKey.Enter && Selected is not null) return Selected;
-                    HandleKey(key, PageSize(console.Profile.Height));
-                    context.UpdateTarget(Render(console.Profile.Width, console.Profile.Height));
-                    context.Refresh();
-                }
-            });
+        TicketWorkspace? chosen = null;
+        KeyScreen.Show(console, Render, (key, height) =>
+        {
+            if (key.Key == ConsoleKey.Escape) return true;
+            if (key.Key == ConsoleKey.Enter && Selected is not null) return (chosen = Selected) is not null;
+            HandleKey(key, PageSize(height));
+            return false;
+        }, readKey);
+        return chosen;
     }
 }

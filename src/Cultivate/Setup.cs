@@ -17,14 +17,14 @@ internal static class Setup
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                 throw new InvalidOperationException($"{name} needs a value.");
             var value = args[index + 1].Trim().Trim('"');
-            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--stop-legacy-watcher" or "--library-repositories") &&
+            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--stop-legacy-watcher" or "--library-repositories" or "--cleanup-days") &&
                 !Path.IsPathFullyQualified(value))
                 throw new InvalidOperationException($"{name} needs an absolute path, not '{value}'.");
             return value;
         }
         var settings = await Settings.Read();
         var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
-            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories" };
+            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -52,6 +52,8 @@ internal static class Setup
         if (Option("--stop-legacy-watcher") is { } stopLegacy)
             settings.StopLegacyWatcher = bool.TryParse(stopLegacy, out var stop) ? stop : throw new InvalidOperationException("--stop-legacy-watcher expects true or false.");
         if (Option("--library-repositories") is { } libraries) settings.LibraryRepositories = LibraryLoop.ParseRepositories(libraries);
+        if (Option("--cleanup-days") is { } cleanupDays)
+            settings.CleanupDays = int.TryParse(cleanupDays, out var days) && days >= 1 ? days : throw new InvalidOperationException("--cleanup-days expects a whole number of days, 1 or more.");
         GuardActive(active, previousFarm, settings.WebfarmRoot);
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n  " + string.Join("\n  ", problems));
@@ -64,9 +66,9 @@ internal static class Setup
     public static async Task<Settings> Interactive(Settings settings, DeploymentState? active, bool firstRun = false)
     {
         AnsiConsole.Clear();
-        // The prompts below take about 16 lines; on a shorter terminal the compact header leaves them more room.
+        // The prompts below take about 17 lines; on a shorter terminal the compact header leaves them more room.
         AnsiConsole.Write(new Banner(firstRun ? "WELCOME" : "SETTINGS",
-            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 16));
+            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 17));
         AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]Saved to {Escape(Settings.FilePath)}[/]\n");
         var previousFarm = settings.WebfarmRoot;
         var previousRepository = settings.RepositoryRoot;
@@ -109,6 +111,8 @@ internal static class Setup
         settings.LibraryRepositories = LibraryLoop.ParseRepositories(Ask(
             "[bold]Library repositories[/] whose matching worktrees can deploy with MyMeyer (separate with ;, or none)",
             string.Join(";", settings.LibraryRepositories ?? []), LibraryLoop.RepositoriesProblem, optional: true));
+        settings.CleanupDays = int.Parse(Ask("Days a worktree must go [bold]unused[/] before Clean up offers to delete it", settings.CleanupDays.ToString(),
+            value => int.TryParse(value, out var days) && days >= 1 ? null : "Enter a whole number of days, 1 or more."));
 
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n" + string.Join("\n", problems));

@@ -18,6 +18,8 @@ internal sealed record TidyGuard(DeploymentState? State, string CurrentFolder, s
     {
         if (checkout.Primary) return ("This is the repository's main checkout, which is never deleted.", "main");
         if (State?.Active == true && Inside(checkout.Path, State.SourceRoot)) return ("The active webfarm deployment runs from this worktree.", "live");
+        if (State?.Active == true && State.Libraries.Any(library => Inside(checkout.Path, library.Worktree)))
+            return ("The active webfarm deployment builds a library from this worktree.", "live");
         if (Inside(checkout.Path, Program)) return ("Cultivate is running from this worktree.", "in use");
         if (Inside(checkout.Path, CurrentFolder)) return ("This terminal's current folder is inside this worktree.", "in use");
         if (checkout.Locked) return ("Git has this worktree locked. Unlock it with git worktree unlock to delete it here.", "locked");
@@ -382,29 +384,10 @@ internal sealed class TidyList
     }
 
     /// <summary>Shows the list until a key asks to review the selection, scan again, or go back, and returns that command.</summary>
-    internal TidyCommand Show(IAnsiConsole console, Func<ConsoleKeyInfo?> readKey)
+    internal TidyCommand Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
     {
-        console.Clear();
-        return console.Live(Render(console.Profile.Width, console.Profile.Height))
-            .AutoClear(true).Overflow(VerticalOverflow.Crop).Cropping(VerticalOverflowCropping.Bottom)
-            .Start(context =>
-            {
-                context.Refresh();
-                var size = (console.Profile.Width, console.Profile.Height);
-                while (true)
-                {
-                    var changed = false;
-                    if (readKey() is { } pressed)
-                    {
-                        var command = HandleKey(pressed, PageSize(console.Profile.Height));
-                        if (command != TidyCommand.None) return command;
-                        changed = true;
-                    }
-                    if (!changed && size == (console.Profile.Width, console.Profile.Height)) continue;
-                    size = (console.Profile.Width, console.Profile.Height);
-                    context.UpdateTarget(Render(size.Width, size.Height));
-                    context.Refresh();
-                }
-            });
+        var command = TidyCommand.None;
+        KeyScreen.Show(console, Render, (key, height) => (command = HandleKey(key, PageSize(height))) != TidyCommand.None, readKey);
+        return command;
     }
 }

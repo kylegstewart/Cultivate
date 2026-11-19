@@ -32,7 +32,7 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
         await Scan(list, scans, Unscanned(list.Rows, scans));
         while (true)
         {
-            switch (list.Show(AnsiConsole.Console, ReadKey))
+            switch (list.Show(AnsiConsole.Console, KeyScreen.ReadKey))
             {
                 case TidyCommand.Rescan:
                     await Scan(list, scans, list.Rows.ToList());
@@ -47,16 +47,6 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
                     return;
             }
         }
-    }
-
-    private static ConsoleKeyInfo? ReadKey()
-    {
-        for (var waited = 0; waited < 200; waited += 20)
-        {
-            if (Console.KeyAvailable) return Console.ReadKey(true);
-            Thread.Sleep(20);
-        }
-        return null;
     }
 
     /// <summary>The worktrees a visit scans: ones with no saved scan, and ones whose HEAD has moved since. F5 scans every one again.</summary>
