@@ -192,7 +192,7 @@ internal sealed class Settings
     }
 }
 
-internal sealed record Target(string Branch, string? Worktree, string Ref, bool Remote = false)
+internal sealed record Target(string Branch, string? Worktree, string Ref, bool Remote = false, PullRequest? PullRequest = null)
 {
     public override string ToString() => Worktree is null ? $"{Branch}  |  committed branch" : $"{Branch}  |  {Worktree}";
 }

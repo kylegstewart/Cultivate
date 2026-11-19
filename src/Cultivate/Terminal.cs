@@ -11,6 +11,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     [
         new("Update my webfarm", "Browse versions and preview their changed files before deploying anything."),
         new("Open solution", "Open a repository's main solution, or a worktree or local branch with its changed source files."),
+        new("Review a pull request", "Pick a GitHub pull request and preview its changes for your dev webfarm, without a branch or worktree."),
         new("Ticket workspaces", "See one ticket's worktrees, pull requests, and SQL files across every repository, and open them together."),
         new("Tidy worktrees", "Sort and filter every repository's worktrees by size and age, then delete the ones you choose."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
@@ -132,12 +133,14 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                         break;
                     case "Update my webfarm": await Choose(state); break;
                     case "Open solution": await OpenSolution(state); break;
+                    case "Review a pull request": await ReviewPullRequest(state); break;
                     case "Ticket workspaces": await new TicketWorkspaces(settings, git, bridge, this).Run(state); break;
                     case "Tidy worktrees": await new WorktreeTidy(settings, git).Run(state); break;
                     case "Restore original webfarm files":
                         if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))
                         {
                             await AnsiConsole.Status().StartAsync("Restoring journaled originals...", _ => bridge.Call("Restore"));
+                            await PullRequests.Prune(git, settings, null);
                             AnsiConsole.MarkupLine("[green]Original webfarm files restored.[/]");
                             Pause();
                         }
@@ -257,6 +260,16 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         if (target is not null) await Preview(target, state);
     }
 
+    private async Task ReviewPullRequest(DeploymentState? state)
+    {
+        var (open, problem) = await AnsiConsole.Status().StartAsync("Listing open pull requests with the GitHub CLI...", _ =>
+            PullRequests.Open(PullRequests.GitHub(settings)));
+        if (new PullRequestPicker(open, problem, state).Show() is not { } number) return;
+        var target = await AnsiConsole.Status().StartAsync($"Fetching pull request #{number} from origin...", _ =>
+            PullRequests.Fetch(settings, git, number, state));
+        await Preview(target, state);
+    }
+
     /// <summary>The deployment preview of one MyMeyer version, through to its activation.</summary>
     internal async Task Preview(Target target, DeploymentState? state)
     {
@@ -272,7 +285,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             AnsiConsole.Write(TerminalStyle.Header("DEPLOYMENT PREVIEW", "Inspect the plan. You are still in preview mode."));
             AnsiConsole.Write(TerminalStyle.Card(new Markup(
                 $"[bold {TerminalStyle.Accent}]{Escape(target.Branch)}[/]\n" +
-                $"[{TerminalStyle.Muted}]SOURCE[/]       {Escape(target.Worktree ?? target.Ref)}\n" +
+                $"[{TerminalStyle.Muted}]SOURCE[/]       {Escape(target.Worktree ?? target.PullRequest?.Source ?? target.Ref)}\n" +
                 $"[{TerminalStyle.Muted}]DESTINATION[/]  {Escape(settings.WebfarmRoot)}"), "SELECTED VERSION"));
             var actionable = ActionableChanges(plan);
             var selectable = SelectableChanges(plan);

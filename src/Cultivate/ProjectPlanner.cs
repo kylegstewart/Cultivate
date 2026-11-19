@@ -93,6 +93,7 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
             Changes = inspected.Changes, Fingerprint = inspected.Fingerprint, ExcludedPaths = excluded
         };
         LibraryLoop.Apply(plan, await detection, libraryErrors);
+        if (target.PullRequest is { } request) plan.Notes.AddRange(PullRequests.Notes(request, settings));
         var selected = plan.Changes.Where(change => !excluded.Contains(change.Path.Replace('\\', '/'), Files.Comparer)).ToList();
         if (target.Ref == "refs/heads/" + settings.BaseBranch || target.Branch == settings.BaseBranch ||
             target.Remote && target.Branch.EndsWith("/" + settings.BaseBranch, StringComparison.OrdinalIgnoreCase))
