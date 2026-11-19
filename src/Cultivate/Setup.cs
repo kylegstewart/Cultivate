@@ -24,7 +24,7 @@ internal static class Setup
         }
         var settings = await Settings.Read();
         var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
-            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days" };
+            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days", "--release-root" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -54,6 +54,7 @@ internal static class Setup
         if (Option("--library-repositories") is { } libraries) settings.LibraryRepositories = LibraryLoop.ParseRepositories(libraries);
         if (Option("--cleanup-days") is { } cleanupDays)
             settings.CleanupDays = int.TryParse(cleanupDays, out var days) && days >= 1 ? days : throw new InvalidOperationException("--cleanup-days expects a whole number of days, 1 or more.");
+        if (Option("--release-root") is { } releaseRoot) settings.ReleaseRoot = Files.Full(releaseRoot);
         GuardActive(active, previousFarm, settings.WebfarmRoot);
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n  " + string.Join("\n  ", problems));
@@ -66,9 +67,9 @@ internal static class Setup
     public static async Task<Settings> Interactive(Settings settings, DeploymentState? active, bool firstRun = false)
     {
         AnsiConsole.Clear();
-        // The prompts below take about 17 lines; on a shorter terminal the compact header leaves them more room.
+        // The prompts below take about 18 lines; on a shorter terminal the compact header leaves them more room.
         AnsiConsole.Write(new Banner(firstRun ? "WELCOME" : "SETTINGS",
-            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 17));
+            firstRun ? "Let's connect Cultivate to your MyMeyer checkout and dev webfarm." : "Press Enter to keep a value.", 18));
         AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]Saved to {Escape(Settings.FilePath)}[/]\n");
         var previousFarm = settings.WebfarmRoot;
         var previousRepository = settings.RepositoryRoot;
@@ -113,6 +114,8 @@ internal static class Setup
             string.Join(";", settings.LibraryRepositories ?? []), LibraryLoop.RepositoriesProblem, optional: true));
         settings.CleanupDays = int.Parse(Ask("Days a worktree must go [bold]unused[/] before Clean up offers to delete it", settings.CleanupDays.ToString(),
             value => int.TryParse(value, out var days) && days >= 1 ? null : "Enter a whole number of days, 1 or more."));
+        settings.ReleaseRoot = Files.Full(Ask("Folder for [bold]release files[/] (Build release files makes a folder per ticket in it)", settings.ReleaseRoot,
+            value => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path."));
 
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n" + string.Join("\n", problems));

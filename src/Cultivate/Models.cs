@@ -87,6 +87,8 @@ internal sealed class Settings
     public List<string>? LibraryRepositories { get; set; }
     /// <summary>Days a worktree must go unused before Clean up offers to delete it, when deleting it loses nothing.</summary>
     public int CleanupDays { get; set; } = 14;
+    /// <summary>Folder that holds one folder of release files per ticket, built by <c>cultivate release</c>.</summary>
+    public string ReleaseRoot { get; set; } = "";
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
@@ -143,6 +145,7 @@ internal sealed class Settings
             if (Directory.Exists(guess)) SqlMirrorRoot = guess;
         }
         if (LibraryRepositories is null && LibraryLoop.Discover(RepositoryRoot) is { Count: > 0 } libraries) LibraryRepositories = libraries;
+        if (string.IsNullOrWhiteSpace(ReleaseRoot)) ReleaseRoot = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
     }
 
     public List<string> Problems()
@@ -163,6 +166,8 @@ internal sealed class Settings
         if (!string.IsNullOrWhiteSpace(SiteUrl) && !(Uri.TryCreate(SiteUrl, UriKind.Absolute, out var site) && site.Scheme is "http" or "https"))
             problems.Add("SiteUrl must be the http or https address of your dev site, for example https://mywebfarm-dev02.example.com/.");
         if (CleanupDays < 1) problems.Add("CleanupDays must be 1 or more.");
+        if (!string.IsNullOrWhiteSpace(ReleaseRoot) && !Path.IsPathFullyQualified(ReleaseRoot))
+            problems.Add("ReleaseRoot must be an absolute folder for release files, for example your Documents folder.");
         return problems;
     }
 
