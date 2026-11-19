@@ -123,30 +123,33 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         {
             progress(support is null ? "Preparing references for changed projects only"
                 : "Preparing references for the release projects and the unchanged projects they compile against");
-            var seeds = Path.Combine(run, "references");
-            Directory.CreateDirectory(seeds);
-            // The snapshot's bin before anything is built holds exactly the DLLs Git tracks there; builds later copy checkout DLLs in beside them.
-            var trackedBin = support is null || !Directory.Exists(Path.Combine(snapshot, "bin")) ? null
-                : Directory.GetFiles(Path.Combine(snapshot, "bin")).Select(Path.GetFileName).OfType<string>().ToHashSet(Files.Comparer);
-            var environment = new Dictionary<string, string>
+            // Each project compiles against this run's built outputs (references\built), then its own resolved DLLs
+            // (references\projects\<assembly>), then its HintPaths; never against another project's references.
+            var references = Path.Combine(run, "references");
+            var built = Path.Combine(references, "built");
+            Directory.CreateDirectory(built);
+            var projects = support?.Order ?? plan.Projects;
+            var ledger = new Ledger(snapshot, projects, support is null ? null : Pristine(snapshot, projects));
+            var common = new Dictionary<string, string>
             {
                 ["WebfarmPath"] = Path.Combine(run, "intercepted") + "\\",
                 ["CultivateRunDirectory"] = run,
-                ["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets"),
-                ["ReferencePath"] = seeds
+                ["CultivateCaptureTargets"] = Path.Combine(AppContext.BaseDirectory, "Capture.targets")
             };
             context = new("Library build") { Log = Path.Combine(run, "build.log") };
-            var libraryFiles = await new LibraryLoop(settings, git).Build(plan, snapshot, run, seeds, progress);
+            var libraryFiles = await new LibraryLoop(settings, git).Build(plan, snapshot, run, built, progress);
             // Capture.targets points every reference to a built library assembly at that build, whatever version the project declares.
-            if (libraryFiles.Count != 0) environment["CultivateLibraryDirectory"] = Path.Combine(run, "libraries") + "\\";
+            if (libraryFiles.Count != 0) common["CultivateLibraryDirectory"] = Path.Combine(run, "libraries") + "\\";
             var libraryNames = LibraryLoop.Assemblies(plan).ToHashSet(Files.Comparer);
-            var projects = support?.Order ?? plan.Projects;
             var internalNames = projects.Select(x => x.Assembly).Concat(libraryNames).ToHashSet(Files.Comparer);
             foreach (var project in projects)
             {
                 context = new("Reference preparation") { Project = project.RelativePath, Log = Path.Combine(run, "build.log") };
-                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, libraryNames, environment, run,
-                    support?.Outside, trackedBin);
+                var own = Path.Combine(references, "projects", project.Assembly);
+                Directory.CreateDirectory(own);
+                var environment = new Dictionary<string, string>(common) { ["ReferencePath"] = built + ";" + own };
+                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, own, internalNames, libraryNames, environment, run,
+                    ledger, support?.Outside);
                 context = context with { Stage = "Project evaluation" };
                 var full = Files.Child(snapshot, project.RelativePath);
                 var metadataText = await Commands.Run(settings.MSBuild,
@@ -211,7 +214,8 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 if (!Files.Comparer.Equals(identity.Name, project.Assembly))
                     throw new InvalidDataException($"Unexpected assembly identity for {targetPath}.");
                 LibraryLoop.VerifyReferences(targetPath, plan);
-                File.Copy(targetPath, Path.Combine(seeds, Path.GetFileName(targetPath)), true);
+                File.Copy(targetPath, Path.Combine(built, Path.GetFileName(targetPath)), true);
+                ledger.Built(project, Path.GetDirectoryName(targetPath)!);
                 // Projects can share an output folder, so keep each changed package's DLL before a later build replaces it.
                 foreach (var hint in project.PackageDependencies)
                 {
@@ -243,12 +247,88 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         }
     }
 
+    /// <summary>A reference DLL a project compiles against, as <see cref="Prepare"/> resolved it.</summary>
+    /// <param name="Source">Where it was found; this is what <c>build.log</c> and the outside references name.</param>
+    /// <param name="Copy">The same file where no later build overwrites it: the project's own reference folder, or the package.</param>
+    /// <param name="FromSnapshot">The snapshot's own copy (see <see cref="Ledger.FromSnapshot"/>). Only a release tells.</param>
+    /// <param name="Outside">Taken from outside the snapshot.</param>
+    private sealed record Resolution(ProjectInfo Project, string Name, string Source, string Copy, string Hash, bool FromSnapshot, bool Outside);
+
+    /// <summary>What one build knows about the references its projects compile against.</summary>
+    /// <param name="pristine">For a release: see <see cref="Pristine"/>. Null for the dev farm, which keeps its lookups.</param>
+    private sealed class Ledger(string snapshot, List<ProjectInfo> projects, Dictionary<string, string>? pristine)
+    {
+        private readonly string packages = Path.Combine(Files.Full(snapshot), "packages") + "\\";
+        /// <summary>A build's copy of a resolved reference in its output folder, by full path, and the resolution it copied.</summary>
+        private readonly Dictionary<string, Resolution> produced = new(Files.Comparer);
+
+        /// <summary>Each prepared project's resolved references by file name, including the HintPaths found where they point.</summary>
+        public Dictionary<ProjectInfo, Dictionary<string, Resolution>> Resolved { get; } = [];
+        public bool Release => pristine is not null;
+
+        /// <summary>A file Git tracks in the snapshot, unchanged since the snapshot was taken.</summary>
+        public bool Tracked(string path) => pristine?.GetValueOrDefault(path) is { } hash && File.Exists(path) && Files.Hash(path) == hash;
+
+        /// <summary>
+        /// Whether a file is the snapshot's own: in its packages folder, tracked by Git and unchanged, or a build's copy of a reference that was
+        /// itself the snapshot's own. A DLL a build copied in from outside the snapshot is not, though it now sits in the snapshot's bin.
+        /// </summary>
+        public bool FromSnapshot(string path, string hash) => path.StartsWith(packages, StringComparison.OrdinalIgnoreCase) ||
+            pristine?.GetValueOrDefault(path) == hash || produced.TryGetValue(path, out var origin) && origin.Hash == hash && origin.FromSnapshot;
+
+        /// <summary>Records the copies <paramref name="project"/>'s build made of its resolved references in its <paramref name="output"/> folder.</summary>
+        public void Built(ProjectInfo project, string output)
+        {
+            foreach (var resolution in Resolved[project].Values)
+            {
+                var copied = Path.GetFullPath(Path.Combine(output, resolution.Name));
+                if (File.Exists(copied) && new FileInfo(copied).Length == new FileInfo(resolution.Copy).Length && Files.Hash(copied) == resolution.Hash)
+                    produced[copied] = resolution;
+            }
+        }
+
+        /// <summary>What the projects prepared before <paramref name="project"/> resolved for <paramref name="name"/>: the projects it depends on
+        /// (by ProjectReference or by assembly name), nearest first, then the others in build order.</summary>
+        public List<(Resolution Resolution, bool Dependency)> Earlier(ProjectInfo project, string name)
+        {
+            var order = new List<ProjectInfo>();
+            var queue = new Queue<ProjectInfo>([project]);
+            while (queue.TryDequeue(out var current))
+                foreach (var next in projects.Where(other => other != project && !order.Contains(other) &&
+                    (current.ProjectReferences.Contains(other.RelativePath, Files.Comparer) || current.AssemblyReferences.Contains(other.Assembly, Files.Comparer))))
+                {
+                    order.Add(next);
+                    queue.Enqueue(next);
+                }
+            var dependencies = order.Count;
+            order.AddRange(projects.Where(other => other != project && !order.Contains(other)));
+            return order.Select((other, index) => (Resolution: Resolved.GetValueOrDefault(other)?.GetValueOrDefault(name), Dependency: index < dependencies))
+                .Where(match => match.Resolution is not null).Select(match => (match.Resolution!, match.Dependency)).ToList();
+        }
+    }
+
+    /// <summary>
+    /// For a release: each snapshot file a project's HintPath or the tracked-bin lookup can name, with its hash before anything is built, when the
+    /// snapshot holds only what Git tracks. Builds later copy their references into the snapshot's bin, beside or over these.
+    /// </summary>
+    private static Dictionary<string, string> Pristine(string snapshot, List<ProjectInfo> projects)
+    {
+        var root = Files.Full(snapshot) + "\\";
+        return projects.SelectMany(project => project.Hints.Where(hint => !hint.Contains('$')).SelectMany(hint => new[]
+            {
+                Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(snapshot, project.RelativePath))!, hint)),
+                Path.GetFullPath(Path.Combine(snapshot, "bin", Path.GetFileName(hint)))
+            }))
+            .Where(path => path.StartsWith(root, StringComparison.OrdinalIgnoreCase) && File.Exists(path)).Distinct(Files.Comparer)
+            .ToDictionary(path => path, Files.Hash, Files.Comparer);
+    }
+
+    /// <param name="own">This project's reference folder, which only its own build searches.</param>
+    /// <param name="ledger">What earlier projects in this build resolved. For a release it also tells the snapshot's own files from copies of
+    /// outside DLLs, so the tracked bin and the projects this one depends on are tried before the developer's checkout.</param>
     /// <param name="outside">For a release: records each reference taken from outside the snapshot. Null for the dev farm.</param>
-    /// <param name="trackedBin">For a release: the DLLs the snapshot tracks in its <c>bin</c>, which the fallbacks try before the developer's
-    /// checkout. Null keeps the dev farm lookups.</param>
-    private async Task Prepare(ProjectInfo project, string snapshot, string sourceRoot, string seeds, HashSet<string> internalNames,
-        HashSet<string> libraryNames, Dictionary<string, string> environment, string run, List<OutsideReference>? outside = null,
-        HashSet<string>? trackedBin = null)
+    private async Task Prepare(ProjectInfo project, string snapshot, string sourceRoot, string own, HashSet<string> internalNames,
+        HashSet<string> libraryNames, Dictionary<string, string> environment, string run, Ledger ledger, List<OutsideReference>? outside = null)
     {
         var directory = Path.GetDirectoryName(Files.Child(snapshot, project.RelativePath))!;
         var originalDirectory = Path.GetDirectoryName(Files.Child(sourceRoot, project.RelativePath))!;
@@ -278,45 +358,66 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     Project = project.RelativePath, BinaryLog = Path.Combine(run, project.Assembly + ".restore.binlog")
                 });
         }
+        var log = Path.Combine(run, "build.log");
+        var resolved = ledger.Resolved[project] = new(Files.Comparer);
         foreach (var hint in project.Hints)
         {
             if (hint.Contains('$')) continue;
             var name = Path.GetFileName(hint);
             if (internalNames.Contains(Path.GetFileNameWithoutExtension(name))) continue;
             var desired = Path.GetFullPath(Path.Combine(directory, hint));
-            // MyMeyer tracks its third-party DLLs in bin, so a release looks for them in its own snapshot first.
-            var snapshotBin = trackedBin?.Contains(name) == true ? Path.Combine(snapshot, "bin", name) : null;
-            var packageRoot = Path.Combine(snapshot, "packages") + "\\";
-            string source;
-            if (desired.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase))
+            var package = desired.StartsWith(Path.Combine(snapshot, "packages") + "\\", StringComparison.OrdinalIgnoreCase);
+            if (package && File.Exists(desired))
             {
-                if (File.Exists(desired)) continue;
-                // A HintPath can name a package version packages.config never restores. Visual Studio then quietly falls back
-                // to the checkout's bin folder; accept that copy only when it is exactly the version the Reference declares.
-                project.HintVersions.TryGetValue(hint, out var declared);
-                source = new[] { snapshotBin, Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name) }
-                    .OfType<string>().FirstOrDefault(path => declared is not null && VersionOf(path) == declared) ?? "";
-            }
-            else
-            {
-                source = File.Exists(desired) ? desired : File.Exists(snapshotBin) ? snapshotBin : Path.GetFullPath(Path.Combine(originalDirectory, hint));
-                if (!File.Exists(source))
-                    source = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(settings.RepositoryRoot, project.RelativePath))!, hint));
-                if (!File.Exists(source)) source = Path.Combine(sourceRoot, "bin", name);
-                if (!File.Exists(source)) source = Path.Combine(settings.RepositoryRoot, "bin", name);
-            }
-            if (!File.Exists(source))
-            {
-                // Visual Studio builds with such a reference unresolved and fails only if the code uses it; MSBuild does the same here.
-                File.AppendAllText(Path.Combine(run, "build.log"), $"Unresolved reference {name} for {project.Assembly}: {hint} was not found.\n");
+                resolved.TryAdd(name, new(project, name, desired, desired, Files.Hash(desired), true, false));
                 continue;
             }
-            var seeded = Path.Combine(seeds, name);
-            if (File.Exists(seeded) && Files.Hash(seeded) != Files.Hash(source))
-                throw new InvalidOperationException($"Incompatible input DLLs named {name}. Resolve references before deploying.");
-            File.AppendAllText(Path.Combine(run, "build.log"), $"Reference {name}: {source}\n");
-            File.Copy(source, seeded, true);
-            if (!source.StartsWith(Files.Full(snapshot) + "\\", StringComparison.OrdinalIgnoreCase)) outside?.Add(OutsideReference.Of(source, project.RelativePath));
+            // A HintPath can name a package version packages.config never restores. Visual Studio then quietly falls back
+            // to the checkout's bin folder; accept that copy only when it is exactly the version the Reference declares.
+            project.HintVersions.TryGetValue(hint, out var declared);
+            bool Usable(string path) => File.Exists(path) && (!package || declared is not null && VersionOf(path) == declared);
+            // MyMeyer tracks its third-party DLLs in bin, so a release looks for them in its own snapshot first.
+            var snapshotBin = Path.GetFullPath(Path.Combine(snapshot, "bin", name));
+            var source = !package && File.Exists(desired) ? desired : ledger.Tracked(snapshotBin) && Usable(snapshotBin) ? snapshotBin : null;
+            var earlier = source is null ? ledger.Earlier(project, name).Where(match => Usable(match.Resolution.Copy)).ToList() : [];
+            Resolution? borrowed = null;
+            var dependency = false;
+            // Then a release compiles against the snapshot's own copy that a project it depends on resolved, as master's own build of that
+            // project does, before any DLL from outside the snapshot.
+            if (ledger.Release) (borrowed, dependency) = earlier.FirstOrDefault(match => match.Resolution.FromSnapshot);
+            string[] fallbacks = package ? [Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name)] :
+            [
+                Path.GetFullPath(Path.Combine(originalDirectory, hint)),
+                Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(settings.RepositoryRoot, project.RelativePath))!, hint)),
+                Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name)
+            ];
+            if (source is null && borrowed is null) source = fallbacks.FirstOrDefault(Usable);
+            // A last resort only: the copy an earlier project in this build resolved, which one shared reference folder used to supply.
+            var lastResort = source is null && borrowed is null && earlier.Count != 0;
+            if (lastResort) (borrowed, dependency) = earlier[0];
+            var from = borrowed?.Copy ?? source;
+            if (from is null)
+            {
+                // Visual Studio builds with such a reference unresolved and fails only if the code uses it; MSBuild does the same here.
+                File.AppendAllText(log, $"Unresolved reference {name} for {project.Assembly}: {hint} was not found.\n");
+                continue;
+            }
+            var copy = Path.Combine(own, name);
+            var hash = Files.Hash(from);
+            if (File.Exists(copy) && Files.Hash(copy) != hash)
+                throw new InvalidOperationException($"Incompatible input DLLs named {name}: two of {project.RelativePath}'s references resolve to different files. " +
+                    "Resolve references before deploying.");
+            File.Copy(from, copy, true);
+            var origin = borrowed?.Source ?? from;
+            var isOutside = borrowed?.Outside ?? !origin.StartsWith(Files.Full(snapshot) + "\\", StringComparison.OrdinalIgnoreCase);
+            resolved.TryAdd(name, new(project, name, origin, copy, hash, borrowed?.FromSnapshot ?? ledger.FromSnapshot(origin, hash), isOutside));
+            File.AppendAllText(log, borrowed is null ? $"Reference {name}: {origin}\n"
+                : lastResort ? $"Reference {name}: {origin} (last resort: {project.Assembly} cannot resolve its HintPath {hint}, so it uses the copy " +
+                    $"{borrowed.Project.Assembly} resolved earlier in this build)\n"
+                : $"Reference {name}: {origin} ({borrowed.Project.Assembly}'s copy: {project.Assembly}'s HintPath {hint} is not in the snapshot, and " +
+                    (dependency ? $"{project.Assembly} depends on {borrowed.Project.Assembly}, which" : $"{borrowed.Project.Assembly}, built earlier in this release,") +
+                    " resolved this copy from the snapshot, so it is used instead of a DLL from outside the snapshot)\n");
+            if (isOutside) outside?.Add(OutsideReference.Of(origin, project.RelativePath));
         }
     }
 
