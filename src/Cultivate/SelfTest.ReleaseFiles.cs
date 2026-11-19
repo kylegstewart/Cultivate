@@ -318,6 +318,9 @@ internal static partial class SelfTest
         Check(await Untouched() == before && !new[] { "30001", "31001", "32001", "PR-404" }.Any(name => Directory.Exists(Path.Combine(output, name))),
             "refusals leave no refs, worktrees or folders behind");
         Check(BridgeLogs() == bridgeLogs && !File.Exists(settings.MappingAssembly), "release files never look up Code Release Manager mappings");
+
+        await CheckReleaseScreenRun(new(settings, git, output, m23, Gh, (number, title, branch, merge, head) => Pull(number, title, branch, merge, head),
+            (from, message, files) => Commit(from, message, files), Publish, Squash, Untouched, before));
     }
 
     private static void CheckReleaseNames()
