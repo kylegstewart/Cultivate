@@ -324,6 +324,10 @@ internal static partial class SelfTest
             "refusals leave no refs, worktrees or folders behind");
         Check(BridgeLogs() == bridgeLogs && !File.Exists(settings.MappingAssembly), "release files never look up Code Release Manager mappings");
 
+        // The screen run comes first: it checks the checkout is untouched, and the fixtures below add DLLs to the checkout's bin.
+        await CheckReleaseScreenRun(new(settings, git, output, m23, Gh, (number, title, branch, merge, head) => Pull(number, title, branch, merge, head),
+            (from, message, files) => Commit(from, message, files), Publish, Squash, Untouched, before));
+
         // PR 24: Tools and Kit reference Third and Fourth by HintPaths that resolve nowhere. Master tracks bin\Third.dll 2.0.0, and the
         // checkout's bin holds Third.dll 1.0.0 and the only Fourth.dll.
         async Task<string> ThirdParty(string name, string version)

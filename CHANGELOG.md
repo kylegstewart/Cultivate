@@ -15,7 +15,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   `bin`, and are not copied. The result lists the other merged commits each DLL carries, references that still came from outside
   the snapshot, and the SQL, config and other files you must release by hand. Files already in the folder are kept and reported;
   `--clean` removes only unchanged files an earlier run wrote. `--name`, `--out`, `--reuse-dependencies` and
-  `cultivate setup --release-root` adjust it. The GitHub CLI is required.
+  `cultivate setup --release-root` adjust it. The GitHub CLI is required. In the terminal UI, the **Build release files** home
+  action lists your recently merged pull requests (or everyone's, or any number you type), shows the preview to check before
+  building, builds with live progress (Esc cancels before anything is written), and ends with a link to the folder and a way to
+  open it in Explorer. It never touches your dev webfarm, so it works without an active deployment.
 
 ## 1.1.25 — 2026-11-19
 
