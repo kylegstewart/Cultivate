@@ -13,7 +13,11 @@ using Spectre.Console;
 namespace Cultivate;
 
 /// <summary>A compiler or MSBuild error, with paths relative to the selected checkout where possible.</summary>
-internal sealed record CompileError(string? File, int? Line, int? Column, string Code, string Message, string? Project);
+internal sealed record CompileError(string? File, int? Line, int? Column, string Code, string Message, string? Project)
+{
+    /// <summary>Whether the built version added or changed the error's line compared with its baseline; null when not determined.</summary>
+    public bool? Changed { get; init; }
+}
 
 /// <summary>
 /// <c>cultivate mcp [--read-only]</c>: a Model Context Protocol server on stdin/stdout, so coding agents can drive Cultivate
@@ -47,7 +51,8 @@ internal sealed partial class McpServer
         "branch": { "type": "string", "description": "A MyMeyer branch without a worktree (local, or remote like origin/name); its last commit is used." },
         "ticket": { "type": "string", "description": "Ticket number: selects the MyMeyer worktree whose branch is that ticket (12345 or 12345-2)." },
         "libraries": { "type": "array", "items": { "type": "string" }, "description": "Matching library worktree paths to build and deploy with this version (plan lists them)." },
-        "allLibraries": { "type": "boolean", "description": "Include every detected matching library worktree." }
+        "allLibraries": { "type": "boolean", "description": "Include every detected matching library worktree." },
+        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Changed files (repository-relative) to leave out, as the terminal UI's Choose files to deploy does. An excluded build input is built at its baseline contents." }
         """;
 
     private const string PlanOutput = """
@@ -438,13 +443,14 @@ internal sealed partial class McpServer
         new("build", "Build the changed projects",
             "Compile only the changed projects of a MyMeyer worktree or branch exactly as activate would, without deploying anything. Use it " +
             "to check that a change compiles instead of building the whole solution. On failure returns structured compile errors (file " +
-            "relative to the checkout, line, column, code, message, project). Builds in a temporary snapshot: the checkout, its branches and " +
+            "relative to the checkout, line, column, code, message, project, and changed: whether this version added or changed that line). " +
+            "Builds in a temporary snapshot: the checkout, its branches and " +
             "the webfarm are not changed. Roughly 15 to 90 seconds per project. Never looks up frontend mappings or reads a database.",
             Input(TargetProperties),
             Output("""
                 "succeeded": { "type": "boolean" }, "target": { "type": "object" }, "projects": { "type": "array", "items": { "type": "object" } },
                 "outputs": { "type": "array", "items": { "type": "string" } }, "seconds": { "type": "number" },
-                "errors": { "type": "array", "items": { "type": "object", "properties": { "file": { "type": "string" }, "line": { "type": "integer" }, "column": { "type": "integer" }, "code": { "type": "string" }, "message": { "type": "string" }, "project": { "type": "string" } } } },
+                "errors": { "type": "array", "items": { "type": "object", "properties": { "file": { "type": "string" }, "line": { "type": "integer" }, "column": { "type": "integer" }, "code": { "type": "string" }, "message": { "type": "string" }, "project": { "type": "string" }, "changed": { "type": "boolean" } } } },
                 "planErrors": { "type": "array", "items": { "type": "string" } }, "stage": { "type": "string" }, "diagnosis": { "type": "string" },
                 "logs": { "type": "array", "items": { "type": "string" } }, "runDirectory": { "type": "string" }, "notes": { "type": "array", "items": { "type": "string" } }
                 """),
@@ -523,7 +529,17 @@ internal sealed partial class McpServer
                 : $"No MyMeyer branch named {branch} without a worktree. A branch with a worktree is selected by its worktree; list_targets shows the choices.");
     }
 
-    private static List<string> Libraries(Call call) => (call.Flag("allLibraries") ? new List<string> { LibraryLoop.Every } : []).Concat(call.Texts("libraries")).ToList();
+    /// <summary>Plans <paramref name="target"/> with the call's libraries and exclusions, refusing an exclusion that is not one of its changed files.</summary>
+    private static async Task<Plan> Planned(Planner planner, Target target, Call call, Func<string, Task<Dictionary<string, string>>>? mapping)
+    {
+        var exclude = call.Texts("exclude");
+        var plan = await planner.Create(target, mapping, exclude, Libraries(call));
+        if (Planner.UnknownExclusions(plan, exclude) is { Count: > 0 } unknown)
+            throw new Refusal($"Not a changed file of {target.Branch}, so it cannot be excluded: {string.Join(", ", unknown)}. plan lists the changed files.");
+        return plan;
+    }
+
+    private static List<string> Libraries(Call call) =>(call.Flag("allLibraries") ? new List<string> { LibraryLoop.Every } : []).Concat(call.Texts("libraries")).ToList();
 
     private static Task<Dictionary<string, string>> NoLookup(string _) => Task.FromResult(new Dictionary<string, string>());
 
@@ -699,7 +715,7 @@ internal sealed partial class McpServer
         var settings = await Configured();
         var git = new GitRepository(settings);
         var mappings = call.Flag("frontendMappings", true);
-        var plan = await new Planner(settings, git, new Bridge(settings)).Create(await Resolve(settings, git, call), mappings ? null : NoLookup, libraries: Libraries(call));
+        var plan = await Planned(new Planner(settings, git, new Bridge(settings)), await Resolve(settings, git, call), call, mappings ? null : NoLookup);
         if (!mappings) DropMappingErrors(plan);
         var verdict = plan.CanDeploy ? $"Deployable: {plan.Projects.Count} project(s) to build, {plan.Frontend.Count} frontend file(s)." :
             "Not deployable:\n" + string.Join("\n", plan.Errors);
@@ -712,7 +728,7 @@ internal sealed partial class McpServer
         var git = new GitRepository(settings);
         var target = await Resolve(settings, git, call);
         call.Progress($"Planning {target.Branch}");
-        var plan = await new Planner(settings, git, new Bridge(settings)).Create(target, NoLookup, libraries: Libraries(call));
+        var plan = await Planned(new Planner(settings, git, new Bridge(settings)), target, call, NoLookup);
         DropMappingErrors(plan);
         if (!plan.CanDeploy)
             return new("Nothing was built: the plan has errors.\n" + string.Join("\n", plan.Errors),
@@ -729,12 +745,13 @@ internal sealed partial class McpServer
             .Concat(plan.Libraries.SelectMany(library => library.Deployed.Select(project => new { Project = Path.Combine(library.Worktree, project.RelativePath), project.Assembly })))
             .ToList();
         string? snapshot = null;
+        var pipeline = new Pipeline(settings, git, new Bridge(settings));
         try
         {
             call.Progress("Snapshotting the selected version (your checkout stays untouched)");
             snapshot = await git.Snapshot(plan, run);
             call.Cancel.ThrowIfCancellationRequested();
-            var files = await new Pipeline(settings, git, new Bridge(settings)).Build(plan, snapshot, run, call.Progress);
+            var files = await pipeline.Build(plan, snapshot, run, call.Progress);
             return new($"Built {string.Join(", ", projects.Select(project => project.Assembly))} in {watch.Elapsed.TotalSeconds:0} s. Nothing was deployed.", new
             {
                 Succeeded = true, Target = TargetOf(target), Projects = projects, Outputs = files.Select(file => file.RelativePath),
@@ -744,13 +761,18 @@ internal sealed partial class McpServer
         catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
             UnauthorizedAccessException or JsonException)
         {
+            await pipeline.Explain(exception, plan);
             var report = Diagnostics.Record(exception, "Build");
             var messages = new List<string>();
             for (var current = exception; current is not null; current = current.InnerException) messages.Add(current.Message);
+            var errors = CompileErrors(string.Join("\n", messages), snapshot).Select(error => error with
+            {
+                Changed = report.Context.Origins?.FirstOrDefault(origin => Files.Comparer.Equals(origin.File, error.File) && origin.Line == error.Line)?.Changed
+            }).ToList();
             return new($"{report.Label}\n{report.Text}", new
             {
                 Succeeded = false, Target = TargetOf(target), Projects = projects, Stage = report.Context.Stage, report.Diagnosis,
-                Errors = CompileErrors(string.Join("\n", messages), snapshot), report.Logs, RunDirectory = run,
+                Errors = errors, report.Logs, RunDirectory = run,
                 Seconds = Math.Round(watch.Elapsed.TotalSeconds, 1)
             }, true);
         }
@@ -789,7 +811,7 @@ internal sealed partial class McpServer
         var bridge = new Bridge(settings);
         var target = await Resolve(settings, git, call);
         call.Progress($"Planning {target.Branch}");
-        var plan = await new Planner(settings, git, bridge).Create(target, libraries: Libraries(call));
+        var plan = await Planned(new Planner(settings, git, bridge), target, call, null);
         if (!plan.CanDeploy) throw new Refusal("Nothing was deployed: the plan has errors.\n" + string.Join("\n", plan.Errors));
         string? stopped = null;
         var running = LegacyWatcher.Running(settings.WebfarmRoot);

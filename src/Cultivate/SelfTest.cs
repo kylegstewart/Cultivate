@@ -57,6 +57,7 @@ internal static partial class SelfTest
             if (!File.Exists(settings.MSBuild))
                 throw new FileNotFoundException("The self-test needs Visual Studio MSBuild and the .NET Framework 4.7.1 targeting pack.", settings.MSBuild);
             await CheckExclusions(home, settings.MSBuild);
+            await CheckCompileFailures(home, settings.MSBuild);
             await CheckMcp(home, settings.MSBuild);
             await CheckPackageDependencies(home, settings.MSBuild);
             await CheckSolutionDependencies(home, settings.MSBuild);

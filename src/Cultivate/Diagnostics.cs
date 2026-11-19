@@ -16,13 +16,27 @@ internal sealed record FailureContext(string Stage)
     public string? Log { get; init; }
     public string? BinaryLog { get; init; }
     public string? LoggingError { get; init; }
+    /// <summary>For a project's compile failure: whether this version changed each located error's line, compared with its baseline.</summary>
+    public IReadOnlyList<ErrorOrigin>? Origins { get; init; }
+    /// <summary>The branch the baseline came from, named when an error's line is unchanged from it.</summary>
+    public string? BaseBranch { get; init; }
+    /// <summary>Every path to exclude to deploy the rest of the plan without the failed project: the plan's exclusions plus the
+    /// changed compiled files that project owns. Null when leaving it out cannot work or leaves nothing to deploy.</summary>
+    public IReadOnlyList<string>? SkipExclusions { get; init; }
 }
+
+/// <summary>A located compiler error, with its file as the report shows it, and whether the deployed version added or changed that line.</summary>
+internal sealed record ErrorOrigin(string File, int Line, bool Changed);
 
 internal sealed record FailureReport(string Label, string Summary, string Diagnosis, FailureContext Context,
     List<string> Errors, List<string> Hints, List<string> Logs)
 {
     public string? Incident { get; init; }
     public string? LoggingError { get; init; }
+    /// <summary>One sentence for each listed error on a line the deployed version did not change.</summary>
+    public List<string> Origins { get; init; } = [];
+    /// <summary>Every located error is on a line the deployed version did not change.</summary>
+    public bool Unchanged { get; init; }
     public string Brief => $"{Label}: {Context.Project ?? Context.Stage}: {Errors.FirstOrDefault() ?? Summary}" +
         (Logs.LastOrDefault() is { } log ? $"\nDetails: {log}" : "");
 
@@ -37,6 +51,7 @@ internal sealed record FailureReport(string Label, string Summary, string Diagno
             if (Context.ExitCode is { } exit) text.AppendLine($"Exit code: {exit}");
             text.AppendLine($"Diagnosis: {Diagnosis}");
             if (Errors.Count != 0) text.AppendLine("Errors (first distinct messages):").AppendLine(string.Join("\n", Errors.Select(x => "  " + x)));
+            if (Origins.Count != 0) text.AppendLine(string.Join("\n", Origins.Select(x => "  " + x)));
             text.AppendLine("Next checks:").AppendLine(string.Join("\n", Hints.Select(x => "  " + x)));
             if (Logs.Count != 0) text.AppendLine("Logs:").AppendLine(string.Join("\n", Logs.Select(x => "  " + x)));
             if (Incident is not null) text.AppendLine($"Incident: {Incident}");
@@ -51,6 +66,8 @@ internal static class Diagnostics
     private static readonly object ContextKey = new();
     private static readonly Regex ErrorLine = new(@"\b(?:error(?:\s+[A-Z]+[0-9]+)?\s*:|fatal:)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex Code = new(@"\b(?:error|warning)\s+(?<code>[A-Z]+[0-9]+)\s*:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex Located = new(@"^(?<file>[^(]+?)\((?<line>[0-9]+)(?:[,-][0-9]+)*\)\s*:\s*error\s+CS[0-9]+\s*:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private const string FixHint = "Fix the compiler errors at the listed source locations, save the files, and retry the affected project.";
 
     // Preserve exception types and stack traces so existing retry and recovery behavior stays intact.
     internal static T Attach<T>(T exception, FailureContext context) where T : Exception
@@ -64,7 +81,8 @@ internal static class Diagnostics
                 Worktree = detail.Worktree ?? context.Worktree, Snapshot = detail.Snapshot ?? context.Snapshot,
                 RunDirectory = detail.RunDirectory ?? context.RunDirectory, Tool = detail.Tool ?? context.Tool,
                 ExitCode = detail.ExitCode ?? context.ExitCode, Log = detail.Log ?? context.Log,
-                BinaryLog = detail.BinaryLog ?? context.BinaryLog
+                BinaryLog = detail.BinaryLog ?? context.BinaryLog, Origins = detail.Origins ?? context.Origins,
+                BaseBranch = detail.BaseBranch ?? context.BaseBranch, SkipExclusions = detail.SkipExclusions ?? context.SkipExclusions
             };
         exception.Data[ContextKey] = context;
         return exception;
@@ -112,7 +130,7 @@ internal static class Diagnostics
         else if (codes.Any(x => x.StartsWith("CS", StringComparison.Ordinal)))
         {
             diagnosis = "C# compiler error";
-            hints.Add("Fix the compiler errors at the listed source locations, save the files, and retry the affected project.");
+            hints.Add(FixHint);
         }
         else if (root is UnauthorizedAccessException || root is Win32Exception { NativeErrorCode: 5 } || codes.Overlaps(["MSB3021", "MSB3027"]))
         {
@@ -139,14 +157,43 @@ internal static class Diagnostics
             hints.Add("Check the first error and the full report below. Run cultivate doctor if the failure concerns local configuration or build hooks.");
         if (errors.Count == 0 && context.ExitCode is not null and not 0)
             errors = lines.Skip(1).Where(x => !x.StartsWith("Full log:", StringComparison.Ordinal)).Take(5).Select(x => Shorten(x, 400)).ToList();
+        var (origins, unchanged) = Explain(errors, context, hints);
         var logs = new[] { context.Log, context.BinaryLog, context.RunDirectory is null ? null : Path.Combine(context.RunDirectory, "plan.json") }
             .OfType<string>().Where(File.Exists).Distinct(Files.Comparer).ToList();
         var summary = context.ExitCode is { } exit && exit != 0 ? $"{Path.GetFileName(context.Tool ?? "Command")} exited with code {exit}." :
             Shorten(lines.FirstOrDefault() ?? exception.GetType().Name, 400);
         return new($"{context.Stage.ToUpperInvariant()} FAILED", summary, diagnosis, context, errors, hints, logs)
         {
-            LoggingError = context.LoggingError
+            LoggingError = context.LoggingError, Origins = origins, Unchanged = unchanged
         };
+    }
+
+    /// <summary>
+    /// Says which listed compiler errors are on lines the deployed version did not change. When every located error is, the project
+    /// probably fails on its base branch too, so the hint to fix it here gives way to one about the base branch and deploying without it.
+    /// Cultivate never built the base branch, so it says only what it knows.
+    /// </summary>
+    private static (List<string> Origins, bool Unchanged) Explain(List<string> errors, FailureContext context, List<string> hints)
+    {
+        if (context.Origins is not { Count: > 0 } known) return ([], false);
+        var located = errors.Select(error => Located.Match(error)).Where(match => match.Success)
+            .Select(match => known.FirstOrDefault(origin => Files.Comparer.Equals(origin.File, match.Groups["file"].Value.Trim()) &&
+                origin.Line.ToString() == match.Groups["line"].Value)).ToList();
+        var branch = context.BaseBranch ?? "the base branch";
+        var unchanged = located.OfType<ErrorOrigin>().Where(origin => !origin.Changed).Distinct().ToList();
+        var all = located.Count != 0 && located.All(origin => origin is { Changed: false });
+        if (all)
+        {
+            var project = context.Project ?? "this project";
+            hints.Remove(FixHint);
+            hints.Add($"Every listed error is on a line this version did not change, so {project} probably does not compile on {branch} either " +
+                $"(Cultivate did not build {branch} to check). It needs fixing there, unless your changes elsewhere caused these errors.");
+            if (context.SkipExclusions is { Count: > 0 } skip)
+                hints.Add($"To deploy the rest without {project}, accept the terminal UI's offer to deploy without it, or add " +
+                    string.Join(" ", skip.Select(path => "--exclude " + (path.Contains(' ') ? $"\"{path}\"" : path))) +
+                    " to cultivate plan/activate (MCP: the same paths in exclude).");
+        }
+        return (unchanged.Select(origin => $"Not from your changes: {origin.File} line {origin.Line} is unchanged from {branch}.").ToList(), all);
     }
 
     internal static FailureReport Record(Exception exception, string stage = "Operation", string? directory = null)
