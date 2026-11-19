@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.2.0 — 2026-11-19
+
 - Fix: building release files or activating a deployment no longer stops with "Incompatible input DLLs" when two of the projects it
   builds use different copies of the same DLL (for example `BusinessLogic.dll` 6.29.0 from a package and an older build in a sibling
   repository). Each project now compiles against its own references, as in Visual Studio, and can no longer silently pick up another
