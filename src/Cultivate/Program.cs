@@ -36,6 +36,8 @@ internal static class Program
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
           doctor                                  Check prerequisites, hooks, and settings
+          mcp [--read-only]                       Serve Cultivate's tools to coding agents over MCP (stdio);
+                                                  --read-only leaves out activate and restore
           self-test                               Run fixture-only tests (never touches a real webfarm)
           version                                 Show the installed version
 
@@ -61,6 +63,7 @@ internal static class Program
                     Console.WriteLine(Help);
                     return 0;
                 case "doctor": return await Doctor.Run();
+                case "mcp": return await McpServer.Run(args.Contains("--read-only"));
                 case "setup": return await Setup.Run(args);
                 case "update": return await Updater.Run(args);
                 case "update-apply": return Updater.ApplyCommand(args);

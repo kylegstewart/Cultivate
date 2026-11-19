@@ -5,6 +5,13 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: `cultivate mcp` serves Cultivate to coding agents (Claude Code, Codex, T3 Code) as a Model Context Protocol
+  server over stdio. Agents can list worktrees and ticket workspaces, preview a plan, build only the changed projects
+  without deploying (compile errors come back with file, line, code and project), activate, request the site, check
+  status and restore, with progress for long steps. Activate and restore need `confirm: true`, an activation is
+  one-time unless automatic updates are asked for, and only one runs at a time. `cultivate mcp --read-only` leaves out
+  activate and restore so an agent cannot change the webfarm.
+
 ## 1.1.24 — 2026-11-17
 
 - Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to

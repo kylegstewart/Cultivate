@@ -5,7 +5,8 @@ namespace Cultivate;
 
 internal sealed class Pipeline(Settings settings, GitRepository git, Bridge bridge)
 {
-    public async Task<DeploymentState> Activate(Plan plan, Action<string> progress, bool watch = true, bool workerUpdate = false)
+    public async Task<DeploymentState> Activate(Plan plan, Action<string> progress, bool watch = true, bool workerUpdate = false,
+        CancellationToken cancel = default)
     {
         var run = Path.Combine(Files.Home, "Runs", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8]);
         string? snapshot = null;
@@ -60,6 +61,8 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             stage = "Source validation";
             if (await LibraryLoop.Fingerprint(git, plan.Target, LibraryLoop.Sources(plan)) != plan.Fingerprint)
                 throw new InvalidOperationException("The selected source changed during the build. Nothing was deployed. Preview again.");
+            // Cancelling stops only before the journaled deploy starts; once it starts, the activation always finishes.
+            cancel.ThrowIfCancellationRequested();
             stage = "Deploy";
             progress("Deploying the verified set; journaling originals for restoration");
             var result = await bridge.Call("Deploy", new
