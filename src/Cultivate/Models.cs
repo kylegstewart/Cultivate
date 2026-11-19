@@ -85,6 +85,8 @@ internal sealed class Settings
     /// <summary>Primary checkouts of the library repositories whose worktrees can be built and deployed with a MyMeyer version.
     /// Null until configured, so it is discovered; an empty list deliberately configures none.</summary>
     public List<string>? LibraryRepositories { get; set; }
+    /// <summary>Days a worktree must go unused before Clean up offers to delete it, when deleting it loses nothing.</summary>
+    public int CleanupDays { get; set; } = 14;
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
@@ -160,6 +162,7 @@ internal sealed class Settings
             problems.Add("StateRoot must be an absolute folder for the deployment journal and backups.");
         if (!string.IsNullOrWhiteSpace(SiteUrl) && !(Uri.TryCreate(SiteUrl, UriKind.Absolute, out var site) && site.Scheme is "http" or "https"))
             problems.Add("SiteUrl must be the http or https address of your dev site, for example https://mywebfarm-dev02.example.com/.");
+        if (CleanupDays < 1) problems.Add("CleanupDays must be 1 or more.");
         return problems;
     }
 

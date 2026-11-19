@@ -58,6 +58,7 @@ internal static class Watcher
         var log = Path.Combine(Files.Home, "Logs", "watch.log");
         Directory.CreateDirectory(Path.GetDirectoryName(log)!);
         var launchedFrom = ExecutableStamp();
+        var nextCleanup = DateTime.UtcNow;
         while (true)
         {
             var state = await bridge.Status();
@@ -70,6 +71,12 @@ internal static class Watcher
                 using var successor = Spawn(token, workerSettings);
                 await File.AppendAllTextAsync(log, $"{DateTime.Now:O} Cultivate was updated; worker {Environment.ProcessId} handed over to {successor.Id}\n");
                 return;
+            }
+            // The worker outlives the terminal for days and its updates add most runs; the pass itself runs at most once a day.
+            if (DateTime.UtcNow >= nextCleanup)
+            {
+                nextCleanup = DateTime.UtcNow.AddHours(1);
+                _ = Task.Run(() => CultivateFiles.Automatic(settings));
             }
             var target = new Target(state.Branch, string.IsNullOrEmpty(state.SourceRoot) ? null : state.SourceRoot, state.SourceRef);
             try

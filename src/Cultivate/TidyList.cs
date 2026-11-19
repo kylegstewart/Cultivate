@@ -18,6 +18,8 @@ internal sealed record TidyGuard(DeploymentState? State, string CurrentFolder, s
     {
         if (checkout.Primary) return ("This is the repository's main checkout, which is never deleted.", "main");
         if (State?.Active == true && Inside(checkout.Path, State.SourceRoot)) return ("The active webfarm deployment runs from this worktree.", "live");
+        if (State?.Active == true && State.Libraries.Any(library => Inside(checkout.Path, library.Worktree)))
+            return ("The active webfarm deployment builds a library from this worktree.", "live");
         if (Inside(checkout.Path, Program)) return ("Cultivate is running from this worktree.", "in use");
         if (Inside(checkout.Path, CurrentFolder)) return ("This terminal's current folder is inside this worktree.", "in use");
         if (checkout.Locked) return ("Git has this worktree locked. Unlock it with git worktree unlock to delete it here.", "locked");

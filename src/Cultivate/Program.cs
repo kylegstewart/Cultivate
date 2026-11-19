@@ -26,12 +26,16 @@ internal static class Program
                                                   Request the dev site until it answers and report errors
           tickets                                 List each ticket's worktrees across repositories (JSON)
           worktrees                               List every worktree with its size and age (JSON)
+          cleanup [--yes] [--worktrees] [--days N]
+                                                  List Cultivate's old files and worktrees unused for N days
+                                                  that lose nothing when deleted (JSON); --yes removes the files,
+                                                  and with --worktrees also those worktrees (branches are kept)
           setup                                   Configure interactively, or pass any of:
                 [--repository PATH] [--webfarm PATH] [--base-branch NAME]
                 [--mapping-assembly PATH] [--msbuild PATH] [--watch true|false]
                 [--worktrees PATH] [--site-url URL] [--warmup true|false]
                 [--sql-mirror PATH] [--stop-legacy-watcher true|false]
-                [--library-repositories PATH;PATH|none]
+                [--library-repositories PATH;PATH|none] [--cleanup-days N]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
@@ -111,6 +115,7 @@ internal static class Program
                 case "warmup": return await Warmup.Command(settings, args);
                 case "tickets": return await TicketWorkspaces.Command(settings, git, args);
                 case "worktrees": return await WorktreeTidy.Command(settings, git, args);
+                case "cleanup": return await CleanupCommand.Run(settings, git, bridge, args);
                 case "restore":
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Restoration requires --yes or the interactive menu.");
                     Print(await bridge.Call("Restore"));
