@@ -115,6 +115,7 @@ internal static partial class SelfTest
         CheckWarmupHistory(home);
         CheckSnakeGame();
         CheckWarmupScreen(home);
+        CheckActivationScreen(home);
         await CheckWarmupCommands(home);
     }
 
@@ -523,6 +524,147 @@ internal static partial class SelfTest
             }
             var result = screen.Show(LiveConsole(output), Poll, finished.Task, cancel, Clock, Wait);
             Check(result == ready && !cancel.IsCancellationRequested, "Esc in the game after the site finished returns its result");
+        }
+    }
+
+    private static void CheckActivationScreen(string home)
+    {
+        var best = Path.Combine(home, "warmup", "activation-snake.json");
+        static ConsoleKeyInfo Key(char character, ConsoleKey key) => new(character, key, false, false, false);
+        static object?[] Type(string word) => word.Select(character => (object?)Key(character, Enum.Parse<ConsoleKey>(char.ToUpperInvariant(character).ToString()))).ToArray();
+        static object?[] Idle(int passes) => new object?[passes];
+        // Keys in order, actions run between them, and null ends one pass of the screen's loop; nested arrays are flattened.
+        static Queue<object?> Steps(params object?[] steps) => new(steps.SelectMany(step => step as object?[] ?? [step]));
+        static ConsoleKeyInfo? Poll(Queue<object?> script)
+        {
+            while (script.Count != 0)
+            {
+                var next = script.Dequeue();
+                if (next is not Action action) return (ConsoleKeyInfo?)next;
+                action();
+            }
+            throw new InvalidOperationException("TEST FAILED: the activation screen kept reading keys after its script ended");
+        }
+        var escape = Key('\u001b', ConsoleKey.Escape);
+        double clock = 0;
+        TimeSpan Clock() => TimeSpan.FromMilliseconds(clock);
+        void Wait(TimeSpan _) => clock += 20;
+        var deployed = new DeploymentState { Updated = [new UpdatedFile(@"bin\MiscApps.dll", UpdatedFile.Synced)] };
+
+        var fresh = new WarmupScreen(best);
+        var stageLines = Capture(fresh.Render(80, 24), 80, 24).Split('\n');
+        Check(stageLines.Length == 1 && stageLines[0].EndsWith(" Preparing activation...") && fresh.GameStatus() == "Preparing activation...",
+            "the activation shows a spinner and its stage on one line, as the status display did");
+        fresh.WarmUp(FixtureSite, TimeSpan.FromSeconds(60));
+        var warming = Capture(fresh.Render(80, 24), 80, 24);
+        Check(fresh.Stage is null && warming.Contains("DEV SITE WARM-UP") && warming.Contains(FixtureSite.ToString()) &&
+            warming.Contains("usually ready in about 60 s"), "after the deployment the same screen shows the warm-up's progress as before");
+
+        using (var output = new StringWriter())
+        {
+            var screen = new WarmupScreen(best);
+            var activation = new TaskCompletionSource<DeploymentState>();
+            var script = Steps(Idle(3),
+                new Action(() => Check(output.ToString().Contains("Preparing activation...") && !screen.Playing, "the activation starts with its first stage")),
+                new Action(() => screen.ReportStage("Building MiscApps.csproj")),
+                escape, Idle(6),
+                new Action(() => Check(!activation.Task.IsCompleted && output.ToString().Contains("Building MiscApps.csproj"),
+                    "Esc during the build stops nothing, and the stage follows the pipeline's messages")),
+                Type("sna"), new Action(() => activation.SetResult(deployed)), Type("k"), null, Type("ex"), null);
+            var result = screen.Activate(LiveConsole(output), () => Poll(script), activation.Task, _ => true, Clock, Wait);
+            Check(result == deployed && !screen.Playing && script.Count == 0,
+                "a finished activation returns at once when the game is closed, and keys typed meanwhile are dropped");
+            screen.HandleKey(Key('e', ConsoleKey.E), 80, 24);
+            Check(!screen.Playing, "a secret word partly typed during the build does not carry over");
+            Check(!output.ToString().Contains("GARDEN") && !output.ToString().Contains("snake", StringComparison.OrdinalIgnoreCase),
+                "the activation gives no hint of the game");
+        }
+
+        using (var output = new StringWriter())
+        using (var warmOutput = new StringWriter())
+        using (var cancel = new CancellationTokenSource())
+        {
+            var screen = new WarmupScreen(best, _ => 0);
+            var activation = new TaskCompletionSource<DeploymentState>();
+            SnakeGame? game = null;
+            void EatOneSeed()
+            {
+                var board = screen.Game!;
+                while (board.Score == 0 && !board.Over)
+                {
+                    var (x, y) = board.Body[0];
+                    screen.HandleKey(Key('\0', board.Seed.Y < y ? ConsoleKey.UpArrow : board.Seed.X < x ? ConsoleKey.LeftArrow : ConsoleKey.DownArrow), 100, 30);
+                    screen.Step();
+                }
+                screen.HandleKey(Key('\0', ConsoleKey.DownArrow), 100, 30);
+            }
+            var script = Steps(Type("snake"), null, Idle(2),
+                new Action(() => screen.ReportStage("Building MiscApps.csproj")), Idle(15),
+                new Action(() =>
+                {
+                    game = screen.Game;
+                    Check(screen.Playing && game is not null && output.ToString().Contains("GARDEN SNAKE") && output.ToString().Contains("Building MiscApps.csproj"),
+                        "typing snake during the build starts the game, its status line showing the pipeline's stage");
+                    EatOneSeed();
+                }),
+                new Action(() => screen.ReportStage("Deploying 4 files to the webfarm")), Idle(15),
+                new Action(() => Check(output.ToString().Contains("Deploying 4 files to the webfarm"), "the game's status line follows the pipeline's messages")),
+                new Action(() => activation.SetResult(deployed)), null, null);
+            var result = screen.Activate(LiveConsole(output), () => Poll(script), activation.Task, _ => true, Clock, Wait);
+            Check(result == deployed && screen.Playing && screen.Game == game && game is { Score: 1, Over: false },
+                "a game open when the deployment finishes stays open for the warm-up");
+            var body = game!.Body.ToList();
+            screen.WarmUp(FixtureSite, null);
+            Check(screen.Game == game && game.Body.SequenceEqual(body) && screen.GameStatus().StartsWith("warming up, "),
+                "moving on to the warm-up keeps the vine and its score, and the status line turns to the warm-up");
+            var finished = new TaskCompletionSource<WarmupResult>();
+            var ready = new WarmupResult(FixtureSite.ToString(), WarmupOutcome.Ready, true, 200, 48, 2, "The site is ready.");
+            script = Steps(Idle(3),
+                new Action(() => Check(screen.Playing && screen.Game == game && game.Score == 1 && warmOutput.ToString().Contains("seeds 1") &&
+                    warmOutput.ToString().Contains("warming up,"), "the same game carries on through the warm-up with its score")),
+                new Action(() => finished.SetResult(ready)), Idle(15),
+                new Action(() => Check(warmOutput.ToString().Contains("site is ready (48 s), Esc returns"), "the status line ends with the warm-up's result")),
+                escape);
+            var warmed = screen.Show(LiveConsole(warmOutput), () => Poll(script), finished.Task, cancel, Clock, Wait);
+            Check(warmed == ready && !screen.Playing && SnakeGame.LoadBest(best) == 1, "leaving the game returns the warm-up's result and keeps the best score");
+        }
+
+        using (var output = new StringWriter())
+        {
+            var screen = new WarmupScreen(best);
+            var activation = new TaskCompletionSource<DeploymentState>();
+            var script = Steps(Type("snake"), null, Idle(2), escape, Idle(3),
+                new Action(() => Check(!screen.Playing && screen.Game is null && !activation.Task.IsCompleted, "Esc during the build leaves the game")),
+                new Action(() => screen.ReportStage("Deploying 4 files to the webfarm")), Idle(6),
+                new Action(() => Check(output.ToString().Contains("Deploying 4 files to the webfarm"), "the activation carries on and shows its stage again")),
+                new Action(() => activation.SetResult(deployed)), null, null);
+            Check(screen.Activate(LiveConsole(output), () => Poll(script), activation.Task, _ => true, Clock, Wait) == deployed && script.Count == 0,
+                "an activation whose game was left finishes as usual");
+        }
+
+        using (var output = new StringWriter())
+        {
+            var screen = new WarmupScreen(best);
+            var activation = new TaskCompletionSource<DeploymentState>();
+            var script = Steps(Type("snake"), null, new Action(() => activation.SetResult(deployed)), Idle(15),
+                new Action(() => Check(screen.Playing && output.ToString().Contains("deployment complete, Esc returns"),
+                    "with no warm-up to follow, the game stays open after the deployment and says it is done")),
+                escape, null, null);
+            Check(screen.Activate(LiveConsole(output), () => Poll(script), activation.Task, _ => false, Clock, Wait) == deployed && !screen.Playing,
+                "Esc then leaves the game for the deployment summary");
+        }
+
+        using (var output = new StringWriter())
+        {
+            var screen = new WarmupScreen(best);
+            var activation = new TaskCompletionSource<DeploymentState>();
+            var script = Steps(Type("snake"), null, Idle(2),
+                new Action(() => activation.SetException(new IOException("MSBuild failed building MiscApps."))), null, null);
+            IOException? failure = null;
+            try { screen.Activate(LiveConsole(output), () => Poll(script), activation.Task, _ => true, Clock, Wait); }
+            catch (IOException exception) { failure = exception; }
+            Check(failure?.Message == "MSBuild failed building MiscApps." && !screen.Playing && screen.Game is null && script.Count == 0,
+                "a failed activation closes the game at once and surfaces its failure");
         }
     }
 

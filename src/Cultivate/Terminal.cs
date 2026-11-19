@@ -333,14 +333,14 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             if (!AnsiConsole.Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
             if (!StopLegacyWatcher()) continue;
             var watch = action == "Activate and automatically update saved changes";
-            var activated = await AnsiConsole.Status().StartAsync("Preparing activation...", context =>
-                new Pipeline(settings, git, bridge).Activate(plan, message => context.Status(Escape(message)), watch));
+            var screen = new WarmupScreen(Warmup.SnakePath);
+            var activated = Warmup.Activate(settings, screen, report => new Pipeline(settings, git, bridge).Activate(plan, report, watch));
             AnsiConsole.Write(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]VERSION ACTIVATED[/]\nRefresh your development site to use the selected version."),
                 "DEPLOYMENT COMPLETE", TerminalStyle.Accent));
             AnsiConsole.Write(UpdatedFiles(activated, settings.WebfarmRoot));
             AnsiConsole.MarkupLine(watch ? "[grey]Saved changes update automatically after successful builds; closing this menu keeps updates running.[/]" :
                 "[grey]This is a one-time deployment. Later saves will not be published.[/]");
-            await Warmup.AfterActivation(settings, activated);
+            await Warmup.AfterActivation(settings, activated, screen);
             Pause();
             return;
         }

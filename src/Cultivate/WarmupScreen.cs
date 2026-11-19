@@ -15,7 +15,12 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
     private static readonly Color Vine = Color.FromHex("#82C68B");
     private readonly Func<int, int> random = random ?? Random.Shared.Next;
     private WarmupProgress progress = new(0, "requesting the site");
+    private string? stage;
     private string typed = "";
+
+    /// <summary>A screen that starts with the activation's stage; <see cref="WarmUp"/> names the site once the deployment is done.</summary>
+    internal WarmupScreen(string bestPath, Func<int, int>? random = null) : this(null!, null, bestPath, random) => stage = "Preparing activation...";
+
     internal TimeSpan Elapsed { get; set; }
     /// <summary>Set once the probe finishes; the game keeps going until Esc.</summary>
     internal WarmupResult? Result { get; set; }
@@ -25,6 +30,20 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
     internal WarmupProgress Progress => Volatile.Read(ref progress);
 
     internal void Report(WarmupProgress update) => Volatile.Write(ref progress, update);
+
+    /// <summary>What the activation is doing, while it runs; null once the warm-up begins.</summary>
+    internal string? Stage => Volatile.Read(ref stage);
+
+    internal void ReportStage(string activating) => Volatile.Write(ref stage, activating);
+
+    /// <summary>Moves on from the activation to warming up <paramref name="site"/>, keeping the game as it is.</summary>
+    internal WarmupScreen WarmUp(Uri site, TimeSpan? expected)
+    {
+        url = site;
+        estimate = expected;
+        Volatile.Write(ref stage, null);
+        return this;
+    }
 
     internal static (int Columns, int Rows) BoardSize(int width, int height) => (Math.Min(30, (width - 4) / 2), Math.Min(18, height - 7));
 
@@ -53,9 +72,7 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
     {
         if (key.Key == ConsoleKey.Escape)
         {
-            Keep();
-            Playing = false;
-            Game = null;
+            Close();
             return Result is not null;
         }
         if (Game is null) return false;
@@ -97,8 +114,15 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
         if (Best > SnakeGame.LoadBest(bestPath)) SnakeGame.SaveBest(bestPath, Best);
     }
 
-    /// <summary>The warm-up's state for the game's status line.</summary>
-    internal string GameStatus() => Result switch
+    private void Close()
+    {
+        Keep();
+        Playing = false;
+        Game = null;
+    }
+
+    /// <summary>The activation's or the warm-up's state for the game's status line.</summary>
+    internal string GameStatus() => Stage ?? Result switch
     {
         null => $"warming up, {Elapsed.TotalSeconds:0} s",
         { Ready: true } => $"site is ready ({Result.Seconds:0} s), Esc returns",
@@ -106,7 +130,17 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
         _ => $"still warming after {Result.Seconds:0} s, Esc returns"
     };
 
-    internal IRenderable Render(int width, int height) => Playing ? RenderGame(width, height) : RenderProgress(width);
+    internal IRenderable Render(int width, int height) =>
+        Playing ? RenderGame(width, height) : Stage is { } activating ? RenderStage(activating) : RenderProgress(width);
+
+    /// <summary>The activation's stage beside a spinner, as the status display that used to show it drew it.</summary>
+    private Paragraph RenderStage(string activating)
+    {
+        var spinner = Spinner.Known.Default;
+        var line = new Paragraph(spinner.Frames[(int)(Elapsed.Ticks / spinner.Interval.Ticks % spinner.Frames.Count)], new Style(Color.Yellow));
+        line.Append(" " + activating);
+        return line;
+    }
 
     private IRenderable RenderProgress(int width)
     {
@@ -220,7 +254,44 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
     /// Esc while waiting cancels <paramref name="cancel"/> and returns the probe's skipped result.
     /// </summary>
     internal WarmupResult Show(IAnsiConsole console, Func<ConsoleKeyInfo?> pollKey, Task<WarmupResult> probe, CancellationTokenSource cancel,
-        Func<TimeSpan> clock, Action<TimeSpan> wait)
+        Func<TimeSpan> clock, Action<TimeSpan> wait) => Run(console, pollKey, clock, wait, close =>
+    {
+        if (probe.IsCompleted) Result ??= probe.GetAwaiter().GetResult();
+        if (close && Result is null)
+        {
+            cancel.Cancel();
+            Result = probe.GetAwaiter().GetResult();
+        }
+        return close || !Playing ? Result : null;
+    });
+
+    /// <summary>
+    /// Draws the activation's stage until <paramref name="activation"/> finishes. Esc only leaves the game: the build and deployment always
+    /// run to the end. A failure closes the game at once and is rethrown. After a success an open game stays open, on into the warm-up when
+    /// <paramref name="warmsUp"/> says one follows, otherwise until Esc. Keys left unread are dropped so they reach no later prompt.
+    /// </summary>
+    internal DeploymentState Activate(IAnsiConsole console, Func<ConsoleKeyInfo?> pollKey, Task<DeploymentState> activation,
+        Func<DeploymentState, bool> warmsUp, Func<TimeSpan> clock, Action<TimeSpan> wait)
+    {
+        Run(console, pollKey, clock, wait, _ =>
+        {
+            if (!activation.IsCompleted) return null;
+            if (!activation.IsCompletedSuccessfully || !Playing || warmsUp(activation.Result)) return activation;
+            ReportStage("deployment complete, Esc returns");
+            return null;
+        });
+        typed = "";
+        while (pollKey() is not null) { }
+        if (!activation.IsCompletedSuccessfully) Close();
+        return activation.GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// Draws until <paramref name="settle"/> gives a result, polling keys without blocking so the screen keeps moving. It runs after each
+    /// pass's keys, told whether one of them asked to close the screen.
+    /// </summary>
+    private T Run<T>(IAnsiConsole console, Func<ConsoleKeyInfo?> pollKey, Func<TimeSpan> clock, Action<TimeSpan> wait, Func<bool, T?> settle)
+        where T : class
     {
         var start = clock();
         return console.Live(Render(console.Profile.Width, console.Profile.Height))
@@ -235,20 +306,14 @@ internal sealed class WarmupScreen(Uri url, TimeSpan? estimate, string bestPath,
                     var now = clock();
                     var (width, height) = (console.Profile.Width, console.Profile.Height);
                     Elapsed = now - start;
-                    if (probe.IsCompleted) Result ??= probe.GetAwaiter().GetResult();
                     var changed = false;
-                    while (pollKey() is { } key)
+                    var close = false;
+                    while (!close && pollKey() is { } key)
                     {
                         changed = true;
-                        if (!HandleKey(key, width, height)) continue;
-                        if (Result is null)
-                        {
-                            cancel.Cancel();
-                            Result = probe.GetAwaiter().GetResult();
-                        }
-                        return Result;
+                        close = HandleKey(key, width, height);
                     }
-                    if (!Playing && Result is not null) return Result;
+                    if (settle(close) is { } done) return done;
                     Fit(width, height);
                     if (Game is not null && now - lastStep >= Game.Interval)
                     {

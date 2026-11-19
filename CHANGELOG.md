@@ -5,6 +5,9 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: the terminal UI shows an activation's build and deployment stages on the same screen as the site warm-up
+  that follows. The build and deployment run as before, and Esc never cancels them.
+
 ## 1.1.24 — 2026-11-17
 
 - Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to
