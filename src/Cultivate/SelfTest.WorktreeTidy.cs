@@ -296,17 +296,73 @@ internal static partial class SelfTest
             var screen = new TidyList([big, medium, live], guard, () => now);
             screen.SetSize(medium.Path, new(7L << 30, null), now);
             var keys = new Queue<ConsoleKeyInfo?>([null, new(' ', ConsoleKey.Spacebar, false, false, false), new('\0', ConsoleKey.Delete, false, false, false)]);
-            Check(screen.Show(LiveConsole(output), () => keys.Dequeue()) == TidyCommand.Review &&
+            Check(screen.Show(LiveConsole(output), _ => keys.Dequeue()) == TidyCommand.Review &&
                 screen.Selected.Select(row => row.Path).SequenceEqual([big.Path]) && output.ToString().Contains("7.0 GB"),
                 "the screen shows saved sizes, waits for keys, and asks to review the selection");
         }
         using (var output = new StringWriter())
         {
             var screen = new TidyList([big], guard, () => now);
-            Check(screen.Show(LiveConsole(output), () => new('\0', ConsoleKey.F5, false, false, false)) == TidyCommand.Rescan,
+            Check(screen.Show(LiveConsole(output), _ => new('\0', ConsoleKey.F5, false, false, false)) == TidyCommand.Rescan,
                 "F5 asks to scan every worktree again");
-            Check(screen.Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false)) == TidyCommand.Back,
+            Check(screen.Show(LiveConsole(output), _ => new('\u001b', ConsoleKey.Escape, false, false, false)) == TidyCommand.Back,
                 "Esc leaves the tidy screen without deleting anything");
+        }
+        CheckTidyPainting(now, guard);
+    }
+
+    private static void CheckTidyPainting(DateTimeOffset now, TidyGuard guard)
+    {
+        var checkouts = Enumerable.Range(0, 200).Select(index => new Checkout(index < 96 ? "MyMeyer" : $"Repo{index % 9}", @"C:\fixture\repo",
+            $@"C:\fixture\worktrees\w{index:000}", $"{30000 + index}", "0123456789abcdef", false, false, false)).ToList();
+        var list = new TidyList(checkouts, guard, () => now);
+        foreach (var (checkout, index) in checkouts.Select((checkout, index) => (checkout, index)))
+            list.SetScan(new(checkout.Path, checkout.Head, (index + 1L) << 24, now.AddDays(-index), new(index % 3, 0, now.AddDays(-index), "Work"), now));
+        ConsoleKeyInfo Key(ConsoleKey key) => new('\0', key, false, false, false);
+        static int Paints(string output) => output.Split("\u001b[?2026h").Length - 1;
+        static int[] Lines(string paint) => System.Text.RegularExpressions.Regex.Matches(paint, @"\u001b\[(\d+);1H")
+            .Select(match => int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+
+        var matches = list.Matches;
+        foreach (var key in new[] { ConsoleKey.DownArrow, ConsoleKey.PageDown, ConsoleKey.End, ConsoleKey.UpArrow, ConsoleKey.Home, ConsoleKey.Spacebar })
+            list.HandleKey(Key(key), 10);
+        Check(ReferenceEquals(matches, list.Matches) && list.Selected.Count == 1,
+            "moving the highlight and selecting never filters or sorts the list again");
+        list.HandleKey(Key(ConsoleKey.Spacebar), 10);
+
+        using (var output = new StringWriter())
+        {
+            var keys = new Queue<ConsoleKeyInfo?>([null, Key(ConsoleKey.DownArrow), null, Key(ConsoleKey.Escape)]);
+            Check(list.Show(LiveConsole(output), _ => keys.Dequeue()) == TidyCommand.Back && list.Index == 1, "the screen moves the highlight");
+            var paints = output.ToString().Split("\u001b[?2026h").Skip(1).Select(paint => paint.Split("\u001b[?2026l")[0]).ToArray();
+            var full = Lines(paints[0]);
+            var moved = Lines(paints[1]);
+            Check(paints.Length == 2 && full.SequenceEqual(Enumerable.Range(1, full.Length)) && full.Length is > 20 and <= 30,
+                "the first paint writes every line of the screen once, within the terminal's height");
+            Check(moved.Length is > 0 and <= 6 && moved.All(line => line < full.Length),
+                "moving the highlight rewrites only the rows and detail lines that changed, not the whole screen");
+        }
+        using (var output = new StringWriter())
+        {
+            list.HandleKey(Key(ConsoleKey.Home), 10);
+            var keys = new Queue<ConsoleKeyInfo?>([null, .. Enumerable.Repeat<ConsoleKeyInfo?>(Key(ConsoleKey.DownArrow), 30), null, Key(ConsoleKey.Escape)]);
+            Check(list.Show(LiveConsole(output), _ => keys.Dequeue()) == TidyCommand.Back && list.Index == 30 && Paints(output.ToString()) == 2,
+                "keys already queued, like a held arrow's repeats, are all handled before one paint");
+        }
+        using (var output = new StringWriter())
+        {
+            var console = LiveConsole(output);
+            var calls = 0;
+            ConsoleKeyInfo? Resize(int _)
+            {
+                if (++calls == 1) console.Profile.Width = 80;
+                return calls == 3 ? Key(ConsoleKey.Escape) : null;
+            }
+            list.Show(console, Resize);
+            var paints = output.ToString().Split("\u001b[?2026h").Skip(1).Select(paint => paint.Split("\u001b[?2026l")[0]).ToArray();
+            Check(paints.Length == 2 && Lines(paints[1]) is var lines && lines.SequenceEqual(Enumerable.Range(1, lines.Length)) &&
+                paints[1].Contains("review & delete") && !paints[0].Contains("review & delete"),
+                "a resized terminal is cleared and the whole screen painted again at the new width");
         }
     }
 

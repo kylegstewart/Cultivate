@@ -8,6 +8,10 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 - Improvement: the dev site address in the warm-up result is a link; Ctrl+click it in Windows Terminal to open the site.
 - Improvement: the terminal UI shows an activation's build and deployment stages on the same screen as the site warm-up
   that follows. The build and deployment run as before, and Esc never cancels them.
+- Improvement: Tidy worktrees responds to keys at once. Moving the highlight, paging, selecting, typing a search,
+  sorting and filtering now redraw only the lines that changed, in a single write, instead of the whole screen; a key
+  is picked up the moment it is pressed instead of on the next 20 ms check; and a held arrow key's repeats are handled
+  together, so the list stops where you let go.
 
 ## 1.1.24 — 2026-11-17
 

@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Spectre.Console;
@@ -30,9 +32,11 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
         foreach (var row in list.Rows)
             if (scans.TryGetValue(row.Path, out var scan)) list.SetScan(scan);
         await Scan(list, scans, Unscanned(list.Rows, scans));
+        // Console.Out writes in 256-character pieces; one write per paint keeps it fast and shows it whole.
+        using var frames = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16);
         while (true)
         {
-            switch (list.Show(AnsiConsole.Console, ReadKey))
+            switch (list.Show(AnsiConsole.Console, ReadKey, frames))
             {
                 case TidyCommand.Rescan:
                     await Scan(list, scans, list.Rows.ToList());
@@ -49,15 +53,28 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
         }
     }
 
-    private static ConsoleKeyInfo? ReadKey()
+    /// <summary>
+    /// The next key, waiting up to <paramref name="wait"/> milliseconds. It wakes as soon as input arrives instead of sleeping in steps,
+    /// which on Windows' 15.6 ms timer added up to 30 ms to every key. <see cref="Console.KeyAvailable"/> discards key releases and other
+    /// console events, so the wait does not spin on them.
+    /// </summary>
+    private static ConsoleKeyInfo? ReadKey(int wait)
     {
-        for (var waited = 0; waited < 200; waited += 20)
+        var until = Environment.TickCount64 + wait;
+        while (true)
         {
             if (Console.KeyAvailable) return Console.ReadKey(true);
-            Thread.Sleep(20);
+            var left = until - Environment.TickCount64;
+            if (left <= 0) return null;
+            WaitForSingleObject(GetStdHandle(-10), (uint)left);
         }
-        return null;
     }
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetStdHandle(int handle);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint WaitForSingleObject(nint handle, uint milliseconds);
 
     /// <summary>The worktrees a visit scans: ones with no saved scan, and ones whose HEAD has moved since. F5 scans every one again.</summary>
     internal static List<TidyRow> Unscanned(IEnumerable<TidyRow> rows, IReadOnlyDictionary<string, TidyScan> scans) =>
