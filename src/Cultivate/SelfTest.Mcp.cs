@@ -273,6 +273,13 @@ internal static partial class SelfTest
                     error["line"]?.GetValue<int>() == 1 && error["column"] is not null && error["project"]?.ToString() == @"Lib\McpLib.csproj" &&
                     error["message"]?.ToString().Contains("missingValue") == true && TextOf(failed).Contains("BUILD FAILED"),
                     "mcp build returns a compile error's file, line, code, message and project, without looking up frontend mappings");
+                Check(error?["changed"]?.GetValue<bool>() == true && !TextOf(failed).Contains("Not from your changes"),
+                    "mcp build marks a compile error on a line this version changed");
+                var excluded = Structured(await client.Call("plan", Arguments(("ticket", "4242"), ("exclude", new JsonArray(@"lib\value.cs")))));
+                var unknownExclusion = await client.Call("plan", Arguments(("ticket", "4242"), ("exclude", new JsonArray("Lib/Missing.cs"))));
+                Check(excluded["projects"]!.AsArray().Count == 0 && excluded["canDeploy"]!.GetValue<bool>() &&
+                    IsError(unknownExclusion) && TextOf(unknownExclusion).Contains("Not a changed file of 4242, so it cannot be excluded: Lib/Missing.cs"),
+                    "mcp plan takes exclude like the terminal UI and refuses a path that is not a changed file");
                 Check(Structured(await client.Call("last_failure"))["report"]?.ToString().Contains("BUILD FAILED") == true, "mcp last_failure returns the recorded diagnosis");
 
                 var unconfirmed = await client.Call("activate", Arguments(("ticket", "4242")));

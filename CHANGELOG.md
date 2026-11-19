@@ -5,6 +5,14 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: when a project fails to compile, the failure report now says which errors are on lines your version did not
+  change ("Not from your changes: ... line 19 is unchanged from master."). When every error is, it no longer tells you to fix them
+  here: it says the project probably does not compile on master either and how to deploy without it. In the terminal UI, after one
+  project fails to compile and the plan has other work, Cultivate offers (default No) to leave that project's changed code out
+  and return to the preview; its DLL on the webfarm stays as it is and its changed frontend files still deploy. `cultivate plan`
+  and `activate` take `--exclude PATH` (repeatable) with the same meaning as Choose files to deploy, and the MCP `plan`, `build`
+  and `activate` tools take an `exclude` list; MCP `build` errors carry `changed`.
+
 ## 1.1.26 — 2026-11-19
 
 - Feature: build a merged pull request's release files. `cultivate release --pr N` fetches the pull request and master from origin

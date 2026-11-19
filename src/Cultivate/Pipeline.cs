@@ -105,6 +105,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 Branch = plan.Target.Branch, Worktree = plan.Target.Worktree, Snapshot = snapshot, RunDirectory = run,
                 Log = Path.Combine(run, "build.log")
             });
+            await Explain(exception, plan);
             throw;
         }
         finally
@@ -112,6 +113,72 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             if (snapshot is not null && Directory.Exists(snapshot))
                 await git.Git(settings.RepositoryRoot, "worktree", "remove", "--force", snapshot);
         }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex HunkHeader =
+        new(@"^@@ -[0-9]+(?:,[0-9]+)? \+(?<start>[0-9]+)(?:,(?<count>[0-9]+))? @@", System.Text.RegularExpressions.RegexOptions.Multiline);
+
+    /// <summary>
+    /// After a changed project fails to compile, records on the failure whether this version changed each located error's line (the
+    /// baseline compared with the snapshot that was built) and the exclusions that would deploy the rest of the plan without that
+    /// project. It runs only on failure and must be called while the snapshot exists; any problem here leaves the original report as it was.
+    /// </summary>
+    internal async Task Explain(Exception exception, Plan plan)
+    {
+        try
+        {
+            var context = Diagnostics.Describe(exception).Context;
+            var project = plan.Projects.FirstOrDefault(x => Files.Comparer.Equals(x.RelativePath, context.Project));
+            if (context.Stage != "Build" || project is null || context.Snapshot is not { } snapshot || !Directory.Exists(snapshot)) return;
+            var messages = new List<string>();
+            for (var current = exception; current is not null; current = current.InnerException) messages.Add(current.Message);
+            var compileErrors = McpServer.CompileErrors(string.Join("\n", messages), snapshot)
+                .Where(error => error.Code.StartsWith("CS", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (compileErrors.Count == 0) return;
+            var origins = new List<ErrorOrigin>();
+            if (plan.Baseline.Length != 0)
+            {
+                var hunks = new Dictionary<string, List<(int Start, int Count)>?>(Files.Comparer);
+                foreach (var (file, line) in compileErrors.Where(error => error.File is not null && error.Line is not null && !Path.IsPathRooted(error.File))
+                    .Select(error => (error.File!, error.Line!.Value)).Distinct())
+                {
+                    var change = plan.Changes.FirstOrDefault(change => Files.Comparer.Equals(change.Path, file.Replace('\\', '/')));
+                    if (change is null || plan.ExcludedPaths.Contains(change.Path, Files.Comparer))
+                    {
+                        origins.Add(new(file, line, false));
+                        continue;
+                    }
+                    if (!hunks.TryGetValue(change.Path, out var ranges))
+                    {
+                        var literal = ":(literal)" + change.Path;
+                        // A file the baseline lacks is new, so every line of it is this version's.
+                        ranges = (await git.Git(snapshot, "ls-tree", "--name-only", plan.Baseline, "--", literal)).Length == 0 ? null
+                            : HunkHeader.Matches(await git.Git(snapshot, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", plan.Baseline, "--", literal))
+                                .Select(match => (int.Parse(match.Groups["start"].Value), match.Groups["count"].Success ? int.Parse(match.Groups["count"].Value) : 1)).ToList();
+                        hunks[change.Path] = ranges;
+                    }
+                    // A pure deletion touches the lines on either side of it.
+                    origins.Add(new(file, line, ranges is null || ranges.Any(range => range.Count == 0
+                        ? line == range.Start || line == range.Start + 1 : line >= range.Start && line < range.Start + range.Count)));
+                }
+            }
+            var selected = plan.Changes.Where(change => !plan.ExcludedPaths.Contains(change.Path, Files.Comparer)).ToList();
+            var compiled = selected.Where(Planner.IsCompiledInput).ToList();
+            var owned = compiled.Where(change => project.Owns(change, compiled)).ToList();
+            var others = plan.Projects.Where(other => other != project).ToList();
+            // Leaving the project out must not change another project's build or leave nothing to deploy, and a project the baseline
+            // lacks has no DLL on the webfarm to fall back on.
+            var skippable = owned.Count != 0 && !owned.Any(change => others.Any(other => other.Owns(change, compiled))) &&
+                (others.Count != 0 || plan.Frontend.Count != 0 || plan.Libraries.Any(library => library.Included)) && plan.Baseline.Length != 0 &&
+                (await git.Git(settings.RepositoryRoot, "ls-tree", "--name-only", plan.Baseline, "--", ":(literal)" + project.RelativePath.Replace('\\', '/'))).Length != 0;
+            Diagnostics.Attach(exception, new(context.Stage)
+            {
+                Origins = origins.Count == 0 ? null : origins,
+                BaseBranch = plan.Target.PullRequest?.BaseBranch is { Length: > 0 } baseBranch ? baseBranch : settings.BaseBranch,
+                SkipExclusions = skippable ? plan.ExcludedPaths.Concat(owned.Select(change => change.Path)).Distinct(Files.Comparer).Order(Files.Comparer).ToList() : null
+            });
+        }
+        catch (Exception analysis) when (analysis is not OutOfMemoryException) { }
     }
 
     /// <param name="support">For a release: every project to build in dependency order, including the unchanged projects the plan's projects

@@ -362,7 +362,29 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             if (!StopLegacyWatcher()) continue;
             var watch = action == "Activate and automatically update saved changes";
             var screen = new WarmupScreen(Warmup.SnakePath);
-            var activated = Warmup.Activate(settings, screen, report => new Pipeline(settings, git, bridge).Activate(plan, report, watch));
+            DeploymentState activated;
+            try { activated = Warmup.Activate(settings, screen, report => new Pipeline(settings, git, bridge).Activate(plan, report, watch)); }
+            catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception or
+                System.Xml.XmlException or System.Text.Json.JsonException)
+            {
+                var report = ShowError(exception, "Activation");
+                if (SkipOffer.Of(plan, report) is not { } skip || Select(skip.Title, SkipOffer.Actions) != SkipOffer.Accept)
+                {
+                    Pause();
+                    return;
+                }
+                excluded = skip.Exclusions;
+                var without = await AnsiConsole.Status().StartAsync($"Leaving {Escape(skip.Project.Assembly)} out and updating the plan...", _ =>
+                    skip.Plan(planner, target, libraries));
+                if (without is null)
+                {
+                    AnsiConsole.MarkupLine($"[red]Leaving out {Escape(skip.Project.RelativePath)}'s changed code did not remove it from the plan, so nothing was changed.[/]");
+                    Pause();
+                    return;
+                }
+                plan = without;
+                continue;
+            }
             AnsiConsole.Write(TerminalStyle.Card(new Markup($"[bold {TerminalStyle.Accent}]VERSION ACTIVATED[/]\nRefresh your development site to use the selected version."),
                 "DEPLOYMENT COMPLETE", TerminalStyle.Accent));
             AnsiConsole.Write(UpdatedFiles(activated, settings.WebfarmRoot));
@@ -420,12 +442,54 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         AnsiConsole.MarkupLine($"\n[{TerminalStyle.Gold}]Press any key[/] [{TerminalStyle.Muted}]to continue[/]");
         Console.ReadKey(true);
     }
-    internal static void ShowError(Exception exception, string stage = "Operation")
+    internal static FailureReport ShowError(Exception exception, string stage = "Operation")
     {
         var report = Diagnostics.Record(exception, stage);
         AnsiConsole.Write(TerminalStyle.Card(new Text(report.Text), report.Label, "#F0A3A3"));
+        return report;
     }
 
+}
+
+/// <summary>
+/// After one changed project fails to compile, the offer to deploy the rest of the plan without it: the changed compiled files it owns
+/// are excluded the way Choose files to deploy excludes them, and the developer confirms the new plan in the preview.
+/// </summary>
+internal sealed record SkipOffer(ProjectInfo Project, List<string> Exclusions, int CodeFiles, bool Unchanged)
+{
+    internal const string Accept = "Leave it out and preview again";
+    internal static IReadOnlyList<MenuAction> Actions { get; } =
+    [
+        new("No", "Return home without deploying anything."),
+        new(Accept, "Exclude its changed code files and show the new plan; nothing deploys until you confirm there.")
+    ];
+
+    /// <summary>The offer for <paramref name="report"/>, or null unless one project of <paramref name="plan"/> failed to compile and
+    /// leaving it out still deploys something.</summary>
+    internal static SkipOffer? Of(Plan plan, FailureReport report) =>
+        report.Context.SkipExclusions is { Count: > 0 } exclusions &&
+        plan.Projects.FirstOrDefault(project => Files.Comparer.Equals(project.RelativePath, report.Context.Project)) is { } failed
+            ? new(failed, exclusions.ToList(), exclusions.Count(path => !plan.ExcludedPaths.Contains(path, Files.Comparer)), report.Unchanged)
+            : null;
+
+    internal string Title
+    {
+        get
+        {
+            var name = Terminal.Escape(Project.Assembly);
+            return $"[bold]Deploy the rest without {name}?[/]{(Unchanged ? $" [{TerminalStyle.Gold}]Its errors are not from your changes.[/]" : "")}\n" +
+                $"[{TerminalStyle.Muted}]Its {CodeFiles} changed code file(s) are left out of this deployment and automatic updates, and {name}.dll " +
+                "on the webfarm stays as it is. Its changed frontend files still deploy, so their markup could run against that old DLL.[/]";
+        }
+    }
+
+    /// <summary>The plan without the project, or null when excluding its files did not take it out of the plan.</summary>
+    internal async Task<Plan?> Plan(Planner planner, Target target, IEnumerable<string> libraries,
+        Func<string, Task<Dictionary<string, string>>>? mapping = null)
+    {
+        var plan = await planner.Create(target, mapping, Exclusions, libraries);
+        return plan.Projects.Any(project => Files.Comparer.Equals(project.RelativePath, Project.RelativePath)) ? null : plan;
+    }
 }
 
 internal static class TerminalStyle
