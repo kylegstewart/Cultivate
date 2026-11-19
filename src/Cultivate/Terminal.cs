@@ -12,6 +12,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         new("Update my webfarm", "Browse versions and preview their changed files before deploying anything."),
         new("Open solution", "Open a repository's main solution, or a worktree or local branch with its changed source files."),
         new("Review a pull request", "Pick a GitHub pull request and preview its changes for your dev webfarm, without a branch or worktree."),
+        new(ReleaseScreen.Action, "Build a merged pull request's DLLs and changed files from master for the Code Release Manager."),
         new("Ticket workspaces", "See one ticket's worktrees, pull requests, and SQL files across every repository, and open them together."),
         new("Tidy worktrees", "Sort and filter every repository's worktrees by size and age, then delete the ones you choose."),
         new("Clean up", "Remove Cultivate's old build runs and logs, and review worktrees unused for weeks that have nothing to lose."),
@@ -90,9 +91,11 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             var chosen = new ActionPicker(actions).Show("What would you like to do?", AnsiConsole.Console, KeyScreen.ReadKey,
                 (_, _) => Home(status.IsCompletedSuccessfully ? status.Result : null, !status.IsCompletedSuccessfully, update, actions.Count), status);
             if (chosen?.Label == "Exit") return;
-            // Nothing acts on the deployment until its status is read; a failed read stops here, as it always has.
-            var state = status.IsCompleted ? await status : await AnsiConsole.Status().StartAsync("Reading the active deployment...", _ => status);
             var action = chosen!.Label;
+            // Nothing acts on the deployment until its status is read; a failed read stops here, as it always has. Release files never
+            // touch the dev webfarm, so they neither wait for the status nor need it.
+            var state = action == ReleaseScreen.Action ? null :
+                status.IsCompleted ? await status : await AnsiConsole.Status().StartAsync("Reading the active deployment...", _ => status);
             try
             {
                 switch (action)
@@ -107,6 +110,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     case "Update my webfarm": await Choose(state); break;
                     case "Open solution": await OpenSolution(state); break;
                     case "Review a pull request": await ReviewPullRequest(state); break;
+                    case ReleaseScreen.Action: await new ReleaseScreen(settings, git).Run(); break;
                     case "Ticket workspaces": await new TicketWorkspaces(settings, git, bridge, this).Run(state); break;
                     case "Tidy worktrees": await new WorktreeTidy(settings, git).Run(state); break;
                     case "Clean up": await new CleanupScreen(settings, git, bridge).Run(); break;
