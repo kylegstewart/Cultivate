@@ -439,7 +439,10 @@ internal static class Warmup
         };
         var lines = new List<string> { $"[bold {color}]{Markup.Escape(result.Summary)}[/]" };
         if (result.Detail.Length != 0) lines.Add(Markup.Escape(result.Detail));
-        lines.Add($"[{TerminalStyle.Muted}]{Markup.Escape(result.Url)}  ·  {result.Attempts} request{(result.Attempts == 1 ? "" : "s")}  ·  {result.Seconds:0} s[/]");
-        return TerminalStyle.Card(new Markup(string.Join("\n", lines)), title, color);
+        var muted = new Style(Color.FromHex(TerminalStyle.Muted));
+        // Spectre drops the link where the terminal cannot show one, so the visible text is the whole address.
+        var footer = new Paragraph(result.Url, muted, new Link(result.Url))
+            .Append($"  ·  {result.Attempts} request{(result.Attempts == 1 ? "" : "s")}  ·  {result.Seconds:0} s", muted);
+        return TerminalStyle.Card(new Rows(new Markup(string.Join("\n", lines)), footer), title, color);
     }
 }
