@@ -18,6 +18,8 @@ internal static class Program
           activate --worktree PATH | --branch NAME --yes [--once] [--no-warmup] [--stop-legacy-watcher]
                                                   Build and deploy; --once disables automatic updates;
                                                   --stop-legacy-watcher ends the old WebfarmFileSync watcher first
+              plan | activate --pr NUMBER ...     Use a pull request instead: its current head is fetched
+                                                  from origin, with no branch or worktree created
               plan | activate ... [--library PATH]... [--libraries]
                                                   Also build and deploy a matching library worktree
                                                   (repeatable), or every detected match
@@ -99,10 +101,13 @@ internal static class Program
                 case "activate":
                     var worktree = Option("--worktree");
                     var reference = Option("--branch");
-                    var targets = await git.Targets();
-                    var target = targets.FirstOrDefault(x => worktree is not null && x.Worktree is not null && Files.Comparer.Equals(Files.Full(x.Worktree), Files.Full(worktree)) ||
+                    var pullRequest = Option("--pr");
+                    var targets = pullRequest is null ? await git.Targets() : [];
+                    var target = pullRequest is not null && worktree is null && reference is null
+                        ? await PullRequests.Fetch(settings, git, PullRequests.Number(pullRequest), await bridge.Status()) :
+                        targets.FirstOrDefault(x => worktree is not null && x.Worktree is not null && Files.Comparer.Equals(Files.Full(x.Worktree), Files.Full(worktree)) ||
                         worktree is null && reference is not null && x.Worktree is null && (x.Branch == reference || x.Ref == reference))
-                        ?? throw new InvalidOperationException("Select a known --worktree <absolute path> or --branch <name>. Use list to see choices.");
+                        ?? throw new InvalidOperationException("Select one known --worktree <absolute path>, --branch <name>, or --pr <number>. Use list to see choices.");
                     var plan = await new Planner(settings, git, bridge).Create(target, libraries: LibraryLoop.Requested(args));
                     if (args[0] == "plan") { Print(plan); return plan.CanDeploy ? 0 : 2; }
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Activation requires --yes or an interactive confirmation.");
@@ -119,6 +124,7 @@ internal static class Program
                 case "restore":
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Restoration requires --yes or the interactive menu.");
                     Print(await bridge.Call("Restore"));
+                    await PullRequests.Prune(git, settings, null);
                     break;
                 case "watch": await Watcher.Run(settings, Option("--token") ?? throw new InvalidOperationException("Worker token is required."), settingsPath); break;
                 case null: await new Terminal(settings, git, bridge).Run(); break;

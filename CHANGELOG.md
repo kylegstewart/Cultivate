@@ -28,6 +28,13 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   confirm; branches are kept. `cultivate cleanup` prints the same as JSON without changing anything; `--yes` removes
   Cultivate's files, `--worktrees --yes` also deletes those worktrees, and `--days N` sets the age. The self-test now
   keeps its runs, logs and worker files in its own fixture folder instead of Cultivate's data folder.
+- Feature: review a pull request on your dev webfarm without creating a branch or worktree. Choose Review a pull request
+  on the home screen to pick one of MyMeyer's open pull requests (or type any number, including a closed or merged one),
+  or run `cultivate plan --pr N` and `cultivate activate --pr N --yes`. Each preview fetches the pull request's current
+  head from origin into a private ref and compares it with the branch it targets; the preview, `status`, and the home
+  screen name it as "PR #N: title". The list and the title, author, and base branch come from the GitHub CLI (`gh`);
+  without it a pull request can still be reviewed by number, compared with your base branch. Restore removes the
+  fetched refs.
 
 ## 1.1.24 — 2026-11-17
 

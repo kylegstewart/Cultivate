@@ -357,6 +357,7 @@ internal static partial class SelfTest
             Save("Unknown.cs", "public class Unknown {}");
             Check(!(await planner.Create(frontendTarget, Maps)).CanDeploy, "unowned compiled source is not silently ignored");
             File.Delete(Files.Child(settings.RepositoryRoot, "Unknown.cs"));
+            await CheckPullRequests(home, settings, git, bridge, planner, pipeline, Maps);
 
             Save(@"Page\View.ascx", "original markup");
             await G("checkout", "-qb", "worker-code", "master");
@@ -1242,7 +1243,7 @@ internal static partial class SelfTest
             "every home and preview action has contextual help");
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
         Check(Terminal.HomeActions.Select(action => action.Label).SequenceEqual(
-            ["Update my webfarm", "Open solution", "Ticket workspaces", "Tidy worktrees", "Clean up", "Restore original webfarm files", "Settings", "Exit"]),
+            ["Update my webfarm", "Open solution", "Review a pull request", "Ticket workspaces", "Tidy worktrees", "Clean up", "Restore original webfarm files", "Settings", "Exit"]),
             "the homepage offers deployment, solutions, ticket workspaces, and tidying, and omits refresh, logs, and the guide");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");
