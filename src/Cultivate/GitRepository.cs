@@ -5,8 +5,16 @@ namespace Cultivate;
 
 internal sealed class GitRepository(Settings settings)
 {
-    public Task<string> Git(string root, params string[] arguments) =>
-        Commands.Run("git.exe", new[] { "-c", "core.quotepath=false", "-C", root }.Concat(arguments));
+    private int calls;
+
+    /// <summary>How many times this instance has started Git; starting it costs more than most of what it is asked to do.</summary>
+    internal int Calls => Volatile.Read(ref calls);
+
+    public Task<string> Git(string root, params string[] arguments)
+    {
+        Interlocked.Increment(ref calls);
+        return Commands.Run("git.exe", new[] { "-c", "core.quotepath=false", "-C", root }.Concat(arguments));
+    }
 
     public async Task<string> Solution(Target target)
     {
@@ -34,8 +42,10 @@ internal sealed class GitRepository(Settings settings)
     public async Task<List<Target>> Targets()
     {
         var result = new List<Target>();
-        var listing = await Git(settings.RepositoryRoot, "worktree", "list", "--porcelain", "-z");
-        foreach (var block in listing.Split("\0\0", StringSplitOptions.RemoveEmptyEntries))
+        var listing = Git(settings.RepositoryRoot, "worktree", "list", "--porcelain", "-z");
+        var references = Git(settings.RepositoryRoot, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes");
+        await Task.WhenAll(listing, references);
+        foreach (var block in (await listing).Split("\0\0", StringSplitOptions.RemoveEmptyEntries))
         {
             var fields = block.Split('\0');
             var path = fields.FirstOrDefault(x => x.StartsWith("worktree "))?[9..].Replace('/', '\\');
@@ -47,8 +57,7 @@ internal sealed class GitRepository(Settings settings)
                 result.Add(new(name, path, reference ?? head ?? throw new InvalidDataException("A worktree has no HEAD.")));
             }
         }
-        var refs = await Git(settings.RepositoryRoot, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes");
-        foreach (var reference in refs.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()))
+        foreach (var reference in (await references).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()))
         {
             if (reference.EndsWith("/HEAD")) continue;
             var remote = reference.StartsWith("refs/remotes/");
@@ -77,8 +86,24 @@ internal sealed class GitRepository(Settings settings)
         }
         // The worktrees folder normally holds <repository>\<worktree>; a deeper level also covers a folder of repositories.
         Find(Files.Full(settings.WorktreesRoot), 3);
+        // One listing per repository instead of one Git start per checkout: the starts took most of the time, and the folder's
+        // checkouts belong to a handful of repositories. A checkout the listing does not describe plainly is read on its own.
+        var listings = await Task.WhenAll(folders.GroupBy(folder => WorktreeCatalog.CommonDirectory(folder) ?? folder, Files.Comparer).Select(async group =>
+        {
+            try { return await Git(group.First(), "worktree", "list", "--porcelain", "-z"); }
+            catch (InvalidOperationException) { return ""; }
+        }));
+        var listed = new Dictionary<string, Target>(Files.Comparer);
+        foreach (var fields in listings.SelectMany(listing => listing.Split("\0\0", StringSplitOptions.RemoveEmptyEntries)).Select(block => block.Split('\0')))
+        {
+            string? Field(string name) => fields.FirstOrDefault(field => field.StartsWith(name + " ", StringComparison.Ordinal))?[(name.Length + 1)..];
+            if (Field("worktree") is not { } path || Field("HEAD") is not { Length: >= 7 } head || head.All(digit => digit == '0')) continue;
+            listed[Files.Full(path)] = Field("branch") is { } branch && branch.StartsWith("refs/heads/", StringComparison.Ordinal)
+                ? new Target(branch["refs/heads/".Length..], null, branch) : new Target($"(detached {head[..7]})", null, head);
+        }
         var found = await Task.WhenAll(folders.Select(async folder =>
         {
+            if (listed.TryGetValue(folder, out var target)) return target with { Worktree = folder };
             try
             {
                 var head = (await Git(folder, "rev-parse", "HEAD", "--symbolic-full-name", "HEAD")).Split('\n', StringSplitOptions.TrimEntries);

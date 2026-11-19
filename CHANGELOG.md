@@ -12,6 +12,12 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   sorting and filtering now redraw only the lines that changed, in a single write, instead of the whole screen; a key
   is picked up the moment it is pressed instead of on the next 20 ms check; and a held arrow key's repeats are handled
   together, so the list stops where you let go.
+- Improvement: the other screens respond as quickly. The home menu, every action menu, the version and solution
+  pickers and the Ticket workspaces list redraw only the lines a key changes, in one write, and a held arrow stops
+  where you let go. The home screen appears at once, filling in the active deployment when its status arrives;
+  nothing that acts on the deployment starts before it has. Update my webfarm, Open solution and Ticket workspaces
+  start fewer Git processes before they open, and screens write to the terminal in one piece instead of many small
+  ones.
 
 ## 1.1.24 — 2026-11-17
 

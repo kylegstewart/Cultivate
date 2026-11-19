@@ -199,6 +199,8 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
         using var gate = new SemaphoreSlim(Parallelism);
         var repositories = await Task.WhenAll(checkouts.GroupBy(checkout => checkout.RepositoryRoot, Files.Comparer).Select(async repository =>
         {
+            // A repository whose checkouts are all detached or on a mainline holds no workspace whatever its default branch: no Git start.
+            if (!repository.Any(MayHoldWork)) return (Root: repository.Key, DefaultBranch: (string?)null, Dates: new Dictionary<string, DateTimeOffset>());
             await gate.WaitAsync();
             try
             {
@@ -234,6 +236,8 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
         return Group(checkouts, root => facts[root].DefaultBranch, checkout => facts[checkout.RepositoryRoot].Dates.TryGetValue(checkout.Branch, out var date) ? date : null);
     }
 
+    private static bool MayHoldWork(Checkout checkout) => !checkout.Detached && checkout.Branch.Length != 0 && !Mainlines.Contains(checkout.Branch);
+
     /// <summary>
     /// A ticket's follow-up branches (12345-2) join its workspace, and other branches join the same-named branch of every repository.
     /// Detached checkouts and checkouts on their repository's default branch hold no ticket's work, and neither do the mainline
@@ -242,8 +246,7 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
     internal static List<TicketWorkspace> Group(IEnumerable<Checkout> checkouts, Func<string, string?> defaultBranch, Func<Checkout, DateTimeOffset?> lastCommit)
     {
         static string Local(string? branch) => branch is null ? "" : branch.StartsWith("origin/", StringComparison.Ordinal) ? branch["origin/".Length..] : branch;
-        return checkouts.Where(checkout => !checkout.Detached && checkout.Branch.Length != 0 && !Mainlines.Contains(checkout.Branch) &&
-                checkout.Branch != Local(defaultBranch(checkout.RepositoryRoot)))
+        return checkouts.Where(checkout => MayHoldWork(checkout) && checkout.Branch != Local(defaultBranch(checkout.RepositoryRoot)))
             .GroupBy(checkout => checkout.Ticket ?? checkout.Branch, StringComparer.Ordinal)
             .Select(group => new TicketWorkspace(group.Key, group.First().Ticket,
                 group.OrderBy(checkout => checkout.Repository, Files.Comparer).ThenBy(checkout => checkout.Branch, StringComparer.Ordinal).ToList(),

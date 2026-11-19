@@ -20,6 +20,8 @@ internal sealed class ActionPicker
         Matches = this.actions;
     }
 
+    private static int PageSize(int height) => Math.Clamp(height - 13, 3, 14);
+
     internal void HandleKey(ConsoleKeyInfo key, int pageSize)
     {
         var last = Math.Max(0, Matches.Count - 1);
@@ -59,7 +61,7 @@ internal sealed class ActionPicker
 
     internal IRenderable Render(string title, int height)
     {
-        var pageSize = Math.Clamp(height - 13, 3, 14);
+        var pageSize = PageSize(height);
         var start = Index / pageSize * pageSize;
         var end = Math.Min(start + pageSize, Matches.Count);
         var table = new Table().Border(TableBorder.None).HideHeaders().Expand()
@@ -81,21 +83,24 @@ internal sealed class ActionPicker
         return new Rows(content);
     }
 
-    internal MenuAction Show(string title) => Show(title, AnsiConsole.Console, () => Console.ReadKey(true));
+    internal MenuAction Show(string title) => Show(title, AnsiConsole.Console, KeyScreen.ReadKey);
 
-    internal MenuAction Show(string title, IAnsiConsole console, Func<ConsoleKeyInfo> readKey) =>
-        console.Live(Render(title, console.Profile.Height))
-            .AutoClear(true).Overflow(VerticalOverflow.Crop).Cropping(VerticalOverflowCropping.Bottom)
-            .Start(context =>
-            {
-                context.Refresh();
-                while (true)
-                {
-                    var key = readKey();
-                    if (key.Key == ConsoleKey.Enter && Selected is not null) return Selected;
-                    HandleKey(key, Math.Clamp(console.Profile.Height - 13, 3, 14));
-                    context.UpdateTarget(Render(title, console.Profile.Height));
-                    context.Refresh();
-                }
-            });
+    /// <summary>Shows the menu below what the terminal already shows, and erases it once an action is chosen.</summary>
+    internal MenuAction Show(string title, IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey) => Show(title, console, readKey, null, null)!;
+
+    /// <summary>
+    /// Shows the menu under <paramref name="above"/> on a cleared terminal, painting both again when <paramref name="update"/> completes.
+    /// Returns null, without a choice, when the update fails.
+    /// </summary>
+    internal MenuAction? Show(string title, IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey, Func<int, int, IRenderable>? above, Task? update)
+    {
+        MenuAction? chosen = null;
+        KeyScreen.Show(console, (_, height) => Render(title, height), (key, height) =>
+        {
+            if (key.Key == ConsoleKey.Enter && Selected is not null) chosen = Selected;
+            else HandleKey(key, PageSize(height));
+            return chosen is not null;
+        }, readKey, inline: above is null, above, update);
+        return chosen;
+    }
 }

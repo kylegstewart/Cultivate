@@ -219,7 +219,7 @@ internal static partial class SelfTest
         {
             picker = new TicketPicker(workspaces, now: now);
             var keys = new Queue<ConsoleKeyInfo>([new('\0', ConsoleKey.DownArrow, false, false, false), new('\r', ConsoleKey.Enter, false, false, false)]);
-            var chosen = picker.Show(LiveConsole(output), () =>
+            var chosen = picker.Show(LiveConsole(output), _ =>
             {
                 Check(output.ToString().Contains("TICKET WORKSPACES"), "the ticket list renders before waiting for a key");
                 return keys.Dequeue();
@@ -228,7 +228,7 @@ internal static partial class SelfTest
         }
         using (var output = new StringWriter())
         {
-            var chosen = new TicketPicker(workspaces, now: now).Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false));
+            var chosen = new TicketPicker(workspaces, now: now).Show(LiveConsole(output), _ => new('\u001b', ConsoleKey.Escape, false, false, false));
             Check(chosen is null, "Esc leaves the ticket list without opening a workspace");
         }
     }
@@ -334,9 +334,15 @@ internal static partial class SelfTest
         File.WriteAllText(Path.Combine(mirror, "Changed.sql"), "SELECT 2 -- edited\r\n");
         File.WriteAllText(Path.Combine(mirror, "AlterTableExample.sql"), "ALTER TABLE Example ADD Flag BIT\r\n");
 
+        var calls = git.Calls;
         var workspaces = await TicketWorkspaces.Load(settings, git);
         Check(workspaces.Select(workspace => workspace.Key).Order(StringComparer.Ordinal).SequenceEqual(["12345", "automation-manager", "t3/abc12345"]),
             "real worktrees group into a ticket and shared branches, leaving out default-branch and detached checkouts");
+        calls = git.Calls - calls;
+        await FixtureRepository(git, Path.Combine(root, "clones", "Quiet"));
+        var withQuiet = git.Calls;
+        Check((await TicketWorkspaces.Load(settings, git)).Select(workspace => workspace.Key).SequenceEqual(workspaces.Select(workspace => workspace.Key)) &&
+            git.Calls - withQuiet == calls + 1, "a repository whose only checkout is on its default branch is listed but its branches are not read");
         var ticket = workspaces.Single(workspace => workspace.Key == "12345");
         Check(ticket.Ticket == "12345" && ticket.Repositories.SequenceEqual(["Database--SQL", "MyMeyer", "Other"]) &&
             ticket.Checkouts.Single(checkout => checkout.Repository == "Other").Primary && ticket.LastActivity is not null,
