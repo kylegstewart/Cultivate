@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.1.26 — 2026-11-19
+
 - Feature: build a merged pull request's release files. `cultivate release --pr N` fetches the pull request and master from origin
   into private refs (your checkout, its branches and `origin/master` are not touched) and previews, as JSON, what master holds for
   each file the pull request changed: the same, also changed by other merged work, undone, or deleted. With `--yes` it builds the
