@@ -27,8 +27,12 @@ internal static partial class SelfTest
 
     public static async Task<int> Run()
     {
-        var home = Path.Combine(Files.Home, "Tests", Guid.NewGuid().ToString("N"));
+        // A short name keeps fixture builds' package paths under Windows' path limit.
+        var home = Path.Combine(Files.Home, "Tests", Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(home);
+        // Activations and workers write runs, logs, requests and worker files under Files.Home: keep them in the fixture folder.
+        if (File.Exists(Settings.FilePath)) File.Copy(Settings.FilePath, Path.Combine(home, "settings.json"));
+        Environment.SetEnvironmentVariable("CULTIVATE_HOME", home);
         Bridge? cleanupBridge = null;
         try
         {
@@ -44,6 +48,7 @@ internal static partial class SelfTest
             await CheckWarmup(home);
             await CheckTicketWorkspaces(home);
             await CheckWorktreeTidy(home);
+            await CheckCleanup(home);
             await CheckLegacyWatcher(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
             var settings = await Settings.Read();
@@ -1227,7 +1232,7 @@ internal static partial class SelfTest
             "every home and preview action has contextual help");
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");
         Check(Terminal.HomeActions.Select(action => action.Label).SequenceEqual(
-            ["Update my webfarm", "Open solution", "Ticket workspaces", "Tidy worktrees", "Restore original webfarm files", "Settings", "Exit"]),
+            ["Update my webfarm", "Open solution", "Ticket workspaces", "Tidy worktrees", "Clean up", "Restore original webfarm files", "Settings", "Exit"]),
             "the homepage offers deployment, solutions, ticket workspaces, and tidying, and omits refresh, logs, and the guide");
         Check(Terminal.PreviewActions(false).Select(action => action.Label).SequenceEqual(["Show every changed file", "Back"]),
             "blocked previews retain inspection and back actions but cannot activate");

@@ -13,6 +13,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         new("Open solution", "Open a repository's main solution, or a worktree or local branch with its changed source files."),
         new("Ticket workspaces", "See one ticket's worktrees, pull requests, and SQL files across every repository, and open them together."),
         new("Tidy worktrees", "Sort and filter every repository's worktrees by size and age, then delete the ones you choose."),
+        new("Clean up", "Remove Cultivate's old build runs and logs, and review worktrees unused for weeks that have nothing to lose."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
         new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
         new("Exit", "Close this menu without stopping active automatic updates.")
@@ -74,6 +75,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             throw new InvalidOperationException("Open Cultivate in an interactive terminal, or use list / status / plan for JSON output.");
         // Runs in the background; the notice appears on the first home screen drawn after it finishes.
         var updateCheck = settings.CheckForUpdates && Updater.IsInstalled ? Updater.CheckQuietly() : Task.FromResult<UpdateInfo?>(null);
+        _ = Task.Run(() => CultivateFiles.Automatic(settings));
         const string section = "DEV LAUNCHPAD", tagline = "Your code. Your workspace. Ready for the farm.";
         while (true)
         {
@@ -134,6 +136,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     case "Open solution": await OpenSolution(state); break;
                     case "Ticket workspaces": await new TicketWorkspaces(settings, git, bridge, this).Run(state); break;
                     case "Tidy worktrees": await new WorktreeTidy(settings, git).Run(state); break;
+                    case "Clean up": await new CleanupScreen(settings, git, bridge).Run(); break;
                     case "Restore original webfarm files":
                         if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))
                         {

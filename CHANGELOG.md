@@ -5,6 +5,17 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: Cultivate cleans up after itself. Once a day, in the background of the terminal UI and the saved-file worker,
+  it removes build and plan runs older than 7 days, bridge logs and incident reports older than 14 days, and leftovers
+  older than a day (stale worker settings, interrupted requests, self-tests and updates), and has Git forget snapshot
+  worktrees whose run is gone. The deployment journal and its backups, the active deployment's run and worker, and
+  anything a recent error report names are always kept, and a run another program is using is left in place. The new
+  Clean up home action shows what would go and removes it, and separately lists the worktrees unused for 14 days
+  (`CleanupDays`; `cultivate setup --cleanup-days`) that lose nothing when deleted, deleting them only after you
+  confirm; branches are kept. `cultivate cleanup` prints the same as JSON without changing anything; `--yes` removes
+  Cultivate's files, `--worktrees --yes` also deletes those worktrees, and `--days N` sets the age. The self-test now
+  keeps its runs, logs and worker files in its own fixture folder instead of Cultivate's data folder.
+
 ## 1.1.24 — 2026-11-17
 
 - Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to
