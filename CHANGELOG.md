@@ -5,6 +5,11 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: Tidy worktrees responds to keys at once. Moving the highlight, paging, selecting, typing a search,
+  sorting and filtering now redraw only the lines that changed, in a single write, instead of the whole screen; a key
+  is picked up the moment it is pressed instead of on the next 20 ms check; and a held arrow key's repeats are handled
+  together, so the list stops where you let go.
+
 ## 1.1.24 — 2026-11-17
 
 - Feature: activation offers to stop the old WebfarmFileSync watcher instead of failing when it is running. Choose to
