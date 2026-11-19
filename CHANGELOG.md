@@ -7,7 +7,7 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 - Feature: build a merged pull request's release files. `cultivate release --pr N` fetches the pull request and master from origin
   into private refs (your checkout, its branches and `origin/master` are not touched) and previews, as JSON, what master holds for
-  each file the pull request changed: the same, changed again since the merge, undone, or deleted. With `--yes` it builds the
+  each file the pull request changed: the same, also changed by other merged work, undone, or deleted. With `--yes` it builds the
   projects that own the changed code from master in a throwaway snapshot, Debug like the dev farm, and writes their DLLs, any
   package DLL the pull request bumped, and the changed content files (markup, scripts, styles, images, `.ashx` handlers and the
   like) to one flat folder named after the ticket in your Documents folder, ready to upload to the Code Release Manager. The

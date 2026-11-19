@@ -17,7 +17,7 @@ internal sealed record ReleasePullRequest(int Number, string Title, string Autho
 /// <summary>Where a pull request's changed file stands on the base branch now.</summary>
 internal static class ReleaseStatus
 {
-    internal const string Same = "Same as the pull request", ChangedAgain = "Changed again since the merge", NotOnBase = "Not on the base branch",
+    internal const string Same = "Same as the pull request", ChangedAgain = "Also changed by other merged work", NotOnBase = "Not on the base branch",
         Deleted = "Deleted";
 }
 
@@ -29,7 +29,7 @@ internal static class ReleaseKind
 }
 
 internal sealed record ReleaseCommit(string Commit, string Subject);
-/// <summary>One file the pull request changed: its change, where it stands on the base branch, and the later commits that changed it again.</summary>
+/// <summary>One file the pull request changed: its change, where it stands on the base branch, and the other merged commits that also changed it.</summary>
 internal sealed record ReleaseChange(string Path, string Change, string Status, string Kind, List<ReleaseCommit> Commits);
 internal sealed record ReleaseNote(string Path, string Reason);
 /// <summary>A project whose DLL is released, and the other merged commits that DLL carries but the pull request branch's own build did not.</summary>
@@ -42,7 +42,8 @@ internal sealed record ReleaseFile(string Name, string Kind, string Source, long
 /// <summary>A file already in the release folder that this run did not write, and whether an earlier release run did.</summary>
 internal sealed record ExistingFile(string Name, long Size, string Origin);
 
-/// <summary>A reference a build took from outside its snapshot: a sibling repository, or a DLL in the developer's checkout.</summary>
+/// <summary>A reference a build took from outside its snapshot: a sibling repository, or a DLL in the developer's checkout. In a result,
+/// <see cref="Project"/> lists every project that used it.</summary>
 internal sealed record OutsideReference(string Name, string Path, string? Version, DateTime LastWriteTime, string Project)
 {
     internal static OutsideReference Of(string path, string project) =>

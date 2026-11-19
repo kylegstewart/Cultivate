@@ -179,8 +179,12 @@ internal static partial class SelfTest
         Check(built is { Written: true } && built.Files.Select(file => (file.Name, file.Kind)).SequenceEqual([("Page.dll", ReleaseKind.ProjectDll), ("View.ascx", ReleaseKind.Content)]) &&
             built.Files.All(file => file.Sha256 == Files.Hash(Path.Combine(folder20, file.Name)) && file.Size > 0) && built.Files[0].AssemblyVersion is not null,
             "the result lists each written file with its kind, hash, size and assembly version");
-        Check(progress.Where(line => line.StartsWith("Building ", StringComparison.Ordinal)).Order().SequenceEqual(["Building Core (2/3)", "Building Helpers (1/3)", "Building Page (3/3)"]),
-            "support projects are built from master's snapshot, each once, before the project that needs them");
+        Check(progress.Where(line => line.StartsWith("Building ", StringComparison.Ordinal)).Order().SequenceEqual([
+                "Building Core (2/3, dependency: needed to compile, not released)", "Building Helpers (1/3, dependency: needed to compile, not released)",
+                "Building Page (3/3, release file)"]) &&
+            progress.Contains("Preparing references for the release projects and the unchanged projects they compile against") &&
+            progress.Contains("Verifying the release projects' DLLs and changed packages; dependency builds are not released"),
+            "support projects are built from master's snapshot, each once, before the project that needs them, and the progress says which builds are released");
         Check(built.OutsideReferences.Count == 0 && File.Exists(staleCore) && Files.Hash(staleCore) == staleHash && !Listing(folder20).Contains("Core.dll"),
             "the release compiles against master's Core, not the checkout's stale DLL that lacks NewApi, and does not release it");
         Check(!Directory.Exists(Path.Combine(built.RunDirectory, "source")) && File.Exists(Path.Combine(built.RunDirectory, "release.json")) &&
@@ -237,7 +241,8 @@ internal static partial class SelfTest
         var r21 = await release.Build(await release.Preview(21), progress.Add);
         ReleaseChange Change(string path) => r21.Changes.Single(change => change.Path == path);
         Check(r21.Name == "27220" && Change("Page/Again.css") is { Status: ReleaseStatus.ChangedAgain, Commits: [{ Subject: "a1 again" }] } &&
-            File.ReadAllText(Path.Combine(folder21, "Again.css")) == "again later" && r21.Warnings.Any(warning => warning.Contains("Page/Again.css changed again")),
+            File.ReadAllText(Path.Combine(folder21, "Again.css")) == "again later" && r21.Warnings.Contains(
+                $"Page/Again.css is not exactly as it was on the pull request: other merged changes touched it too ({a1[..7]}); master's version is used."),
             "a file changed again on master after the merge is reported with the later commit, and master's content is copied");
         Check(r21.Projects.Single().OtherMergedChanges.Select(commit => commit.Subject).Order().SequenceEqual(["a4 page", "Other merged change"]) &&
             !progress.Any(line => line.Contains("Shop")) && !r21.SupportProjects.Any(project => project.Assembly == "Shop") && !File.Exists(Path.Combine(folder21, "Shop.dll")),
@@ -318,6 +323,107 @@ internal static partial class SelfTest
         Check(await Untouched() == before && !new[] { "30001", "31001", "32001", "PR-404" }.Any(name => Directory.Exists(Path.Combine(output, name))),
             "refusals leave no refs, worktrees or folders behind");
         Check(BridgeLogs() == bridgeLogs && !File.Exists(settings.MappingAssembly), "release files never look up Code Release Manager mappings");
+
+        // PR 24: Tools and Kit reference Third and Fourth by HintPaths that resolve nowhere. Master tracks bin\Third.dll 2.0.0, and the
+        // checkout's bin holds Third.dll 1.0.0 and the only Fourth.dll.
+        async Task<string> ThirdParty(string name, string version)
+        {
+            var source = Path.Combine(root, name + " " + version);
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, name + ".csproj"), $$"""
+                <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+                  <PropertyGroup>
+                    <OutputType>Library</OutputType><TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>
+                    <OutputPath>out\</OutputPath><AssemblyName>{{name}}</AssemblyName>
+                  </PropertyGroup>
+                  <ItemGroup><Compile Include="Value.cs" /><Reference Include="System" /></ItemGroup>
+                  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+                </Project>
+                """);
+            File.WriteAllText(Path.Combine(source, "Value.cs"),
+                $"[assembly: System.Reflection.AssemblyVersion(\"{version}.0\")] public class {name}Value {{ public static int Value => {version[0]}; }}");
+            await Commands.Run(msbuild, [Path.Combine(source, name + ".csproj"), "-nologo", "-t:Build", "-p:Configuration=Release", "-v:minimal"], source, safety);
+            return Path.Combine(source, "out", name + ".dll");
+        }
+        var (third1, third2, fourth) = (await ThirdParty("Third", "1.0.0"), await ThirdParty("Third", "2.0.0"), await ThirdParty("Fourth", "1.0.0"));
+        string Tool(string name) => Project(name).Replace("<Reference Include=\"System\" />", """
+            <Reference Include="System" />
+            <Reference Include="Third"><HintPath>..\lib\Third.dll</HintPath></Reference>
+            <Reference Include="Fourth"><HintPath>..\lib\Fourth.dll</HintPath></Reference>
+            """);
+        await A("checkout", "-q", "--detach", m23);
+        Directory.CreateDirectory(Path.Combine(author, "bin"));
+        File.Copy(third2, Path.Combine(author, @"bin\Third.dll"), true);
+        await A("add", "-f", "bin/Third.dll");
+        var t0 = await Commit(null, "tools",
+            (@"Tools\Tools.csproj", Tool("Tools")), (@"Tools\App.config", "<configuration />"), (@"Tools\Value.cs", "public class ToolsValue { public static int Value => 1; }"),
+            (@"Kit\Kit.csproj", Tool("Kit")), (@"Kit\App.config", "<configuration />"), (@"Kit\Value.cs", "public class KitValue { public static int Value => 1; }"),
+            (@"Page\Lines.js", "one\ntwo\nthree\nfour\nfive\nsix\nseven\n"));
+        var h24 = await Commit(t0, "pr24",
+            (@"Tools\Value.cs", "public class ToolsValue { public static int Value => ThirdValue.Value + FourthValue.Value; }"),
+            (@"Kit\Value.cs", "public class KitValue { public static int Value => ThirdValue.Value + FourthValue.Value; }"));
+        await Publish(h24, "refs/pull/24/head");
+        var m24 = await Squash(t0, h24, "Use the third-party values (#24)");
+        await Publish(m24, "refs/heads/master");
+        Pull(24, "Use the third-party values", "tools", m24, h24);
+        File.Copy(third1, Path.Combine(checkout, @"bin\Third.dll"));
+        File.Copy(fourth, Path.Combine(checkout, @"bin\Fourth.dll"));
+        progress.Clear();
+        var r24 = await release.Build(await release.Preview(24, new(Folder: Path.Combine(output, "tools"))), progress.Add);
+        var releaseLog = File.ReadAllText(Path.Combine(r24.RunDirectory, "build.log"));
+        Check(Listing(Path.Combine(output, "tools")).SequenceEqual(["Kit.dll", "Tools.dll"], Files.Comparer) &&
+            References(Path.Combine(output, "tools", "Tools.dll"))["Third"] == "2.0.0.0" && References(Path.Combine(output, "tools", "Kit.dll"))["Third"] == "2.0.0.0" &&
+            Files.Hash(Path.Combine(r24.RunDirectory, @"references\Third.dll")) == Files.Hash(third2) &&
+            releaseLog.Contains($"Reference Third.dll: {Path.Combine(r24.RunDirectory, "source", "bin", "Third.dll")}\n") &&
+            !r24.OutsideReferences.Any(reference => reference.Name == "Third.dll"),
+            "a release compiles against the snapshot's tracked bin copy of a reference before the checkout's, and does not report it as an outside reference");
+        Check(r24.OutsideReferences.Single() is { Name: "Fourth.dll", Path: var fourthPath, Project: var users } &&
+            Files.Comparer.Equals(fourthPath, Path.Combine(checkout, @"bin\Fourth.dll")) &&
+            users.Split(", ").Order(Files.Comparer).SequenceEqual([@"Kit\Kit.csproj", @"Tools\Tools.csproj"], Files.Comparer),
+            "a reference only the checkout has is still used, and reported once with every project that used it");
+        Check(progress.Contains("Building Kit (1/2, release file)") && progress.Contains("Building Tools (2/2, release file)"),
+            "release projects are reported as release files");
+
+        // The same project built for the dev farm keeps its lookups: the checkout's bin copy, even though the snapshot tracks another.
+        var devSnapshot = Path.Combine(root, "dev", "source");
+        var devRun = Path.Combine(root, "dev", "run");
+        await git.Git(root, "clone", "-q", origin, devSnapshot);
+        Directory.CreateDirectory(devRun);
+        var devProgress = new List<string>();
+        var devPlan = new Plan
+        {
+            Target = new("dev farm fixture", checkout, "refs/heads/master"), Commit = "", Fingerprint = "", Projects = [ProjectInfo.Read(devSnapshot, @"Tools\Tools.csproj")]
+        };
+        await new Pipeline(settings, git, new Bridge(settings)).Build(devPlan, devSnapshot, devRun, devProgress.Add);
+        Check(Files.Hash(Path.Combine(devRun, @"references\Third.dll")) == Files.Hash(third1) &&
+            File.ReadAllText(Path.Combine(devRun, "build.log")).Contains($"Reference Third.dll: {Path.Combine(checkout, "bin", "Third.dll")}\n") &&
+            devProgress.SequenceEqual(["Preparing references for changed projects only", "Building Tools (1/1)",
+                "Verifying only the changed projects' own DLLs and changed packages"]),
+            "a dev farm build of the same project still takes the checkout's bin copy, with the dev farm progress wording");
+
+        // PR 25 changes Lines.js; another pull request changed another line of it and merged first, cleanly.
+        var h25 = await Commit(m24, "pr25 lines", (@"Page\Lines.js", "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\n"));
+        await Publish(h25, "refs/pull/25/head");
+        var o25 = await Commit(m24, "other lines", (@"Page\Lines.js", "one\ntwo\nthree\nfour\nfive\nsix\nSEVEN\n"));
+        var m25 = await Squash(o25, h25, "Lines (#25)");
+        await Publish(m25, "refs/heads/master");
+        Pull(25, "Lines", "lines", m25, h25);
+        var p25 = await release.Preview(25, new(Folder: Path.Combine(output, "lines")));
+        Check(p25.Changes.Single() is { Path: "Page/Lines.js", Status: ReleaseStatus.ChangedAgain, Commits: [{ Subject: "other lines", Commit: var other }] } && other == o25 &&
+            p25.Content.SequenceEqual(["Page/Lines.js"]) && p25.Warnings.Contains(
+                $"Page/Lines.js is not exactly as it was on the pull request: other merged changes touched it too ({o25[..7]}); master's version is used."),
+            "a file another pull request also changed before the merge is reported with that commit");
+
+        // PR 26's merge commit itself holds content the pull request never had.
+        var h26 = await Commit(m25, "pr26 lines", (@"Page\Lines.js", "pr26\n"));
+        await Publish(h26, "refs/pull/26/head");
+        var m26 = await Commit(m25, "Lines resolved (#26)", (@"Page\Lines.js", "resolved\n"));
+        await Publish(m26, "refs/heads/master");
+        Pull(26, "Lines resolved", "resolved", m26, h26);
+        var p26 = await release.Preview(26, new(Folder: Path.Combine(output, "resolved")));
+        Check(p26.Changes.Single() is { Status: ReleaseStatus.ChangedAgain, Commits: [] } && p26.Warnings.Contains(
+                "Page/Lines.js is not exactly as it was on the pull request: the merge itself changed it (for example, resolving a conflict); master's version is used."),
+            "a file only the merge changed says so instead of naming no commits");
     }
 
     private static void CheckReleaseNames()

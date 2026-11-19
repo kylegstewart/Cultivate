@@ -122,7 +122,8 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                     throw new FileNotFoundException("Cultivate's build capture target is missing. Reinstall Cultivate.");
                 var support = new SupportBuild(result.ReuseDependencies ? work.Plan.Projects : work.Order);
                 var outputs = await new Pipeline(settings, git, new Bridge(settings)).Build(work.Plan, snapshot, run, progress, support);
-                result.OutsideReferences.AddRange(support.Outside.Distinct());
+                result.OutsideReferences.AddRange(support.Outside.GroupBy(reference => reference.Path, Files.Comparer).Select(group =>
+                    group.First() with { Project = string.Join(", ", group.Select(reference => reference.Project).Distinct(Files.Comparer)) }));
                 string Output(string name) => outputs.Single(file => Files.Comparer.Equals(file.RelativePath, @"bin\" + name)).Source;
                 files.AddRange(work.Plan.Projects.Select(project =>
                     new ReleaseFolder.Source(project.Assembly + ".dll", ReleaseKind.ProjectDll, project.RelativePath, Output(project.Assembly + ".dll"), project.Assembly, null)));
@@ -265,6 +266,8 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                 "The fetched head was used.");
         var since = Raw(await G("diff", "--raw", "-z", "--no-renames", "--no-abbrev", fork, tip)).ToDictionary(entry => entry.Path, entry => entry.After, StringComparer.Ordinal);
         var compiled = new List<Change>();
+        Task<List<MergedCommit>>? merged = null;
+        Task<List<MergedCommit>> Merged() => merged ??= OtherMerged(head, fork, merge, tip);
         foreach (var (path, before, after, letter) in Raw(await G("diff", "--raw", "-z", "--no-renames", "--no-abbrev", fork, head)))
         {
             var current = since.GetValueOrDefault(path, before);
@@ -273,7 +276,8 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             var change = new Change(path, Absent(current));
             var kind = Planner.IsCompiledInput(change) ? ReleaseKind.Compiled :
                 ContentExtensions.Contains(Path.GetExtension(path)) && !Planner.IsExcluded(path) ? ReleaseKind.Content : ReleaseKind.NotIncluded;
-            var commits = status == ReleaseStatus.ChangedAgain ? await Commits(merge + ".." + tip, ":(literal)" + path) : [];
+            var commits = status == ReleaseStatus.ChangedAgain
+                ? (await Merged()).Where(other => other.Paths.Contains(path, StringComparer.Ordinal)).Select(other => other.Commit).ToList() : [];
             result.Changes.Add(new(path, letter switch { "A" => "Added", "D" => "Deleted", "M" => "Modified", _ => "Changed" }, status, kind, commits));
             if (status == ReleaseStatus.NotOnBase)
             {
@@ -281,8 +285,9 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                 continue;
             }
             if (status == ReleaseStatus.ChangedAgain)
-                result.Warnings.Add($"{path} changed again on {branch} after the merge ({string.Join(", ", commits.Select(commit => commit.Commit[..7]))}); " +
-                    $"{branch}'s version is used.");
+                result.Warnings.Add($"{path} is not exactly as it was on the pull request: " + (commits.Count == 0
+                    ? "the merge itself changed it (for example, resolving a conflict)"
+                    : $"other merged changes touched it too ({string.Join(", ", commits.Select(commit => commit.Commit[..7]))})") + $"; {branch}'s version is used.");
             if (kind == ReleaseKind.Compiled) compiled.Add(change);
             else if (change.Deleted)
                 result.Deleted.Add(new(path, kind == ReleaseKind.Content ? "Not on " + branch + ": nothing to upload. Remove it from production by hand if it was released."
@@ -307,7 +312,9 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             result.Packages.AddRange(plan.Projects.SelectMany(project => project.PackageDependencies.Select(hint =>
                 new ReleasePackage(Path.GetFileName(hint), project.HintVersions.GetValueOrDefault(hint) ?? "", hint, project.RelativePath))));
             order = Support(catalog, plan.Projects, result);
-            result.Projects.AddRange(await OtherChanges(plan.Projects, head, fork, merge, tip));
+            var others = await Merged();
+            result.Projects.AddRange(plan.Projects.Select(project => new ReleaseProject(project.RelativePath, project.Assembly,
+                others.Where(other => other.Paths.Any(project.Owns)).Select(other => other.Commit).ToList())));
         }
         result.Errors.AddRange(plan.Errors);
         return (result, new(plan, order));
@@ -329,10 +336,6 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         return entries;
     }
 
-    private async Task<List<ReleaseCommit>> Commits(string range, string path) =>
-        (await G("log", "--format=%H%x1f%s", range, "--", path)).Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(line => line.Split('\u001f', 2)).Select(parts => new ReleaseCommit(parts[0].Trim(), parts.ElementAtOrDefault(1)?.Trim() ?? "")).ToList();
-
     private static string Reason(string path) => Path.GetExtension(path).ToLowerInvariant() switch
     {
         _ when Planner.IsExcluded(path) => "In a bin, obj, packages or Backup folder, which is never released.",
@@ -350,8 +353,7 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         var tracked = (await G("ls-tree", "-r", "--name-only", "-z", tip)).Split('\0', StringSplitOptions.RemoveEmptyEntries)
             .Select(path => path.Replace('/', '\\')).ToHashSet(Files.Comparer);
         var paths = tracked.Where(path => path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)).Order(Files.Comparer).ToList();
-        var texts = new List<string>();
-        foreach (var path in paths) texts.Add((await G("show", $"{tip}:{path.Replace('\\', '/')}")).TrimStart('﻿'));
+        var texts = await Task.WhenAll(paths.Select(async path => (await G("show", $"{tip}:{path.Replace('\\', '/')}")).TrimStart('﻿')));
         var projects = paths.Zip(texts).ToDictionary(pair => pair.First, pair => pair.Second, Files.Comparer);
         var webfarm = projects.Where(pair => pair.Value.Contains("CopyBuildOutputToWebfarm", StringComparison.Ordinal))
             .Select(pair => ProjectInfo.Read(settings.RepositoryRoot, pair.Key, pair.Value)).ToList();
@@ -410,25 +412,27 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         return ordered;
     }
 
+    private sealed record MergedCommit(ReleaseCommit Commit, string[] Paths);
+
     /// <summary>
-    /// For each release project, the commits on the base branch since the fork point, other than the merge, that touched its files: merged changes
-    /// its DLL carries that the pull request branch's own build did not. A rebase merge's copies of the pull request's commits are not counted.
+    /// The other merged work on the base branch since the fork point: each first-parent commit up to <paramref name="tip"/> with the files it changed,
+    /// other than the merge itself and a rebase merge's copies of the pull request's own commits. A release project's DLL carries these changes to
+    /// its files though the pull request branch's own build did not, and they are why a changed file can differ from the pull request's version.
     /// </summary>
-    private async Task<List<ReleaseProject>> OtherChanges(List<ProjectInfo> projects, string head, string fork, string merge, string tip)
+    private async Task<List<MergedCommit>> OtherMerged(string head, string fork, string merge, string tip)
     {
         var own = (await G("log", "--format=%ae%x1f%at%x1f%s", fork + ".." + head)).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
         var log = await G("log", "--first-parent", "--diff-merges=first-parent", "--name-only", "--no-renames", "--format=%x1e%H%x1f%ae%x1f%at%x1f%s", fork + ".." + tip);
-        var others = projects.ToDictionary(project => project, _ => new List<ReleaseCommit>());
+        var merged = new List<MergedCommit>();
         foreach (var entry in log.Split('\u001e', StringSplitOptions.RemoveEmptyEntries))
         {
             var lines = entry.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (lines.Length == 0) continue;
             var fields = lines[0].Split('\u001f', 2);
             if (fields[0] == merge || fields.Length < 2 || own.Contains(fields[1])) continue;
-            var commit = new ReleaseCommit(fields[0], fields[1].Split('\u001f').Last());
-            foreach (var project in projects.Where(project => lines.Skip(1).Any(project.Owns))) others[project].Add(commit);
+            merged.Add(new(new ReleaseCommit(fields[0], fields[1].Split('\u001f').Last()), lines[1..]));
         }
-        return projects.Select(project => new ReleaseProject(project.RelativePath, project.Assembly, others[project])).ToList();
+        return merged;
     }
 
     /// <summary>The release folder's name: <paramref name="name"/>, else the ticket from the branch, else a ticket number starting the title, else PR-N.</summary>

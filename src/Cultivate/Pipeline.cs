@@ -121,9 +121,13 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         var context = new FailureContext("Reference preparation");
         try
         {
-            progress("Preparing references for changed projects only");
+            progress(support is null ? "Preparing references for changed projects only"
+                : "Preparing references for the release projects and the unchanged projects they compile against");
             var seeds = Path.Combine(run, "references");
             Directory.CreateDirectory(seeds);
+            // The snapshot's bin before anything is built holds exactly the DLLs Git tracks there; builds later copy checkout DLLs in beside them.
+            var trackedBin = support is null || !Directory.Exists(Path.Combine(snapshot, "bin")) ? null
+                : Directory.GetFiles(Path.Combine(snapshot, "bin")).Select(Path.GetFileName).OfType<string>().ToHashSet(Files.Comparer);
             var environment = new Dictionary<string, string>
             {
                 ["WebfarmPath"] = Path.Combine(run, "intercepted") + "\\",
@@ -142,7 +146,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             {
                 context = new("Reference preparation") { Project = project.RelativePath, Log = Path.Combine(run, "build.log") };
                 await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, libraryNames, environment, run,
-                    support?.Outside);
+                    support?.Outside, trackedBin);
                 context = context with { Stage = "Project evaluation" };
                 var full = Files.Child(snapshot, project.RelativePath);
                 var metadataText = await Commands.Run(settings.MSBuild,
@@ -189,7 +193,10 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 foreach (var change in plan.Changes.Where(x => project.Owns(x.Path) && new[] { ".cs", ".resx" }.Contains(Path.GetExtension(x.Path), Files.Comparer)))
                     if (!evaluatedInputs.Contains(change.Path.Replace('/', '\\')))
                         throw new InvalidOperationException($"MSBuild does not compile {change.Path} in Debug. Deployment stopped.");
-                progress($"Building {project.Assembly} ({projects.IndexOf(project) + 1}/{projects.Count})");
+                var position = $"{projects.IndexOf(project) + 1}/{projects.Count}";
+                progress(support is null ? $"Building {project.Assembly} ({position})"
+                    : plan.Projects.Any(x => Files.Comparer.Equals(x.RelativePath, project.RelativePath)) ? $"Building {project.Assembly} ({position}, release file)"
+                    : $"Building {project.Assembly} ({position}, dependency: needed to compile, not released)");
                 context = context with { Stage = "Build", BinaryLog = Path.Combine(run, project.Assembly + ".binlog") };
                 var arguments = new List<string>
                 {
@@ -221,7 +228,8 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 }
             }
             context = new("Artifact verification") { Log = Path.Combine(run, "build.log") };
-            progress("Verifying only the changed projects' own DLLs and changed packages");
+            progress(support is null ? "Verifying only the changed projects' own DLLs and changed packages"
+                : "Verifying the release projects' DLLs and changed packages; dependency builds are not released");
             var collected = Artifacts.Collect(run, snapshot, plan.Projects);
             if (libraryFiles.FirstOrDefault(library => collected.Any(file => Files.Comparer.Equals(file.RelativePath, library.RelativePath))) is { } duplicate)
                 throw new InvalidDataException($"A library build and a changed MyMeyer project both produce {duplicate.RelativePath}.");
@@ -235,8 +243,12 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         }
     }
 
+    /// <param name="outside">For a release: records each reference taken from outside the snapshot. Null for the dev farm.</param>
+    /// <param name="trackedBin">For a release: the DLLs the snapshot tracks in its <c>bin</c>, which the fallbacks try before the developer's
+    /// checkout. Null keeps the dev farm lookups.</param>
     private async Task Prepare(ProjectInfo project, string snapshot, string sourceRoot, string seeds, HashSet<string> internalNames,
-        HashSet<string> libraryNames, Dictionary<string, string> environment, string run, List<OutsideReference>? outside = null)
+        HashSet<string> libraryNames, Dictionary<string, string> environment, string run, List<OutsideReference>? outside = null,
+        HashSet<string>? trackedBin = null)
     {
         var directory = Path.GetDirectoryName(Files.Child(snapshot, project.RelativePath))!;
         var originalDirectory = Path.GetDirectoryName(Files.Child(sourceRoot, project.RelativePath))!;
@@ -272,6 +284,8 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             var name = Path.GetFileName(hint);
             if (internalNames.Contains(Path.GetFileNameWithoutExtension(name))) continue;
             var desired = Path.GetFullPath(Path.Combine(directory, hint));
+            // MyMeyer tracks its third-party DLLs in bin, so a release looks for them in its own snapshot first.
+            var snapshotBin = trackedBin?.Contains(name) == true ? Path.Combine(snapshot, "bin", name) : null;
             var packageRoot = Path.Combine(snapshot, "packages") + "\\";
             string source;
             if (desired.StartsWith(packageRoot, StringComparison.OrdinalIgnoreCase))
@@ -280,12 +294,12 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 // A HintPath can name a package version packages.config never restores. Visual Studio then quietly falls back
                 // to the checkout's bin folder; accept that copy only when it is exactly the version the Reference declares.
                 project.HintVersions.TryGetValue(hint, out var declared);
-                source = new[] { Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name) }
-                    .FirstOrDefault(path => declared is not null && VersionOf(path) == declared) ?? "";
+                source = new[] { snapshotBin, Path.Combine(sourceRoot, "bin", name), Path.Combine(settings.RepositoryRoot, "bin", name) }
+                    .OfType<string>().FirstOrDefault(path => declared is not null && VersionOf(path) == declared) ?? "";
             }
             else
             {
-                source = File.Exists(desired) ? desired : Path.GetFullPath(Path.Combine(originalDirectory, hint));
+                source = File.Exists(desired) ? desired : File.Exists(snapshotBin) ? snapshotBin : Path.GetFullPath(Path.Combine(originalDirectory, hint));
                 if (!File.Exists(source))
                     source = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Files.Child(settings.RepositoryRoot, project.RelativePath))!, hint));
                 if (!File.Exists(source)) source = Path.Combine(sourceRoot, "bin", name);
