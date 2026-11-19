@@ -61,6 +61,7 @@ internal static partial class SelfTest
             await CheckSolutionDependencies(home, settings.MSBuild);
             await CheckBuildHooks(home, settings.MSBuild);
             await CheckLibraryLoop(home, settings.MSBuild);
+            await CheckReleaseFiles(home, settings.MSBuild);
             settings.RepositoryRoot = Path.Combine(home, "repository with spaces");
             settings.WebfarmRoot = Path.Combine(home, "farm");
             settings.StateRoot = Path.Combine(home, "state");
