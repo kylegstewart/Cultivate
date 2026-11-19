@@ -362,7 +362,8 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
                 page.Add(2, (path, text));
                 continue;
             }
-            page.Add(2, (path, text), ($"  changed again since the merge; {basis}'s version is copied:", gold));
+            page.Add(2, (path, text), ($"  not exactly as on the pull request; {basis}'s version is copied:", gold));
+            if (change.Commits.Count == 0) page.Add(6, ("the merge itself changed it (for example, resolving a conflict)", muted));
             foreach (var commit in change.Commits) page.Add(6, (Short(commit.Commit), muted), ("  " + commit.Subject, text));
         }
 

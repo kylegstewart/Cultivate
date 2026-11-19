@@ -174,8 +174,8 @@ internal static partial class SelfTest
         Check(full.Contains("Page.dll Page\\Page.csproj Also carries 2 other merged changes, which go to production with it: c0ffee1 Other merged change beef123 a4 page"),
             "each DLL lists the other merged changes it takes to production");
         Check(full.Contains("CultivateReleasePackage.dll 2.0.0.0 for Shop\\Shop.csproj"), "changed packages show their versions");
-        Check(full.Contains("Page/Again.css changed again since the merge; master's version is copied: a1a1a1a a1 again") && full.Contains("Page/View.ascx"),
-            "a content file changed again since the merge is flagged with the commits that changed it");
+        Check(full.Contains("Page/Again.css not exactly as on the pull request; master's version is copied: a1a1a1a a1 again") && full.Contains("Page/View.ascx"),
+            "a content file other merged work also changed is flagged with the commits that changed it");
         Check(full.Contains("Db/Proc.sql SQL script: release it through the database process") && full.Contains("Page/Reverted.js Undone on master since the merge") &&
             full.Contains("Page/Old.js Not on master: nothing to upload. Remove it from production by hand"),
             "files left out and files deleted are each listed with their reason, never only counted");
@@ -361,7 +361,7 @@ internal static partial class SelfTest
             shown.Contains("other merged changes, which go to production with it") && shown.Contains("C removes it first"),
             "the screen lists merged pull requests, then previews the chosen one's folder, its existing files, and the other merged changes its DLL carries");
         Check(Listing(folder20).SequenceEqual(["Page.dll", "View.ascx"], Files.Comparer) && File.GetLastWriteTimeUtc(Path.Combine(folder20, "Page.dll")) > writtenBefore &&
-            shown.Contains("Building Page (3/3)") && shown.Contains("RELEASE FILES READY") && shown.Contains("Project DLL") && shown.Contains("replaced"),
+            shown.Contains("Building Page (3/3, release file)") && shown.Contains("RELEASE FILES READY") && shown.Contains("Project DLL") && shown.Contains("replaced"),
             "building from the screen shows live progress and writes the release folder, and the result lists the files it replaced");
         Check(run.Contains("\u001b]8;") && run.Contains(new Uri(folder20).AbsoluteUri) && offered.All(actions => actions.SequenceEqual([ReleaseScreen.OpenFolder, ReleaseScreen.Back])) &&
             explored.SequenceEqual([folder20]), "the result links the folder and opens it in Explorer through the injected launcher, then goes back");
