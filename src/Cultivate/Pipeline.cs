@@ -114,7 +114,9 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         }
     }
 
-    internal async Task<List<DeployFile>> Build(Plan plan, string snapshot, string run, Action<string> progress)
+    /// <param name="support">For a release: every project to build in dependency order, including the unchanged projects the plan's projects
+    /// compile against, and a list that records each reference taken from outside the snapshot. Null builds only the plan's projects.</param>
+    internal async Task<List<DeployFile>> Build(Plan plan, string snapshot, string run, Action<string> progress, SupportBuild? support = null)
     {
         var context = new FailureContext("Reference preparation");
         try
@@ -134,11 +136,13 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             // Capture.targets points every reference to a built library assembly at that build, whatever version the project declares.
             if (libraryFiles.Count != 0) environment["CultivateLibraryDirectory"] = Path.Combine(run, "libraries") + "\\";
             var libraryNames = LibraryLoop.Assemblies(plan).ToHashSet(Files.Comparer);
-            var internalNames = plan.Projects.Select(x => x.Assembly).Concat(libraryNames).ToHashSet(Files.Comparer);
-            foreach (var project in plan.Projects)
+            var projects = support?.Order ?? plan.Projects;
+            var internalNames = projects.Select(x => x.Assembly).Concat(libraryNames).ToHashSet(Files.Comparer);
+            foreach (var project in projects)
             {
                 context = new("Reference preparation") { Project = project.RelativePath, Log = Path.Combine(run, "build.log") };
-                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, libraryNames, environment, run);
+                await Prepare(project, snapshot, plan.Target.Worktree ?? settings.RepositoryRoot, seeds, internalNames, libraryNames, environment, run,
+                    support?.Outside);
                 context = context with { Stage = "Project evaluation" };
                 var full = Files.Child(snapshot, project.RelativePath);
                 var metadataText = await Commands.Run(settings.MSBuild,
@@ -156,7 +160,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     if (reference.TryGetProperty("ReferenceOutputAssembly", out var outputAssembly) &&
                         outputAssembly.GetString()?.Equals("false", StringComparison.OrdinalIgnoreCase) == true) continue;
                     var relative = Path.GetRelativePath(snapshot, reference.GetProperty("FullPath").GetString()!);
-                    if (plan.Projects.Any(x => Files.Comparer.Equals(x.RelativePath, relative))) continue;
+                    if (projects.Any(x => Files.Comparer.Equals(x.RelativePath, relative))) continue;
                     Files.Child(snapshot, relative);
                     var referenceMetadata = await Commands.Run(settings.MSBuild,
                         [Files.Child(snapshot, relative), "-nologo", "-p:Configuration=Debug", "-getProperty:TargetPath"],
@@ -171,6 +175,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                         throw new FileNotFoundException($"An existing compiled DLL for unchanged project {relative} is required. Build that dependency separately; Cultivate does not automatically rebuild unchanged projects.", source);
                     Directory.CreateDirectory(Path.GetDirectoryName(existingTarget)!);
                     File.Copy(source, existingTarget);
+                    support?.Outside.Add(OutsideReference.Of(source, project.RelativePath));
                 }
                 context = context with { Stage = "Build input validation" };
                 var evaluatedInputs = new HashSet<string>(Files.Comparer);
@@ -184,7 +189,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 foreach (var change in plan.Changes.Where(x => project.Owns(x.Path) && new[] { ".cs", ".resx" }.Contains(Path.GetExtension(x.Path), Files.Comparer)))
                     if (!evaluatedInputs.Contains(change.Path.Replace('/', '\\')))
                         throw new InvalidOperationException($"MSBuild does not compile {change.Path} in Debug. Deployment stopped.");
-                progress($"Building {project.Assembly} ({plan.Projects.IndexOf(project) + 1}/{plan.Projects.Count})");
+                progress($"Building {project.Assembly} ({projects.IndexOf(project) + 1}/{projects.Count})");
                 context = context with { Stage = "Build", BinaryLog = Path.Combine(run, project.Assembly + ".binlog") };
                 var arguments = new List<string>
                 {
@@ -231,7 +236,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
     }
 
     private async Task Prepare(ProjectInfo project, string snapshot, string sourceRoot, string seeds, HashSet<string> internalNames,
-        HashSet<string> libraryNames, Dictionary<string, string> environment, string run)
+        HashSet<string> libraryNames, Dictionary<string, string> environment, string run, List<OutsideReference>? outside = null)
     {
         var directory = Path.GetDirectoryName(Files.Child(snapshot, project.RelativePath))!;
         var originalDirectory = Path.GetDirectoryName(Files.Child(sourceRoot, project.RelativePath))!;
@@ -297,10 +302,11 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 throw new InvalidOperationException($"Incompatible input DLLs named {name}. Resolve references before deploying.");
             File.AppendAllText(Path.Combine(run, "build.log"), $"Reference {name}: {source}\n");
             File.Copy(source, seeded, true);
+            if (!source.StartsWith(Files.Full(snapshot) + "\\", StringComparison.OrdinalIgnoreCase)) outside?.Add(OutsideReference.Of(source, project.RelativePath));
         }
     }
 
-    private static string? VersionOf(string path)
+    internal static string? VersionOf(string path)
     {
         if (!File.Exists(path)) return null;
         try { return AssemblyName.GetAssemblyName(path).Version?.ToString(); }
