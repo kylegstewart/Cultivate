@@ -156,7 +156,9 @@ internal static partial class SelfTest
         SupportProjects = [new(@"Core\Core.csproj", "Core", @"Page references ..\bin\Core.dll, a build output Git does not track", true, true)],
         Existing = [new("notes.txt", 4, "Not written by Cultivate"), new("Page.dll", 5120, "Written by Cultivate for PR #20 on 2026-11-18 10:00")],
         Warnings = ["Page/Again.css changed again on master after the merge (a1a1a1a); master's version is used."],
-        Errors = errors ? [@"Page\Page.csproj has no webfarm copy target."] : []
+        Errors = errors ? [@"Page\Page.csproj has no webfarm copy target."] : [],
+        Pull = new("master", @"C:\fixture\MyMeyer", "4044096" + new string('4', 33), "4044096" + new string('4', 33), 7, ReleasePullOutcome.Behind,
+            @"master in C:\fixture\MyMeyer is 7 commit(s) behind origin; building pulls it.")
     };
 
     private static void CheckReleasePreview()
@@ -179,6 +181,8 @@ internal static partial class SelfTest
         Check(full.Contains("Db/Proc.sql SQL script: release it through the database process") && full.Contains("Page/Reverted.js Undone on master since the merge") &&
             full.Contains("Page/Old.js Not on master: nothing to upload. Remove it from production by hand"),
             "files left out and files deleted are each listed with their reason, never only counted");
+        Check(full.Contains(@"built from master at abcdef1 master in C:\fixture\MyMeyer is 7 commit(s) behind origin; building pulls it. FOLDER"),
+            "the preview says, under the pull request, how far the local master is behind origin and that building pulls it");
         Check(full.Contains("Built from master so the DLLs above compile. They are not copied to the folder. Core.dll Page references ..\\bin\\Core.dll"),
             "support projects are described as built from master so the DLLs compile, and not released");
         Check(full.Contains("! Page/Again.css changed again on master") && full.Contains("Enter build") && full.Contains("C remove earlier files, then build") &&
@@ -276,6 +280,8 @@ internal static partial class SelfTest
         built.Files.AddRange([new("Page.dll", ReleaseKind.ProjectDll, @"Page\Page.csproj", 5120, "hash", "1.0.0.0", true),
             new("View.ascx", ReleaseKind.Content, @"Page\View.ascx", 7, "hash", null, false)]);
         built.OutsideReferences.Add(new("Helpers.dll", @"C:\fixture\checkout\bin\Helpers.dll", "1.0.0.0", new DateTime(2026, 11, 1, 9, 0, 0), @"Page\Page.csproj"));
+        built.Pull = built.Pull! with { After = "2bc2fa7" + new string('2', 33), Outcome = ReleasePullOutcome.Pulled,
+            Detail = @"Pulled master: 7 new commit(s), 4044096 → 2bc2fa7 (C:\fixture\MyMeyer)" };
         var card = Regex.Replace(Capture(ReleaseScreen.ResultCard(built, true), 120, 40), @"\s+", " ");
         Check(card.Contains("RELEASE FILES READY") && card.Contains("Wrote 2 files for PR #21: 27220 Stop Pay Removed") && card.Contains(@"C:\fixture\Documents\27220") &&
             card.Contains($"Page.dll Project DLL {TidySizes.Format(5120)} 1.0.0.0 replaced") && card.Contains($"View.ascx Content file {TidySizes.Format(7)} new") &&

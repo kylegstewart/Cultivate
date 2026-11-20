@@ -39,7 +39,7 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
 
         Task<ReleaseResult> Again(ReleaseResult shown, bool clean, bool reuse) => console.Status().StartAsync(
             $"Fetching PR #{shown.PullRequest.Number} and {basis} again and checking its release files...",
-            _ => release.Preview(shown.PullRequest.Number, new(Clean: clean, ReuseDependencies: reuse)));
+            _ => release.Preview(shown.PullRequest.Number, new(Clean: clean, ReuseDependencies: reuse, NoPull: shown.NoPull)));
 
         async Task Release(int number)
         {
@@ -194,6 +194,8 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
             new Paragraph(result.Folder, new Style(Color.FromHex(TerminalStyle.Text), decoration: Decoration.Bold), new Link(new Uri(result.Folder).AbsoluteUri)),
             new Markup(Muted(result.Files.Count == 0 ? "Nothing needed releasing." : "Upload every file in this folder to the Code Release Manager."))
         };
+        if (result.Pull is { } pull)
+            rows.Add(new Markup(pull.Outcome == ReleasePullOutcome.Pulled ? $"[{TerminalStyle.Accent}]{Terminal.Escape(pull.Detail)}[/]" : Muted(pull.Detail)));
         if (result.Files.Count != 0)
         {
             var table = new Table().Border(TableBorder.None).Expand()
@@ -296,6 +298,8 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
                 ? $"merged {merged.ToLocalTime():yyyy-MM-dd HH:mm}" : "",
             preview.BaseCommit.Length == 0 ? "" : $"built from {basis} at {Short(preview.BaseCommit)}"
         }.Where(part => part.Length != 0)), muted));
+        if (preview.Pull is { } pull)
+            page.Add(0, (pull.Detail, pull.Outcome is ReleasePullOutcome.LocalCommits or ReleasePullOutcome.NotUpdated ? gold : muted));
         if (!preview.CanBuild) page.Add(0, ("These release files cannot be built. CANNOT BUILD below says why.", "bold " + ReleaseScreen.Danger));
 
         var planned = preview.Projects.Select(project => project.Assembly + ".dll").Concat(preview.Packages.Select(package => package.Name))

@@ -5,7 +5,8 @@ namespace Cultivate;
 /// <param name="Folder">Absolute folder to write instead of <c>ReleaseRoot\name</c>.</param>
 /// <param name="Clean">First remove files an earlier release run wrote there and nobody has changed since.</param>
 /// <param name="ReuseDependencies">Compile against the checkout's DLLs of unchanged projects instead of building them from master.</param>
-internal sealed record ReleaseOptions(string? Name = null, string? Folder = null, bool Clean = false, bool ReuseDependencies = false);
+/// <param name="NoPull">Leave the local base branch and origin's remote-tracking branch where they are instead of bringing them to the fetched tip.</param>
+internal sealed record ReleaseOptions(string? Name = null, string? Folder = null, bool Clean = false, bool ReuseDependencies = false, bool NoPull = false);
 
 /// <summary>A merged pull request as the GitHub CLI describes it; <see cref="HeadCommit"/> is the head fetched from origin.</summary>
 internal sealed record ReleasePullRequest(int Number, string Title, string Author, string Url, string HeadBranch, string BaseBranch,
@@ -37,6 +38,19 @@ internal sealed record ReleaseProject(string Project, string Assembly, List<Rele
 internal sealed record ReleasePackage(string Name, string Version, string HintPath, string Project);
 /// <summary>An unchanged project a released project compiles against: built from the snapshot first, never released.</summary>
 internal sealed record SupportProject(string Project, string Assembly, string Reason, bool HasWebfarmTarget, bool Built);
+/// <summary>What building did to the developer's local base branch, or in a preview would do to it.</summary>
+internal static class ReleasePullOutcome
+{
+    internal const string Pulled = "Pulled", UpToDate = "Already up to date", Behind = "Behind origin", LocalCommits = "Has local commits",
+        NotUpdated = "Not updated", NoBranch = "No local branch", Off = "Pull turned off";
+}
+
+/// <summary>
+/// The local base branch against the fetched tip: <see cref="Worktree"/> is where it is checked out, if anywhere, <see cref="Before"/> and
+/// <see cref="After"/> its commit before and after, and <see cref="Commits"/> the commits it gained, is behind by, or has that origin lacks.
+/// </summary>
+internal sealed record ReleasePull(string Branch, string? Worktree, string Before, string After, int Commits, string Outcome, string Detail);
+
 /// <summary>A file written to the release folder, as it was verified there.</summary>
 internal sealed record ReleaseFile(string Name, string Kind, string Source, long Size, string Sha256, string? AssemblyVersion, bool Replaced);
 /// <summary>A file already in the release folder that this run did not write, and whether an earlier release run did.</summary>
@@ -73,6 +87,9 @@ internal sealed class ReleaseResult
     public string Folder { get; init; } = "";
     public bool Clean { get; init; }
     public bool ReuseDependencies { get; init; }
+    public bool NoPull { get; init; }
+    /// <summary>The local base branch: what building would do to it, or once <see cref="Written"/>, what building did.</summary>
+    public ReleasePull? Pull { get; set; }
     public List<ReleaseChange> Changes { get; init; } = [];
     public List<ReleaseProject> Projects { get; init; } = [];
     public List<ReleasePackage> Packages { get; init; } = [];

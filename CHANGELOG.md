@@ -5,6 +5,13 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: building release files now also pulls master, so GitHub Desktop no longer shows it behind afterwards. `origin/master`
+  moves to the commit the files were built from, and your local `master` fast-forwards to it in whichever checkout or worktree has it
+  checked out (or just moves, when none does). Local changes the pull does not need to touch stay as they are. When `master` has
+  commits origin does not, or the pull would overwrite files you changed, `master` is left as it is and the result warns with the files
+  and what to do; the release files are built from origin's master either way. The preview says how far behind `master` is, the result
+  says what was pulled, and `cultivate release --no-pull` leaves `master` and `origin/master` where they are.
+
 ## 1.2.0 — 2026-11-19
 
 - Fix: building release files or activating a deployment no longer stops with "Incompatible input DLLs" when two of the projects it

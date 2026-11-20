@@ -29,12 +29,14 @@ internal static class Program
                                                   terminal UI's Choose files to deploy; an excluded build
                                                   input is built at its baseline contents
           restore --yes                           Stop updates and restore the original webfarm files
-          release --pr NUMBER [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies]
+          release --pr NUMBER [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies] [--no-pull]
                                                   Build a merged pull request's release files from master into
                                                   a folder named after its ticket (JSON); without --yes only
-                                                  previews. --clean first removes files an earlier release
-                                                  wrote there; --reuse-dependencies compiles against your
-                                                  checkout's DLLs instead of building unchanged dependencies
+                                                  previews. Building also pulls master, fast-forward only, when
+                                                  Git can without touching local changes; --no-pull leaves it.
+                                                  --clean first removes files an earlier release wrote there;
+                                                  --reuse-dependencies compiles against your checkout's DLLs
+                                                  instead of building unchanged dependencies
           warmup [--url URL] [--timeout SECONDS] [--json]
                                                   Request the dev site until it answers and report errors
           tickets                                 List each ticket's worktrees across repositories (JSON)
