@@ -360,7 +360,7 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
     }
 
     /// <summary>The line of a Git failure that says what went wrong, without Git's exit code or its error: prefix.</summary>
-    private static string GitProblem(Exception exception)
+    internal static string GitProblem(Exception exception)
     {
         var lines = exception.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Skip(exception.Message.StartsWith("git.exe failed", StringComparison.Ordinal) ? 1 : 0).ToList();
