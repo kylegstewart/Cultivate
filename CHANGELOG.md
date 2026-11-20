@@ -5,6 +5,17 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: release files now go in a `Releases` folder in your Documents folder (`Documents\Releases\<ticket>`) instead of
+  straight into Documents. Settings that still have the old default, the Documents folder itself, move there on their own; a folder
+  you chose stays. The folder is created the first time release files are written, and release folders already in Documents stay
+  where they are.
+- Improvement: **Open solution** → **Open main worktree solution** now pulls the main worktree's branch before Visual Studio starts,
+  so the solution opens on current code. It fetches the branch from origin and fast-forwards it, the same way building release files
+  pulls master: local commits, or local changes the pull would overwrite, leave it as it is with a warning. One line says what was
+  pulled, or why not (detached HEAD, a branch origin does not have, a failed fetch), and which branch it is on when that is not the
+  base branch. The solution opens either way; a warning stays on screen until you press a key. Opening a worktree or a local branch
+  pulls nothing.
+
 ## 1.2.1 — 2026-11-20
 
 - Improvement: building release files now also pulls master, so GitHub Desktop no longer shows it behind afterwards. `origin/master`

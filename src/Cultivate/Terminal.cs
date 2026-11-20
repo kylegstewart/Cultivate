@@ -196,10 +196,18 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             var choice = Select("Which repository's main worktree?", choices);
             if (choice == "Back") return;
             var root = roots[choices.FindIndex(item => item.Label == choice)];
+            // Pulling never stops the solution from opening; a warning stays on screen until a key is pressed.
+            var pull = await AnsiConsole.Status().StartAsync("Pulling the main worktree...", async context =>
+            {
+                var myMeyer = Files.Comparer.Equals(await git.MainWorktree(settings.RepositoryRoot), root);
+                return await new BasePull(root, git, "cultivate open").CheckedOut(myMeyer ? settings.BaseBranch : null,
+                    message => context.Status(Escape(message) + "..."));
+            });
+            AnsiConsole.MarkupLine($"[{(pull.Warning ? TerminalStyle.Gold : TerminalStyle.Muted)}]{Escape(pull.Detail)}[/]");
             var mainSolution = SelectSolution(root);
             var ide = await Settings.FindVisualStudio()
                 ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution.");
-            await Open(ide, mainSolution, [], "Opening the main worktree solution...");
+            await Open(ide, mainSolution, [], "Opening the main worktree solution...", pull.Warning);
             return;
         }
         if (target is null) return;
@@ -237,8 +245,9 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         await Open(visualStudio, solution, files, "Opening the solution and changed source files...");
     }
 
-    /// <summary>Fills in the solution's missing ignored references first, so Visual Studio loads its projects with them resolved.</summary>
-    private async Task Open(string visualStudio, string solution, List<string> files, string status)
+    /// <summary>Fills in the solution's missing ignored references first, so Visual Studio loads its projects with them resolved.
+    /// <paramref name="pause"/> waits for a key afterwards even without warnings, so one shown before stays readable.</summary>
+    private async Task Open(string visualStudio, string solution, List<string> files, string status, bool pause = false)
     {
         SolutionDependencies.Result prepared;
         try
@@ -252,7 +261,11 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             prepared = new(0, 0, 0, ["Could not prepare the solution's dependencies: " + exception.Message]);
         }
         await AnsiConsole.Status().StartAsync(status, _ => SolutionOpener.Open(visualStudio, solution, files));
-        if (prepared.Warnings.Count == 0) return;
+        if (prepared.Warnings.Count == 0)
+        {
+            if (pause) Pause();
+            return;
+        }
         if (prepared.Summary is { } summary) AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]{Escape(summary)}[/]");
         foreach (var warning in prepared.Warnings) AnsiConsole.MarkupLine($"[{TerminalStyle.Gold}]{Escape(warning)}[/]");
         Pause();

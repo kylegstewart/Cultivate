@@ -52,6 +52,8 @@ internal static partial class SelfTest
             await CheckWorktreeTidy(home);
             await CheckCleanup(home);
             await CheckLegacyWatcher(home);
+            await CheckReleaseRoot(home);
+            await CheckMainWorktreePull(home);
             // Fixtures need only MSBuild; they never read or write the user's saved settings.
             var settings = await Settings.Read();
             if (!File.Exists(settings.MSBuild))

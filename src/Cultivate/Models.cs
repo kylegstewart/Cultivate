@@ -87,7 +87,7 @@ internal sealed class Settings
     public List<string>? LibraryRepositories { get; set; }
     /// <summary>Days a worktree must go unused before Clean up offers to delete it, when deleting it loses nothing.</summary>
     public int CleanupDays { get; set; } = 14;
-    /// <summary>Folder that holds one folder of release files per ticket, built by <c>cultivate release</c>.</summary>
+    /// <summary>Folder that holds one folder of release files per ticket, built by <c>cultivate release</c>; <c>Documents\Releases</c> by default.</summary>
     public string ReleaseRoot { get; set; } = "";
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
@@ -145,8 +145,16 @@ internal sealed class Settings
             if (Directory.Exists(guess)) SqlMirrorRoot = guess;
         }
         if (LibraryRepositories is null && LibraryLoop.Discover(RepositoryRoot) is { Count: > 0 } libraries) LibraryRepositories = libraries;
-        if (string.IsNullOrWhiteSpace(ReleaseRoot)) ReleaseRoot = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        ReleaseRoot = ReleaseRootFor(ReleaseRoot, Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
     }
+
+    /// <summary>
+    /// The release root for a saved <paramref name="saved"/>: unset, or the <paramref name="documents"/> folder itself, the default before
+    /// release files moved into its Releases folder, means <c>Documents\Releases</c>; any other folder is kept. Creates nothing.
+    /// </summary>
+    internal static string ReleaseRootFor(string saved, string documents) =>
+        string.IsNullOrWhiteSpace(saved) || Path.IsPathFullyQualified(saved) && Files.Comparer.Equals(Files.Full(saved), Files.Full(documents))
+            ? Path.Combine(documents, "Releases") : saved;
 
     public List<string> Problems()
     {
@@ -167,7 +175,7 @@ internal sealed class Settings
             problems.Add("SiteUrl must be the http or https address of your dev site, for example https://mywebfarm-dev02.example.com/.");
         if (CleanupDays < 1) problems.Add("CleanupDays must be 1 or more.");
         if (!string.IsNullOrWhiteSpace(ReleaseRoot) && !Path.IsPathFullyQualified(ReleaseRoot))
-            problems.Add("ReleaseRoot must be an absolute folder for release files, for example your Documents folder.");
+            problems.Add("ReleaseRoot must be an absolute folder for release files, for example Documents\\Releases.");
         return problems;
     }
 
