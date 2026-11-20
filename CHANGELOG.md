@@ -5,6 +5,16 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: build the Meyer Online web release package. The new home action Build MeyerOnline release (and `cultivate online-release`)
+  does in your MeyerOnline checkout what you did by hand: it switches the checkout to `master` and pulls it (fast-forward only), runs
+  `npm install` when `node_modules` is missing or the pull changed `package.json`, publishes `Meyer.Online.Server` with its
+  `FolderProfile` publish profile exactly as Visual Studio does while `npm run build-prod` builds the app, copies the app's `www` folder
+  into the publish folder as `wwwroot`, and zips the publish folder into `MORelease\MORelease.zip` in your release folder, replacing the
+  old zip only once the new one is complete and checked. Anything Git cannot do exactly stops it before anything else changes: a merge
+  or rebase in progress, modified tracked files (unless you confirm, or pass `--allow-local-changes`), local commits on `master`, or
+  `master` checked out in another worktree. The preview says what building would do; the result gives the zip's size, files and SHA-256,
+  the commit built, what was pulled and switched, and each step's time. The checkout is found beside your MyMeyer checkout, or set with
+  `cultivate setup --meyeronline PATH`. It never touches a webfarm or a database.
 - Improvement: release files now go in a `Releases` folder in your Documents folder (`Documents\Releases\<ticket>`) instead of
   straight into Documents. Settings that still have the old default, the Documents folder itself, move there on their own; a folder
   you chose stays. The folder is created the first time release files are written, and release folders already in Documents stay

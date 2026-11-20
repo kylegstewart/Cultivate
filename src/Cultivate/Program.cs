@@ -5,7 +5,7 @@ namespace Cultivate;
 
 internal static class Program
 {
-    private static string Help => $"""
+    internal static string Help => $"""
         Cultivate {Files.Version}
         Preview, build, and activate a MyMeyer development version on your dev webfarm.
 
@@ -45,6 +45,13 @@ internal static class Program
                                                   --reuse-dependencies compiles against your checkout's DLLs
                                                   instead of building unchanged dependencies. Exits 2 when a
                                                   preview cannot build every repository, 1 when building one failed
+          online-release [--yes] [--allow-local-changes]
+                                                  Build the Meyer Online web package (JSON): switch the MeyerOnline
+                                                  checkout to master and pull it (fast-forward only), publish
+                                                  Meyer.Online.Server with FolderProfile, npm run build-prod, copy
+                                                  www in as wwwroot, and zip it to ReleaseRoot\MORelease\MORelease.zip;
+                                                  without --yes only previews. Modified tracked files stop it unless
+                                                  --allow-local-changes
           warmup [--url URL] [--timeout SECONDS] [--json]
                                                   Request the dev site until it answers and report errors
           tickets                                 List each ticket's worktrees across repositories (JSON)
@@ -59,6 +66,7 @@ internal static class Program
                 [--worktrees PATH] [--site-url URL] [--warmup true|false]
                 [--sql-mirror PATH] [--stop-legacy-watcher true|false]
                 [--library-repositories PATH;PATH|none] [--cleanup-days N] [--release-root PATH]
+                [--meyeronline PATH]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values
@@ -161,6 +169,7 @@ internal static class Program
                 case "worktrees": return await WorktreeTidy.Command(settings, git, args);
                 case "cleanup": return await CleanupCommand.Run(settings, git, bridge, args);
                 case "release": return await ReleaseFiles.Command(settings, git, args);
+                case "online-release": return await OnlineRelease.Command(settings, git, args);
                 case "restore":
                     if (!args.Contains("--yes")) throw new InvalidOperationException("Restoration requires --yes or the interactive menu.");
                     Print(await bridge.Call("Restore"));
