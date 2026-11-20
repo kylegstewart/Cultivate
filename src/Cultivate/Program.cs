@@ -29,14 +29,22 @@ internal static class Program
                                                   terminal UI's Choose files to deploy; an excluded build
                                                   input is built at its baseline contents
           restore --yes                           Stop updates and restore the original webfarm files
-          release --pr NUMBER [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies] [--no-pull]
+          release --pr NUMBER|URL [--repo NAME|OWNER/NAME|PATH] [--yes] [--name NAME] [--out FOLDER]
+                [--clean] [--reuse-dependencies] [--no-pull] [--no-linked]
                                                   Build a merged pull request's release files from master into
                                                   a folder named after its ticket (JSON); without --yes only
-                                                  previews. Building also pulls master, fast-forward only, when
-                                                  Git can without touching local changes; --no-pull leaves it.
+                                                  previews. A number is MyMeyer's unless --repo names another
+                                                  clone beside it; a pull request URL names its repository.
+                                                  The pull requests its Associated PRs section links are built
+                                                  too (--no-linked: only this one). Each repository gets its own
+                                                  subfolder; a repository without projects is SQL, and its
+                                                  changed .sql files go to SQL. Building also pulls each
+                                                  release branch, fast-forward only, when Git can without
+                                                  touching local changes; --no-pull leaves them.
                                                   --clean first removes files an earlier release wrote there;
                                                   --reuse-dependencies compiles against your checkout's DLLs
-                                                  instead of building unchanged dependencies
+                                                  instead of building unchanged dependencies. Exits 2 when a
+                                                  preview cannot build every repository, 1 when building one failed
           warmup [--url URL] [--timeout SECONDS] [--json]
                                                   Request the dev site until it answers and report errors
           tickets                                 List each ticket's worktrees across repositories (JSON)

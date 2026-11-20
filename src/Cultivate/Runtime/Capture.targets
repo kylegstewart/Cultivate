@@ -14,6 +14,19 @@
                       Lines="@(_CultivateProjectArtifact->'$(CultivateRunDirectory)\captured\$(MSBuildProjectName)\%(Filename)%(Extension)')"
                       Overwrite="true" Encoding="UTF-8" />
   </Target>
+  <!-- A release of a repository other than MyMeyer: its projects have no webfarm copy target, so the output is captured after Build. -->
+  <Target Name="CultivateCaptureBuildOutput" AfterTargets="Build"
+          Condition="'$(CultivateRunDirectory)' != '' and '$(CultivateCaptureAfterBuild)' == 'true'">
+    <MakeDir Directories="$(CultivateRunDirectory)\manifests" />
+    <ItemGroup>
+      <_CultivateBuildOutput Include="$(TargetPath)" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_CultivateBuildOutput)"
+          DestinationFiles="@(_CultivateBuildOutput->'$(CultivateRunDirectory)\captured\$(MSBuildProjectName)\%(Filename)%(Extension)')" />
+    <WriteLinesToFile File="$(CultivateRunDirectory)\manifests\$(MSBuildProjectName).artifacts"
+                      Lines="@(_CultivateBuildOutput->'$(CultivateRunDirectory)\captured\$(MSBuildProjectName)\%(Filename)%(Extension)')"
+                      Overwrite="true" Encoding="UTF-8" />
+  </Target>
   <!-- Library in the loop: a reference to an assembly this run built from a library worktree compiles against that build,
        whatever version or HintPath the project declares. Only Cultivate's throwaway snapshot builds set the directory. -->
   <Target Name="CultivateLibraryReferences" BeforeTargets="ResolveAssemblyReferences"

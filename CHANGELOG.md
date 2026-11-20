@@ -15,6 +15,31 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   pulled, or why not (detached HEAD, a branch origin does not have, a failed fetch), and which branch it is on when that is not the
   base branch. The solution opens either way; a warning stays on screen until you press a key. Opening a worktree or a local branch
   pulls nothing.
+- Feature: building release files now also builds the pull requests a pull request links. After describing the requested pull request,
+  Cultivate reads the **Associated PRs** section of its description and of every linked pull request's own description (each one once),
+  and builds each merged one in its local clone beside your MyMeyer checkout, in the same run. Everything goes in the ticket folder, now
+  always with one subfolder per repository (for example `Releases\39126\MyMeyer` and `Releases\39126\Public--Applications`). A linked
+  pull request that is not merged, is merged into a branch other than its repository's release branch, cannot be read by the GitHub CLI,
+  or whose repository is not cloned is listed with the reason and skipped. One repository failing to build no longer stops the others:
+  their files are written, the result says which repository failed and why, and `cultivate release --yes` exits 1. `--no-linked` builds
+  only the requested pull request. Each repository's release branch is pulled as master is, and `--no-pull` leaves them all.
+- Feature: build release files for any cloned repository. `cultivate release --pr` also takes a pull request URL, and `--repo NAME`,
+  `--repo OWNER/NAME` or `--repo PATH` picks a clone beside MyMeyer for a number. In the terminal UI, **Build release files** still lists
+  MyMeyer's merged pull requests first; Ctrl+R lists another clone's, and a pasted pull request link builds that pull request in its own
+  repository. Another repository's releases are built from master, or from origin's default branch when it has no master. Its projects
+  need no `CopyBuildOutputToWebfarm` target: each project's own DLL is captured after its Debug build from master's snapshot, and a copy
+  of it that the repository tracks in Git is never mistaken for the build's. References are taken from the snapshot first (the
+  HintPath, the project's own `bin`, a `Libraries`/`Lib`-style folder), then from your checkout (the HintPath from your project
+  folder, which reaches sibling repositories such as `..\..\MyMeyer\bin`, then your project's `bin`), and each DLL taken from your
+  checkout is listed with its path, version and date. A reference found nowhere, or a NuGet package your checkout has not restored,
+  stops that repository's build and says where Cultivate looked; Cultivate never restores packages for it. SDK-style projects are not
+  supported and say so, without hiding the rest of the preview.
+- Feature: SQL changes are released too. A repository with no project files, such as Database--SQL, is a SQL repository: every `.sql`
+  file its pull request changed is copied to the ticket folder's `SQL` subfolder as the release branch has it now (with the usual
+  same / changed again / undone / deleted statuses), read straight from the commit with checkout line endings, so no checkout of the
+  whole repository is needed and two scripts whose names differ only by case each keep their own content. Such twins cannot share
+  the folder: the second goes in a subfolder, with a warning. Nothing is built or run. When two linked pull requests would use the
+  same subfolder, the second gets its own (`SQL (Other--SQL)`, `MyMeyer (PR 2824)`) and the preview says why.
 
 ## 1.2.1 — 2026-11-20
 

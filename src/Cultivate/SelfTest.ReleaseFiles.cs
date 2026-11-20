@@ -108,6 +108,8 @@ internal static partial class SelfTest
 
         // The developer's checkout last built Core and Helpers at the first commit; master's Core has gained NewApi since.
         await git.Git(root, "clone", "-q", origin, checkout);
+        // Its origin reads as GitHub's, so its release subfolder is MyMeyer; Git still fetches from the fixture origin.
+        await GitHubOrigin(git, checkout, origin, "https://github.com/fixture/MyMeyer.git");
         foreach (var name in new[] { "Core", "Helpers" })
             await Commands.Run(msbuild, [Path.Combine(checkout, name, name + ".csproj"), "-nologo", "-t:Build", "-p:Configuration=Release", "-v:minimal"], checkout, safety);
         foreach (var version in new[] { "1.0.0", "2.0.0" })
@@ -163,8 +165,8 @@ internal static partial class SelfTest
         Pull(20, "Use the new core value", "38636-2", m20, h20);
         var runs = Runs();
         var preview = await release.Preview(20);
-        var folder20 = Path.Combine(output, "38636");
-        Check(asked.Single() == "pr view 20 --json number,title,author,headRefName,baseRefName,state,mergedAt,mergeCommit,headRefOid,url",
+        var folder20 = Path.Combine(output, "38636", "MyMeyer");
+        Check(asked.Single() == "pr view 20 --json number,title,author,headRefName,baseRefName,state,mergedAt,mergeCommit,headRefOid,url,body",
             "a release asks the GitHub CLI for the pull request's merge commit, head, and base");
         Check(preview is { Written: false, CanBuild: true, Name: "38636", BaseCommit: var tip, ForkPoint: var fork } && tip == m20 && fork == c1 &&
             preview.Folder == folder20 && preview.Projects.Single().Assembly == "Page" && preview.Content.SequenceEqual(["Page/View.ascx"]) &&
@@ -246,7 +248,7 @@ internal static partial class SelfTest
         var a4 = await Commit(a3, "a4 page", (@"Page\Other.cs", "public class PageOther { public static int Seen => 2; }"));
         await Publish(a4, "refs/heads/master");
         Pull(21, "27220 Stop Pay Removed", "feature/stop-pay", squashed, h21);
-        var folder21 = Path.Combine(output, "27220");
+        var folder21 = Path.Combine(output, "27220", "MyMeyer");
         Directory.CreateDirectory(folder21);
         File.WriteAllText(Path.Combine(folder21, "notes.txt"), "mine");
         progress.Clear();
@@ -304,8 +306,8 @@ internal static partial class SelfTest
         await Publish(m23, "refs/heads/master");
         Pull(23, "Bump the package", "bump", m23, h23);
         var r23 = await release.Build(await release.Preview(23, new(Folder: Path.Combine(output, "package"))), _ => { });
-        var released = Path.Combine(output, "package", package + ".dll");
-        Check(Listing(Path.Combine(output, "package")).SequenceEqual([package + ".dll", "Shop.dll"], Files.Comparer) &&
+        var released = Path.Combine(output, "package", "MyMeyer", package + ".dll");
+        Check(Listing(Path.Combine(output, "package", "MyMeyer")).SequenceEqual([package + ".dll", "Shop.dll"], Files.Comparer) &&
             AssemblyName.GetAssemblyName(released).Version?.ToString() == "2.0.0.0" && r23.Packages.Single() is { Version: "2.0.0.0", Project: @"Shop\Shop.csproj" } &&
             r23.Files.Single(file => file.Name == package + ".dll") is { Kind: ReleaseKind.Package, AssemblyVersion: "2.0.0.0" } &&
             r23.SupportProjects.Single().Assembly == "Core", "a package bump in the pull request's project file releases the bumped package's DLL with the project");
@@ -388,8 +390,8 @@ internal static partial class SelfTest
         // Pulling master would replace the checkout's untracked bin\Third.dll with the one master now tracks; this run needs the checkout's own.
         var r24 = await release.Build(await release.Preview(24, new(Folder: Path.Combine(output, "tools"), NoPull: true)), progress.Add);
         var releaseLog = File.ReadAllText(Path.Combine(r24.RunDirectory, "build.log"));
-        Check(Listing(Path.Combine(output, "tools")).SequenceEqual(["Kit.dll", "Tools.dll"], Files.Comparer) &&
-            References(Path.Combine(output, "tools", "Tools.dll"))["Third"] == "2.0.0.0" && References(Path.Combine(output, "tools", "Kit.dll"))["Third"] == "2.0.0.0" &&
+        Check(Listing(Path.Combine(output, "tools", "MyMeyer")).SequenceEqual(["Kit.dll", "Tools.dll"], Files.Comparer) &&
+            References(Path.Combine(output, "tools", "MyMeyer", "Tools.dll"))["Third"] == "2.0.0.0" && References(Path.Combine(output, "tools", "MyMeyer", "Kit.dll"))["Third"] == "2.0.0.0" &&
             new[] { "Kit", "Tools" }.All(name => Files.Hash(Path.Combine(r24.RunDirectory, "references", "projects", name, "Third.dll")) == Files.Hash(third2)) &&
             releaseLog.Contains($"Reference Third.dll: {Path.Combine(r24.RunDirectory, "source", "bin", "Third.dll")}\n") &&
             !r24.OutsideReferences.Any(reference => reference.Name == "Third.dll"),
@@ -476,7 +478,7 @@ internal static partial class SelfTest
         var r27 = await release.Build(await release.Preview(27, new(Folder: Path.Combine(output, "lib"))), _ => { });
         var libLog = File.ReadAllText(Path.Combine(r27.RunDirectory, "build.log"));
         Check(r27.SupportProjects.Select(project => project.Assembly).Order().SequenceEqual(["Alpha", "Beta"]) &&
-            References(Path.Combine(output, "lib", "Gamma.dll"))["Lib"] == "2.0.0.0" && !r27.OutsideReferences.Any(reference => reference.Name == "Lib.dll") &&
+            References(Path.Combine(output, "lib", "MyMeyer", "Gamma.dll"))["Lib"] == "2.0.0.0" && !r27.OutsideReferences.Any(reference => reference.Name == "Lib.dll") &&
             libLog.Contains($"Reference Lib.dll: {Path.Combine(r27.RunDirectory, "source", "bin", "Lib.dll")}\n") &&
             libLog.Contains($"Reference Lib.dll: {Path.Combine(r27.RunDirectory, "source", "packages", "Lib.2.0.0", "lib", "net471", "Lib.dll")} (Alpha's copy: " +
                 @"Gamma's HintPath ..\..\LibSibling\Lib.dll is not in the snapshot, and Gamma depends on Alpha, which resolved this copy from the snapshot"),
@@ -509,7 +511,7 @@ internal static partial class SelfTest
         string[] dupVersions = ["DupA 1.0.0.0", "DupB 2.0.0.0", "DupC 1.0.0.0", "DupD 1.0.0.0"];
         var r28 = await release.Build(await release.Preview(28, new(Folder: Path.Combine(output, "dup"))), _ => { });
         var dupLog = File.ReadAllText(Path.Combine(r28.RunDirectory, "build.log"));
-        Check(dups.Select(dup => $"{dup.Item1} {References(Path.Combine(output, "dup", dup.Item1 + ".dll"))["Dup"]}").SequenceEqual(dupVersions) &&
+        Check(dups.Select(dup => $"{dup.Item1} {References(Path.Combine(output, "dup", "MyMeyer", dup.Item1 + ".dll"))["Dup"]}").SequenceEqual(dupVersions) &&
             !r28.OutsideReferences.Any(reference => reference.Name == "Dup.dll"),
             "in a release, projects referencing different copies of a same-named DLL each compile against their own, a later project's HintPath " +
             "in the snapshot wins over an earlier project's copy, and a project that resolves nothing uses another project's copy from the snapshot");
@@ -547,6 +549,7 @@ internal static partial class SelfTest
         var (git, output) = (fixture.Git, fixture.Output);
         var mine = Path.Combine(root, "mine");
         await git.Git(root, "clone", "-q", Path.Combine(root, "origin.git"), mine);
+        await GitHubOrigin(git, mine, Path.Combine(root, "origin.git"), "https://github.com/fixture/MyMeyer.git");
         Task<string> Mine(params string[] args) => git.Git(mine, args);
         await Mine("config", "user.email", "cultivate-test@localhost");
         await Mine("config", "user.name", "Cultivate isolated tests");
@@ -567,7 +570,7 @@ internal static partial class SelfTest
             return tip;
         }
         ReleaseOptions Options(int number, bool noPull = false) => new(Folder: Path.Combine(output, "pull" + number), NoPull: noPull);
-        string Released(int number, string name) => File.ReadAllText(Path.Combine(output, "pull" + number, name));
+        string Released(int number, string name) => File.ReadAllText(Path.Combine(output, "pull" + number, "MyMeyer", name));
         static bool SamePath(string? path, string expected) => path is not null && Files.Comparer.Equals(Files.Full(path), Files.Full(expected));
         var view = Path.Combine(mine, @"Page\View.ascx");
 
