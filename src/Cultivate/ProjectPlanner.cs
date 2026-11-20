@@ -16,6 +16,8 @@ internal sealed class ProjectInfo
     /// <summary>The assembly version each HintPath's Reference declares, for references that declare one.</summary>
     public Dictionary<string, string> HintVersions { get; init; } = [];
     public List<string> Imports { get; init; } = [];
+    /// <summary>The Debug build's output folder relative to the project, as the project file states it; bin\ when it states none.</summary>
+    public string OutputPath { get; init; } = @"bin\";
     /// <summary>Package HintPaths this project's changed file adds or changes. Their DLLs are published with the project's own DLL.</summary>
     public List<string> PackageDependencies { get; init; } = [];
 
@@ -41,7 +43,11 @@ internal sealed class ProjectInfo
             HintVersions = Items("HintPath").Select(x => (Hint: x.Value, Version: DeclaredVersion(x.Parent?.Attribute("Include")?.Value)))
                 .Where(x => x.Version is not null).DistinctBy(x => x.Hint, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(x => x.Hint, x => x.Version!, StringComparer.OrdinalIgnoreCase),
-            Imports = Items("Import").Select(x => x.Attribute("Project")?.Value ?? "").Where(x => !x.Contains('$')).ToList()
+            Imports = Items("Import").Select(x => x.Attribute("Project")?.Value ?? "").Where(x => !x.Contains('$')).ToList(),
+            OutputPath = Items("OutputPath").Where(x => !x.Value.Contains('$'))
+                .OrderBy(x => (x.Parent?.Attribute("Condition")?.Value ?? x.Attribute("Condition")?.Value) is { } condition
+                    ? condition.Contains("Debug", StringComparison.OrdinalIgnoreCase) ? 0 : 2 : 1)
+                .Select(x => x.Value.Trim()).FirstOrDefault(x => x.Length != 0) ?? @"bin\"
         };
     }
 
@@ -179,7 +185,8 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
     /// A project file that adds or bumps a package reference needs that package's DLL on the webfarm too, or the new project DLL
     /// runs against the old package. References the project file did not change are already deployed and are never republished.
     /// </summary>
-    internal async Task AddPackageDependencies(Plan plan, List<Change> compiled)
+    /// <param name="anyPackagesFolder">Also count a packages folder below the repository root, as a repository with one per project has.</param>
+    internal async Task AddPackageDependencies(Plan plan, List<Change> compiled, bool anyPackagesFolder = false)
     {
         var built = plan.Projects.Select(project => project.Assembly + ".dll")
             .Concat(LibraryLoop.Assemblies(plan).Select(assembly => assembly + ".dll")).ToHashSet(Files.Comparer);
@@ -196,7 +203,8 @@ internal sealed partial class Planner(Settings settings, GitRepository git, Brid
                 var name = Path.GetFileName(hint);
                 var package = Path.GetRelativePath(settings.RepositoryRoot, Path.GetFullPath(
                     Path.Combine(settings.RepositoryRoot, Path.GetDirectoryName(project.RelativePath)!, hint)));
-                if (hint.Contains('$') || !package.StartsWith(@"packages\", StringComparison.OrdinalIgnoreCase) ||
+                if (hint.Contains('$') || !(package.StartsWith(@"packages\", StringComparison.OrdinalIgnoreCase) ||
+                    anyPackagesFolder && package.Contains(@"\packages\", StringComparison.OrdinalIgnoreCase)) ||
                     !Path.GetExtension(name).Equals(".dll", StringComparison.OrdinalIgnoreCase) || built.Contains(name)) continue;
                 if (baseline?.Hints.Contains(hint, Files.Comparer) == true &&
                     baseline.HintVersions.GetValueOrDefault(hint) == project.HintVersions.GetValueOrDefault(hint)) continue;

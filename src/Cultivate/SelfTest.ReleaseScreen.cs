@@ -358,7 +358,8 @@ internal static partial class SelfTest
 
         // PR 20 again: it is first on your tab, and its folder holds the files the engine's run wrote.
         var folder20 = Path.Combine(output, "38636");
-        var writtenBefore = File.GetLastWriteTimeUtc(Path.Combine(folder20, "Page.dll"));
+        var files20 = Path.Combine(folder20, "MyMeyer");
+        var writtenBefore = File.GetLastWriteTimeUtc(Path.Combine(files20, "Page.dll"));
         picks.Enqueue(ReleaseScreen.OpenFolder);
         picks.Enqueue(ReleaseScreen.Back);
         var run = await Drive(Script(Press(ConsoleKey.Enter, '\r'), Press(ConsoleKey.Enter, '\r'), () => offered.Count == 2, Press(ConsoleKey.Escape)));
@@ -366,11 +367,11 @@ internal static partial class SelfTest
         Check(listed == 2 && shown.Contains("MINE 1") && shown.Contains("FOLDER " + folder20) && shown.Contains("DLLS TO BUILD (1)") &&
             shown.Contains("other merged changes, which go to production with it") && shown.Contains("C removes it first"),
             "the screen lists merged pull requests, then previews the chosen one's folder, its existing files, and the other merged changes its DLL carries");
-        Check(Listing(folder20).SequenceEqual(["Page.dll", "View.ascx"], Files.Comparer) && File.GetLastWriteTimeUtc(Path.Combine(folder20, "Page.dll")) > writtenBefore &&
+        Check(Listing(files20).SequenceEqual(["Page.dll", "View.ascx"], Files.Comparer) && File.GetLastWriteTimeUtc(Path.Combine(files20, "Page.dll")) > writtenBefore &&
             shown.Contains("Building Page (3/3, release file)") && shown.Contains("RELEASE FILES READY") && shown.Contains("Project DLL") && shown.Contains("replaced"),
             "building from the screen shows live progress and writes the release folder, and the result lists the files it replaced");
-        Check(run.Contains("\u001b]8;") && run.Contains(new Uri(folder20).AbsoluteUri) && offered.All(actions => actions.SequenceEqual([ReleaseScreen.OpenFolder, ReleaseScreen.Back])) &&
-            explored.SequenceEqual([folder20]), "the result links the folder and opens it in Explorer through the injected launcher, then goes back");
+        Check(run.Contains("\u001b]8;") && run.Contains(new Uri(files20).AbsoluteUri) && offered.All(actions => actions.SequenceEqual([ReleaseScreen.OpenFolder, ReleaseScreen.Back])) &&
+            explored.SequenceEqual([files20]), "the result links the folder and opens it in Explorer through the injected launcher, then goes back");
 
         // PR 22, typed: Esc during the build cancels it before anything is written.
         var folder22 = Path.Combine(output, "39050");

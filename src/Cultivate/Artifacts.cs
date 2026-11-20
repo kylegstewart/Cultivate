@@ -4,7 +4,8 @@ namespace Cultivate;
 
 internal static class Artifacts
 {
-    internal static List<DeployFile> Collect(string run, string snapshot, List<ProjectInfo> projects)
+    /// <param name="capturedAfter">The target the output was captured after when it is not the existing CopyBuildOutputToWebfarm target.</param>
+    internal static List<DeployFile> Collect(string run, string snapshot, List<ProjectInfo> projects, string? capturedAfter = null)
     {
         var files = new List<DeployFile>();
         void Stage(string source, string destination)
@@ -18,7 +19,8 @@ internal static class Artifacts
         {
             var manifest = Path.Combine(run, "manifests", Path.GetFileNameWithoutExtension(project.RelativePath) + ".artifacts");
             if (!File.Exists(manifest))
-                throw new FileNotFoundException($"The existing CopyBuildOutputToWebfarm target did not capture {project.Assembly}.", manifest);
+                throw new FileNotFoundException(capturedAfter is null ? $"The existing CopyBuildOutputToWebfarm target did not capture {project.Assembly}."
+                    : $"Cultivate did not capture {project.Assembly}'s output after its {capturedAfter} target.", manifest);
             var entries = File.ReadAllLines(manifest).Where(line => !string.IsNullOrWhiteSpace(line)).ToList();
             if (entries.Count != 1)
                 throw new InvalidDataException($"Expected only {project.Assembly}.dll in the project output manifest.");

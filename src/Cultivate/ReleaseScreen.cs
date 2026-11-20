@@ -9,14 +9,16 @@ namespace Cultivate;
 internal enum ReleaseChoice { Build, Clean, Back }
 
 /// <summary>
-/// The home screen's Build release files action: choose a merged pull request, check what its preview would write, build it, and open the
-/// folder. It never acts on the dev webfarm, so it needs no deployment status and nothing in it asks the bridge for anything.
+/// The home screen's Build release files action: choose a merged pull request in MyMeyer or, with Ctrl+R, another cloned repository, check what
+/// its preview and its linked pull requests' would write, build them, and open the folder. It never acts on the dev webfarm, so it needs no
+/// deployment status and nothing in it asks the bridge for anything.
 /// </summary>
 internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<string[], Task<string>>? gh = null)
 {
     internal const string Action = "Build release files", OpenFolder = "Open the folder in Explorer", Back = "Back";
     internal const string Danger = "#F0A3A3";
     internal const string ReuseQuestion = "Try again with your checkout's DLLs for the dependencies?";
+    internal const string RepositoryQuestion = "Which repository's merged pull requests?";
 
     internal Task Run() => Show(AnsiConsole.Console, KeyScreen.ReadKey, Terminal.Select,
         (question, preset) => AnsiConsole.Confirm(Terminal.Escape(question), preset), Terminal.Pause, Explore);
@@ -32,46 +34,58 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
         Func<string, bool, bool> confirm, Action pause, Action<string> explore)
     {
         var github = gh ?? PullRequests.GitHub(settings);
-        var basis = settings.BaseBranch;
-        var (mine, all, problem) = await console.Status().StartAsync("Listing merged pull requests with the GitHub CLI...", _ => ReleasePicker.Load(github, basis));
-        var picker = new ReleasePicker(mine, all, problem, basis);
-        var release = new ReleaseFiles(settings, git, github);
+        var clones = ReleaseRepositories.Clones(settings);
+        var runner = new ReleaseRunner(settings, git, github);
+        var repository = ReleaseRepositories.MainCheckout(settings);
 
-        Task<ReleaseResult> Again(ReleaseResult shown, bool clean, bool reuse) => console.Status().StartAsync(
-            $"Fetching PR #{shown.PullRequest.Number} and {basis} again and checking its release files...",
-            _ => release.Preview(shown.PullRequest.Number, new(Clean: clean, ReuseDependencies: reuse, NoPull: shown.NoPull)));
-
-        async Task Release(int number)
+        // Listing another repository's pull requests first asks its origin for its release branch.
+        async Task<(ReleaseRepository, ReleasePicker)> List(ReleaseRepository chosen) => await console.Status().StartAsync(chosen.Main
+            ? "Listing merged pull requests with the GitHub CLI..." : $"Listing {chosen.Name}'s merged pull requests with the GitHub CLI...", async _ =>
         {
-            var preview = await console.Status().StartAsync($"Fetching PR #{number} and {basis} from origin and working out its release files...",
-                _ => release.Preview(number));
+            chosen = await ReleaseRepositories.WithBranch(git, chosen);
+            var (mine, all, problem) = await ReleasePicker.Load(github, chosen.Branch, chosen.Main ? null : chosen.GitHub);
+            return (chosen, new ReleasePicker(mine, all, problem, chosen.Branch, repository: clones.Count > 1 ? chosen.Name : null, canChange: clones.Count > 1));
+        });
+
+        Task<ReleaseRun> Again(ReleaseRun shown, ReleaseRepository requested, bool clean, bool reuse) => console.Status().StartAsync(
+            $"Fetching PR #{shown.Releases[0].PullRequest.Number} and {shown.Releases[0].BaseBranch} again and checking its release files...",
+            _ => runner.Preview(requested, shown.Releases[0].PullRequest.Number,
+                new(Clean: clean, ReuseDependencies: reuse, NoPull: shown.Releases[0].NoPull, NoLinked: shown.NoLinked)));
+
+        async Task Release(ReleaseRepository requested, int number)
+        {
+            var preview = await console.Status().StartAsync(requested.Main
+                ? $"Fetching PR #{number} and {requested.Branch} from origin and working out its release files..."
+                : $"Fetching {requested.Name} PR #{number} from origin and working out its release files...", _ => runner.Preview(requested, number));
             ReleaseChoice? next = null;
             while (true)
             {
-                var removable = preview.Clean ? preview.Removed : Removable(preview.Folder);
+                var removable = Removables(preview);
                 var choice = next ?? new ReleasePreview(preview, removable).Show(console, readKey);
                 next = null;
                 if (choice == ReleaseChoice.Back) return;
+                var first = preview.Releases[0];
                 if (choice == ReleaseChoice.Clean)
                 {
                     // What --clean removes was read from the folder; a fresh preview that differs is shown before anything is built.
-                    var clean = await Again(preview, true, preview.ReuseDependencies);
+                    var clean = await Again(preview, requested, true, first.ReuseDependencies);
                     var same = Same(clean, preview, removable);
                     preview = clean;
                     if (!same) continue;
                 }
-                ReleaseResult? built;
+                ReleaseRun? built;
                 bool escaped;
-                try { (built, escaped) = Build(console, readKey, preview, release.Build); }
+                // With one repository a failure is thrown; with several, each one's failure is in the result.
+                try { (built, escaped) = Build(console, readKey, preview, runner.Build); }
                 catch (Exception exception) when (Failed(exception))
                 {
                     console.Write(Failure(exception, "Release build"));
-                    if (!preview.ReuseDependencies && FailedSupport(preview, exception) is { } support)
+                    if (!first.ReuseDependencies && FailedSupport(first, exception) is { } support)
                     {
-                        console.Write(ReuseCard(support, preview.BaseBranch));
+                        console.Write(ReuseCard(support, first.BaseBranch));
                         if (confirm(ReuseQuestion, false))
                         {
-                            var reuse = await Again(preview, preview.Clean, true);
+                            var reuse = await Again(preview, requested, first.Clean, true);
                             if (Same(reuse, preview, removable)) next = ReleaseChoice.Build;
                             preview = reuse;
                             continue;
@@ -91,14 +105,42 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
                 while (select("What next?", [
                     new(OpenFolder, "Open the release folder, ready to upload its files to the Code Release Manager."),
                     new(Back, "Return to the merged pull requests.")]) == OpenFolder)
-                    explore(built.Folder);
+                    explore(built.Releases.Count == 1 ? built.Releases[0].Folder : built.Folder);
                 return;
             }
         }
 
-        while (picker.Show(console, readKey) is { } number)
+        ReleasePicker? picker = null;
+        while (true)
         {
-            try { await Release(number); }
+            if (picker is null)
+            {
+                try { (repository, picker) = await List(repository); }
+                catch (Exception exception) when (Failed(exception) && !repository.Main)
+                {
+                    console.Write(TerminalStyle.Card(new Text(exception.Message), "CANNOT LIST PULL REQUESTS", TerminalStyle.Gold));
+                    pause();
+                    repository = ReleaseRepositories.MainCheckout(settings);
+                    continue;
+                }
+            }
+            if (picker.Show(console, readKey) is not { } number)
+            {
+                if (!picker.ChangeRepository) return;
+                var labels = clones.ToDictionary(clone => clones.Count(other => other.Name.Equals(clone.Name, StringComparison.OrdinalIgnoreCase)) == 1 ? clone.Name : clone.Root,
+                    Files.Comparer);
+                var label = select(RepositoryQuestion, labels.Select(pair => new MenuAction(pair.Key,
+                    (pair.Value.Main ? "Your MyMeyer checkout. " : "") + (pair.Value.GitHub ?? "Origin is not on GitHub") + "  |  " + pair.Value.Root)));
+                if (labels.TryGetValue(label, out var chosen) && !Files.Comparer.Equals(chosen.Root, repository.Root)) (repository, picker) = (chosen, null);
+                continue;
+            }
+            try
+            {
+                var requested = repository;
+                if (picker.Chosen?.Repository is { Length: > 0 } linked)
+                    requested = ReleaseRepositories.Find(settings, linked) ?? throw ReleaseRepositories.NotCloned(settings, linked);
+                await Release(await ReleaseRepositories.WithBranch(git, requested), number);
+            }
             catch (Exception exception) when (Failed(exception))
             {
                 // The engine's refusals already say what to do; anything else gets the usual diagnostics.
@@ -111,13 +153,24 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
 
     private static bool Failed(Exception exception) => TicketWorkspaces.Recoverable(exception) || exception is InvalidDataException or BadImageFormatException;
 
-    /// <summary>A fresh preview can be built without being shown again when it builds the same commits and removes the files already shown.</summary>
-    private static bool Same(ReleaseResult fresh, ReleaseResult shown, IReadOnlyList<string> removable) => fresh.CanBuild &&
-        fresh.BaseCommit == shown.BaseCommit && fresh.PullRequest.HeadCommit == shown.PullRequest.HeadCommit &&
+    /// <summary>
+    /// A fresh preview can be built without being shown again when it has the same repositories building the same commits and removes the files
+    /// already shown.
+    /// </summary>
+    private static bool Same(ReleaseRun fresh, ReleaseRun shown, IReadOnlyList<IReadOnlyList<string>> removable) => fresh.CanBuild &&
+        fresh.Releases.Count == shown.Releases.Count && fresh.Skipped.Count == shown.Skipped.Count &&
+        fresh.Releases.Zip(shown.Releases, removable).All(release => Same(release.First, release.Second, release.Third));
+
+    private static bool Same(ReleaseResult fresh, ReleaseResult shown, IReadOnlyList<string> removable) => fresh.CanBuild == shown.CanBuild &&
+        Files.Comparer.Equals(fresh.Folder, shown.Folder) && fresh.BaseCommit == shown.BaseCommit && fresh.PullRequest.HeadCommit == shown.PullRequest.HeadCommit &&
         fresh.Removed.Order(Files.Comparer).SequenceEqual(fresh.Clean ? removable.Order(Files.Comparer) : [], Files.Comparer);
 
     /// <summary>The files in the folder that removing earlier files would remove: those an earlier release run wrote and nobody has changed since.</summary>
     internal static List<string> Removable(string folder) => ReleaseFolder.Removable(folder, ReleaseFolder.Load(folder)).Select(file => file.Name).ToList();
+
+    /// <summary>Each release's files that removing earlier files removes, or a --clean preview says it removes.</summary>
+    internal static List<IReadOnlyList<string>> Removables(ReleaseRun run) =>
+        run.Releases.Select(release => (IReadOnlyList<string>)(release.Clean ? release.Removed : Removable(release.Folder))).ToList();
 
     /// <summary>The support project a build failed in, or null when it failed elsewhere.</summary>
     internal static SupportProject? FailedSupport(ReleaseResult preview, Exception exception) =>
@@ -142,9 +195,16 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
     /// to the folder. Returns the result, or null when it was cancelled, and whether Esc was pressed; a failure is thrown.
     /// </summary>
     internal static (ReleaseResult? Result, bool Escaped) Build(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey, ReleaseResult preview,
-        Func<ReleaseResult, Action<string>, CancellationToken, Task<ReleaseResult>> build)
+        Func<ReleaseResult, Action<string>, CancellationToken, Task<ReleaseResult>> build) =>
+        Build(console, readKey, new ReleaseBuildView(preview), preview, build);
+
+    /// <inheritdoc cref="Build(IAnsiConsole, Func{int, ConsoleKeyInfo?}, ReleaseResult, Func{ReleaseResult, Action{string}, CancellationToken, Task{ReleaseResult}})"/>
+    internal static (ReleaseRun? Result, bool Escaped) Build(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey, ReleaseRun preview,
+        Func<ReleaseRun, Action<string>, CancellationToken, Task<ReleaseRun>> build) => Build(console, readKey, new ReleaseBuildView(preview), preview, build);
+
+    private static (T? Result, bool Escaped) Build<T>(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey, ReleaseBuildView view, T preview,
+        Func<T, Action<string>, CancellationToken, Task<T>> build) where T : class
     {
-        var view = new ReleaseBuildView(preview);
         using var cancel = new CancellationTokenSource();
         var task = Task.Run(() => build(preview, view.Report, cancel.Token));
         var painted = (Messages: -1, Second: -1L);
@@ -180,19 +240,68 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
 
     private static readonly ConsoleKeyInfo Tick = new('\0', ConsoleKey.F24, false, false, false);
 
+    private static string Muted(string text) => $"[{TerminalStyle.Muted}]{Terminal.Escape(text)}[/]";
+
+    // Spectre drops the link where the terminal cannot show one, so the visible text is the whole path.
+    private static Paragraph FolderLink(string folder) =>
+        new(folder, new Style(Color.FromHex(TerminalStyle.Text), decoration: Decoration.Bold), new Link(new Uri(folder).AbsoluteUri));
+
     /// <summary>What was written: the folder as a link, each file with its kind, size and version, and every warning again.</summary>
-    internal static IRenderable ResultCard(ReleaseResult result, bool escaped = false)
+    internal static IRenderable ResultCard(ReleaseResult result, bool escaped = false) => ResultCard(ReleaseRun.Single(result), escaped);
+
+    /// <summary>
+    /// What a run wrote. One repository's is shown as it always was; with several, the ticket folder comes first, then each repository's
+    /// subfolder with its files or why it was not written, then the linked pull requests that were skipped.
+    /// </summary>
+    internal static IRenderable ResultCard(ReleaseRun run, bool escaped = false)
     {
-        static string Muted(string text) => $"[{TerminalStyle.Muted}]{Terminal.Escape(text)}[/]";
+        var rows = new List<IRenderable>();
+        var failed = run.Releases.Any(release => !release.Written);
+        if (run.Releases.Count == 1)
+        {
+            var result = run.Releases[0];
+            rows.Add(new Markup($"[bold {TerminalStyle.Accent}]Wrote {TicketWorkspaces.Count(result.Files.Count, "file")} for {Terminal.Escape(result.PullRequest.Label)}[/]  " +
+                Muted($"in {result.Seconds:0} s")));
+            rows.AddRange(Details(result));
+        }
+        else
+        {
+            var first = run.Releases[0];
+            rows.Add(new Markup($"[bold {TerminalStyle.Accent}]Wrote {TicketWorkspaces.Count(run.Releases.Sum(release => release.Files.Count), "file")} for " +
+                $"{Terminal.Escape(first.PullRequest.Label)}[/]  " + Muted($"and {TicketWorkspaces.Count(run.Releases.Count - 1, "linked pull request")}, in {run.Seconds:0} s")));
+            rows.Add(FolderLink(run.Folder));
+            rows.Add(new Markup(Muted("One subfolder per repository: " + string.Join(", ", run.Releases.Select(release =>
+                $"{release.Subfolder} ({(release.Written ? TicketWorkspaces.Count(release.Files.Count, "file") : "not written")})")) + ".")));
+            foreach (var release in run.Releases)
+            {
+                rows.Add(new Text(""));
+                rows.Add(new Markup($"[bold {(release.Written ? TerminalStyle.Accent : Danger)}]{Terminal.Escape(release.Subfolder)}[/]  " +
+                    Muted($"{release.Repository} {release.PullRequest.Label}")));
+                if (release.Written) rows.AddRange(Details(release));
+                else rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
+            }
+        }
+        if (run.Skipped.Count != 0)
+        {
+            rows.Add(new Markup($"[bold {TerminalStyle.Gold}]Linked pull requests not built ({run.Skipped.Count}):[/]"));
+            rows.AddRange(run.Skipped.Select(skipped => new Markup($"  {Terminal.Escape($"{skipped.Repository} #{skipped.Number}")}  {Muted(skipped.Reason)}")));
+        }
+        if (escaped) rows.Add(new Markup(Muted("Esc came after writing had started, so the build finished.")));
+        var clean = run.Releases.All(release => release.Warnings.Count == 0 && release.OutsideReferences.Count == 0) && run.Skipped.Count == 0;
+        return TerminalStyle.Card(new Rows(rows), failed ? "RELEASE FILES PARTLY WRITTEN" : "RELEASE FILES READY",
+            failed ? Danger : clean ? TerminalStyle.Accent : TerminalStyle.Gold);
+    }
+
+    /// <summary>One written release: its folder as a link, what to do with it, the pull, its files, and every warning again.</summary>
+    private static List<IRenderable> Details(ReleaseResult result)
+    {
         var muted = new Style(Color.FromHex(TerminalStyle.Muted));
         var basis = result.BaseBranch.Length == 0 ? "the base branch" : result.BaseBranch;
         var rows = new List<IRenderable>
         {
-            new Markup($"[bold {TerminalStyle.Accent}]Wrote {TicketWorkspaces.Count(result.Files.Count, "file")} for {Terminal.Escape(result.PullRequest.Label)}[/]  " +
-                Muted($"in {result.Seconds:0} s")),
-            // Spectre drops the link where the terminal cannot show one, so the visible text is the whole path.
-            new Paragraph(result.Folder, new Style(Color.FromHex(TerminalStyle.Text), decoration: Decoration.Bold), new Link(new Uri(result.Folder).AbsoluteUri)),
-            new Markup(Muted(result.Files.Count == 0 ? "Nothing needed releasing." : "Upload every file in this folder to the Code Release Manager."))
+            FolderLink(result.Folder),
+            new Markup(Muted(result.Files.Count == 0 ? "Nothing needed releasing." : result.Kind == ReleaseRepositoryKind.Sql
+                ? "Release these scripts through the database process; Cultivate never runs SQL." : "Upload every file in this folder to the Code Release Manager."))
         };
         if (result.Pull is { } pull)
             rows.Add(new Markup(pull.Outcome == ReleasePullOutcome.Pulled ? $"[{TerminalStyle.Accent}]{Terminal.Escape(pull.Detail)}[/]" : Muted(pull.Detail)));
@@ -217,18 +326,23 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
                 Muted($"{reference.Path}, modified {reference.LastWriteTime:yyyy-MM-dd HH:mm}, for {reference.Project}"))));
         }
         rows.AddRange(result.Warnings.Select(warning => new Markup($"[{TerminalStyle.Gold}]![/] {Terminal.Escape(warning)}")));
-        if (escaped) rows.Add(new Markup(Muted("Esc came after writing had started, so the build finished.")));
-        return TerminalStyle.Card(new Rows(rows), "RELEASE FILES READY", result.Warnings.Count == 0 && result.OutsideReferences.Count == 0 ? TerminalStyle.Accent : TerminalStyle.Gold);
+        return rows;
     }
 }
 
-/// <summary>A release preview to check before building, in the order that matters for production, scrolled when it is taller than the terminal.</summary>
-internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string> removable)
+/// <summary>
+/// A release preview to check before building, in the order that matters for production, scrolled when it is taller than the terminal. With
+/// several repositories it starts with the ticket folder, each repository's subfolder and the linked pull requests skipped, then each
+/// repository's preview in turn.
+/// </summary>
+internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList<string>> removables)
 {
     private (int Width, List<IRenderable> Lines)? body;
     private int last;
     internal int Top { get; private set; }
-    internal bool CanClean => preview.CanBuild && !preview.Clean && removable.Count != 0;
+    internal bool CanClean => run.CanBuild && !run.Releases[0].Clean && removables.Any(removable => removable.Count != 0);
+
+    internal ReleasePreview(ReleaseResult preview, IReadOnlyList<string> removable) : this(ReleaseRun.Single(preview), [removable]) { }
 
     // The header's four lines, the position and keys lines, and the cursor's.
     internal static int BodyHeight(int height) => Math.Max(3, height - 7);
@@ -244,7 +358,7 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
             case ConsoleKey.PageDown: Scroll(page); break;
             case ConsoleKey.Home: Top = 0; break;
             case ConsoleKey.End: Top = last; break;
-            case ConsoleKey.Enter when preview.CanBuild: return ReleaseChoice.Build;
+            case ConsoleKey.Enter when run.CanBuild: return ReleaseChoice.Build;
             case ConsoleKey.C when CanClean && !key.Modifiers.HasFlag(ConsoleModifiers.Control): return ReleaseChoice.Clean;
             case ConsoleKey.Escape: return ReleaseChoice.Back;
         }
@@ -265,7 +379,7 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
         rows.AddRange(Enumerable.Repeat<IRenderable>(new Text(""), visible - Math.Min(visible, lines.Count - Top)));
         rows.Add(TerminalStyle.Line(TicketWorkspaceView.Fit(lines.Count <= visible ? "" : $"Lines {Top + 1}-{Math.Min(Top + visible, lines.Count)} of {lines.Count}" +
             (Top < last ? "   more below: arrows or PgDn scroll" : "   end: arrows or PgUp scroll"), width - 1), new Style(Color.FromHex(TerminalStyle.Muted))));
-        rows.Add(new Markup(preview.CanBuild
+        rows.Add(new Markup(run.CanBuild
             ? $"[{TerminalStyle.Gold}]Enter[/] build   " + (CanClean ? $"[{TerminalStyle.Gold}]C[/] remove earlier files, then build   " : "") + $"[{TerminalStyle.Gold}]Esc[/] back"
             : $"[{TerminalStyle.Gold}]Esc[/] back   [{ReleaseScreen.Danger}]These release files cannot be built.[/]"));
         return new Rows(rows);
@@ -283,11 +397,52 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
         return choice;
     }
 
+    private const string Heading = "bold " + TerminalStyle.Gold;
+
     private List<IRenderable> Body(int width)
     {
-        const string heading = "bold " + TerminalStyle.Gold, text = TerminalStyle.Text, muted = TerminalStyle.Muted, gold = TerminalStyle.Gold;
-        static string Short(string commit) => commit[..Math.Min(7, commit.Length)];
         var page = new WrappedLines(width);
+        if (run.Releases.Count == 1 && run.Skipped.Count == 0)
+        {
+            Release(page, run.Releases[0], removables[0]);
+            return page.Lines;
+        }
+        var first = run.Releases[0];
+        page.Add(0, (first.PullRequest.Label, "bold " + TerminalStyle.Accent),
+            ($"  in {first.Repository}, and {TicketWorkspaces.Count(run.Releases.Count - 1, "linked pull request")} it lists", TerminalStyle.Muted));
+        page.Blank();
+        page.Add(0, ("TICKET FOLDER  ", Heading), (run.Folder, "bold " + TerminalStyle.Text));
+        page.Add(2, ("One subfolder per repository:", TerminalStyle.Text));
+        foreach (var release in run.Releases)
+            page.Add(4, (release.Subfolder, "bold " + TerminalStyle.Text), release.CanBuild
+                ? ($"  {release.Repository} PR #{release.PullRequest.Number}, {TicketWorkspaces.Count(Planned(release), "file")}", TerminalStyle.Muted)
+                : ($"  {release.Repository} PR #{release.PullRequest.Number} cannot be built, so building skips it; CANNOT BUILD below says why.", ReleaseScreen.Danger));
+        if (run.Skipped.Count != 0)
+        {
+            page.Blank();
+            page.Add(0, ($"LINKED PULL REQUESTS NOT BUILT ({run.Skipped.Count})", Heading));
+            foreach (var skipped in run.Skipped) page.Add(2, ($"{skipped.Repository} #{skipped.Number}", TerminalStyle.Text), ("  " + skipped.Reason, TerminalStyle.Muted));
+        }
+        foreach (var (release, removable) in run.Releases.Zip(removables))
+        {
+            page.Blank();
+            page.Add(0, ("━━ " + release.Subfolder.ToUpperInvariant(), "bold " + TerminalStyle.Accent),
+                ($"  {release.GitHub ?? release.Checkout}, {(release.Kind == ReleaseRepositoryKind.Sql ? "SQL scripts" : "built from " + release.BaseBranch)}", TerminalStyle.Muted));
+            Release(page, release, removable);
+        }
+        return page.Lines;
+    }
+
+    private static int Planned(ReleaseResult release) => release.Projects.Count + release.Content.Count +
+        release.Packages.Select(package => package.Name).Distinct(Files.Comparer).Count();
+
+    /// <summary>One repository's preview: its pull request, folder, files, what is left out, and its warnings and errors.</summary>
+    private void Release(WrappedLines page, ReleaseResult preview, IReadOnlyList<string> removable)
+    {
+        const string heading = Heading, text = TerminalStyle.Text, muted = TerminalStyle.Muted, gold = TerminalStyle.Gold;
+        static string Short(string commit) => commit[..Math.Min(7, commit.Length)];
+        var canClean = run.CanBuild && !preview.Clean && removable.Count != 0;
+        var sql = preview.Kind == ReleaseRepositoryKind.Sql;
         var request = preview.PullRequest;
         var basis = preview.BaseBranch.Length == 0 ? "the base branch" : preview.BaseBranch;
         page.Add(0, (request.Label, "bold " + TerminalStyle.Accent));
@@ -308,7 +463,9 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
         page.Blank();
         page.Add(0, ("FOLDER  ", heading), (preview.Folder, "bold " + text));
         var count = preview.Projects.Count + packages + preview.Content.Count;
-        page.Add(2, (count == 0 ? "Building writes nothing: there is no DLL, package or content file to release." :
+        page.Add(2, sql ? (count == 0 ? "Building writes nothing: the pull request changed no SQL script." :
+            $"Building writes {TicketWorkspaces.Count(count, "SQL script")}, as {basis} has them. Nothing is built or run.", text) :
+            (count == 0 ? "Building writes nothing: there is no DLL, package or content file to release." :
             $"Building writes {TicketWorkspaces.Count(count, "file")}: {TicketWorkspaces.Count(preview.Projects.Count, "DLL")}, " +
             $"{TicketWorkspaces.Count(packages, "changed package")} and {TicketWorkspaces.Count(preview.Content.Count, "content file")}.", text));
         if (preview.Existing.Count == 0) page.Add(2, ("Nothing is in the folder yet.", muted));
@@ -319,22 +476,22 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
             {
                 var notes = new List<string> { TidySizes.Format(file.Size), file.Origin };
                 if (planned.Contains(file.Name)) notes.Add("replaced by this build");
-                if (removable.Contains(file.Name, Files.Comparer) && (preview.Clean || CanClean)) notes.Add(preview.Clean ? "removed first" : "C removes it first");
+                if (removable.Contains(file.Name, Files.Comparer) && (preview.Clean || canClean)) notes.Add(preview.Clean ? "removed first" : "C removes it first");
                 page.Add(4, (file.Name, text), ("  " + string.Join(", ", notes), muted));
             }
             if (preview.Clean)
                 page.Add(2, (removable.Count == 0 ? "Nothing is removed first: no file here is one Cultivate wrote that is unchanged." :
                     $"Removed first: {string.Join(", ", removable)}. Every other file is kept.", gold));
-            else if (CanClean)
+            else if (canClean)
                 page.Add(2, ($"C removes the {TicketWorkspaces.Count(removable.Count, "file")} Cultivate wrote here that nobody has changed since, then builds. " +
                     "Every other file is kept.", muted));
             else if (removable.Count == 0)
                 page.Add(2, ("Every file here is kept. Cultivate removes only files it wrote that nobody has changed since, and none are here.", muted));
         }
 
-        page.Blank();
-        page.Add(0, ($"DLLS TO BUILD ({preview.Projects.Count})", heading));
-        if (preview.Projects.Count == 0) page.Add(2, ("None: the pull request changed no compiled code.", muted));
+        if (!sql) page.Blank();
+        if (!sql) page.Add(0, ($"DLLS TO BUILD ({preview.Projects.Count})", heading));
+        if (!sql && preview.Projects.Count == 0) page.Add(2, ("None: the pull request changed no compiled code.", muted));
         foreach (var project in preview.Projects)
         {
             page.Add(2, (project.Assembly + ".dll", "bold " + text), ("  " + project.Project, muted));
@@ -356,8 +513,9 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
         }
 
         page.Blank();
-        page.Add(0, ($"CONTENT FILES ({preview.Content.Count})", heading));
-        if (preview.Content.Count == 0) page.Add(2, ("None: no markup, script, style or other content file to upload.", muted));
+        page.Add(0, ($"{(sql ? "SQL SCRIPTS" : "CONTENT FILES")} ({preview.Content.Count})", heading));
+        if (preview.Content.Count == 0)
+            page.Add(2, (sql ? "None: the pull request changed no .sql file." : "None: no markup, script, style or other content file to upload.", muted));
         foreach (var path in preview.Content)
         {
             var change = preview.Changes.FirstOrDefault(item => item.Path == path);
@@ -406,13 +564,14 @@ internal sealed class ReleasePreview(ReleaseResult preview, IReadOnlyList<string
             page.Add(0, ($"CANNOT BUILD ({preview.Errors.Count})", "bold " + ReleaseScreen.Danger));
             foreach (var error in preview.Errors) page.Add(2, (error, ReleaseScreen.Danger));
         }
-        return page.Lines;
     }
 }
 
 /// <summary>The build's progress messages as they arrive, how long it has taken, and what Esc does.</summary>
-internal sealed class ReleaseBuildView(ReleaseResult preview)
+internal sealed class ReleaseBuildView(ReleaseRun run)
 {
+    internal ReleaseBuildView(ReleaseResult preview) : this(ReleaseRun.Single(preview)) { }
+
     private readonly List<string> messages = [];
     private readonly Stopwatch watch = Stopwatch.StartNew();
     internal bool Cancelling { get; set; }
@@ -442,12 +601,16 @@ internal sealed class ReleaseBuildView(ReleaseResult preview)
         // The header, a blank line, the pull request, folder and clock, a blank line before the footer, and the cursor's line.
         var room = Math.Max(1, height - 4 - 1 - 3 - 1 - footer.Lines.Count - 1);
         var text = new Style(Color.FromHex(TerminalStyle.Text));
+        var preview = run.Releases[0];
+        var single = run.Releases.Count == 1;
         var rows = new List<IRenderable>
         {
-            TerminalStyle.Header("BUILDING RELEASE FILES", $"Built from {preview.BaseBranch} in a throwaway snapshot."),
+            TerminalStyle.Header("BUILDING RELEASE FILES", single ? $"Built from {preview.BaseBranch} in a throwaway snapshot."
+                : $"{run.Releases.Count} repositories, each built from its release branch in a throwaway snapshot, one after another."),
             new Text(""),
-            TerminalStyle.Line(TicketWorkspaceView.Fit(preview.PullRequest.Label, width - 1), new Style(Color.FromHex(TerminalStyle.Accent), decoration: Decoration.Bold)),
-            TerminalStyle.Line(TicketWorkspaceView.Fit("Folder  " + preview.Folder, width - 1), text),
+            TerminalStyle.Line(TicketWorkspaceView.Fit(preview.PullRequest.Label + (single ? "" : $" and {TicketWorkspaces.Count(run.Releases.Count - 1, "linked pull request")}"),
+                width - 1), new Style(Color.FromHex(TerminalStyle.Accent), decoration: Decoration.Bold)),
+            TerminalStyle.Line(TicketWorkspaceView.Fit("Folder  " + (single ? preview.Folder : run.Folder), width - 1), text),
             TerminalStyle.Line($"Elapsed {watch.Elapsed:m\\:ss}", new Style(Color.FromHex(TerminalStyle.Muted)))
         };
         var recent = shown.Skip(Math.Max(0, shown.Count - room)).ToList();

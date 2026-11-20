@@ -6,7 +6,9 @@ namespace Cultivate;
 /// <param name="Clean">First remove files an earlier release run wrote there and nobody has changed since.</param>
 /// <param name="ReuseDependencies">Compile against the checkout's DLLs of unchanged projects instead of building them from master.</param>
 /// <param name="NoPull">Leave the local base branch and origin's remote-tracking branch where they are instead of bringing them to the fetched tip.</param>
-internal sealed record ReleaseOptions(string? Name = null, string? Folder = null, bool Clean = false, bool ReuseDependencies = false, bool NoPull = false);
+/// <param name="NoLinked">Build only the requested pull request, not the pull requests its description links in other repositories.</param>
+internal sealed record ReleaseOptions(string? Name = null, string? Folder = null, bool Clean = false, bool ReuseDependencies = false, bool NoPull = false,
+    bool NoLinked = false);
 
 /// <summary>A merged pull request as the GitHub CLI describes it; <see cref="HeadCommit"/> is the head fetched from origin.</summary>
 internal sealed record ReleasePullRequest(int Number, string Title, string Author, string Url, string HeadBranch, string BaseBranch,
@@ -26,7 +28,13 @@ internal static class ReleaseStatus
 internal static class ReleaseKind
 {
     internal const string Compiled = "Compiled into its project's DLL", Content = "Content file", NotIncluded = "Not included",
-        ProjectDll = "Project DLL", Package = "Changed package";
+        ProjectDll = "Project DLL", Package = "Changed package", Sql = "SQL script";
+}
+
+/// <summary>What a repository's release is: projects built and content copied, or the SQL scripts of a repository with no project files.</summary>
+internal static class ReleaseRepositoryKind
+{
+    internal const string Code = "Code", Sql = "SQL";
 }
 
 internal sealed record ReleaseCommit(string Commit, string Subject);
@@ -70,6 +78,11 @@ internal sealed class SupportBuild(List<ProjectInfo> order)
     /// <summary>Every project to build, dependencies first: the plan's projects and the unchanged projects they compile against.</summary>
     public List<ProjectInfo> Order { get; } = order;
     public List<OutsideReference> Outside { get; } = [];
+    /// <summary>
+    /// False for a repository other than the MyMeyer checkout: outputs are captured after Build instead of after the webfarm copy target, packages
+    /// are never restored, a reference found nowhere is an error, and the project's own folders are searched instead of MyMeyer's root bin.
+    /// </summary>
+    public bool Main { get; init; } = true;
 }
 
 /// <summary>A release preview, or once <see cref="Written"/>, what was built and written. Serialised as the output of <c>cultivate release</c>.</summary>
@@ -78,13 +91,28 @@ internal sealed class ReleaseResult
     public bool Written { get; set; }
     public string? Note { get; set; }
     public required ReleasePullRequest PullRequest { get; init; }
+    /// <summary>The GitHub repository's name ("MyMeyer"), or the checkout's folder name when origin is not on GitHub.</summary>
+    public string Repository { get; init; } = "";
+    /// <summary>"owner/name", or null when origin is not on GitHub.</summary>
+    public string? GitHub { get; init; }
+    /// <summary>The developer's checkout of the repository: what is fetched into, pulled, and searched for references the snapshot lacks.</summary>
+    public string Checkout { get; init; } = "";
+    /// <summary><see cref="ReleaseRepositoryKind.Code"/>, or <see cref="ReleaseRepositoryKind.Sql"/> for a repository with no project files.</summary>
+    public string Kind { get; init; } = ReleaseRepositoryKind.Code;
     public string BaseBranch { get; init; } = "";
     /// <summary>The base branch commit everything is built and copied from.</summary>
     public string BaseCommit { get; init; } = "";
     /// <summary>Where the pull request's changes start: the merge base of its head and the base branch before the merge.</summary>
     public string ForkPoint { get; init; } = "";
+    /// <summary>The ticket folder's name, decided by the requested pull request.</summary>
     public string Name { get; init; } = "";
+    /// <summary>This repository's subfolder of the ticket folder, where its files are written.</summary>
     public string Folder { get; init; } = "";
+    public string Subfolder { get; init; } = "";
+    /// <summary>Why <see cref="Subfolder"/> is not the usual name: another release in the run already uses that name.</summary>
+    public string? Placement { get; init; }
+    /// <summary>The pull request URLs the Associated PRs section of its description lists.</summary>
+    public List<string> Linked { get; init; } = [];
     public bool Clean { get; init; }
     public bool ReuseDependencies { get; init; }
     public bool NoPull { get; init; }
@@ -104,9 +132,47 @@ internal sealed class ReleaseResult
     public List<string> Removed { get; init; } = [];
     public List<string> Warnings { get; init; } = [];
     public List<string> Errors { get; init; } = [];
+    /// <summary>Why this repository's files were not built, in a run that went on to build other repositories; null otherwise.</summary>
+    public string? Failure { get; set; }
+    /// <summary>The failure itself, for the terminal UI's diagnostics. Not serialised.</summary>
+    internal Exception? Exception { get; set; }
     public double Seconds { get; set; }
     public string RunDirectory { get; set; } = "";
     public bool CanBuild => Errors.Count == 0;
+}
+
+/// <summary>A linked pull request a run does not build, and why.</summary>
+internal sealed record SkippedLink(string Url, string Repository, int Number, string Reason);
+
+/// <summary>
+/// Everything one <c>cultivate release</c> builds: the requested pull request's release first, then those of the pull requests its description
+/// links, each in its own subfolder of one ticket folder, and the links it skipped. Serialised as the output of <c>cultivate release</c>.
+/// </summary>
+internal sealed class ReleaseRun
+{
+    public bool Written { get; set; }
+    public string? Note { get; set; }
+    /// <summary>The ticket folder's name, from the requested pull request.</summary>
+    public string Name { get; init; } = "";
+    /// <summary>The ticket folder: one subfolder per repository.</summary>
+    public string Folder { get; init; } = "";
+    /// <summary>The requested pull request: "owner/name#N", or "#N" when origin is not on GitHub.</summary>
+    public string Requested { get; init; } = "";
+    public bool NoLinked { get; init; }
+    public List<ReleaseResult> Releases { get; init; } = [];
+    public List<SkippedLink> Skipped { get; init; } = [];
+    public double Seconds { get; set; }
+    /// <summary>Whether at least one repository's files can be built; one that cannot is reported and not built.</summary>
+    public bool CanBuild => Releases.Any(release => release.CanBuild);
+    /// <summary>Whether every repository's files can be built, or once <see cref="Written"/>, were.</summary>
+    public bool Complete => Releases.All(release => release.CanBuild && release.Failure is null && (!Written || release.Written));
+
+    /// <summary>A run of one release, as a release built on its own is shown.</summary>
+    internal static ReleaseRun Single(ReleaseResult release) => new()
+    {
+        Written = release.Written, Note = release.Note, Name = release.Name, Folder = Path.GetDirectoryName(release.Folder) ?? release.Folder,
+        Requested = $"{release.GitHub}#{release.PullRequest.Number}", Releases = [release], Seconds = release.Seconds
+    };
 }
 
 /// <summary>Cultivate's record of the files it wrote to one release folder, so later runs know which files are its own.</summary>
