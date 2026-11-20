@@ -118,11 +118,18 @@ internal static partial class SelfTest
         }
         var staleCore = Path.Combine(checkout, @"bin\Core.dll");
         var staleHash = Files.Hash(staleCore);
-        async Task<string> Untouched() => string.Join("\n", await git.Git(checkout, "symbolic-ref", "HEAD"), await git.Git(checkout, "rev-parse", "HEAD"),
-            await git.Git(checkout, "ls-files", "--stage"), await git.Git(checkout, "status", "--porcelain", "--ignored"),
-            await git.Git(checkout, "worktree", "list", "--porcelain"), await git.Git(checkout, "for-each-ref", "--format=%(refname) %(objectname)"),
-            Files.Hash(staleCore), Files.Hash(Path.Combine(checkout, @"Page\Value.cs")));
+        // Building pulls master, which moves the checkout's master, origin/master, HEAD's commit and the files that follow it; nothing else may change.
+        static string Lines(string text, string skip) => string.Join("\n", text.Split('\n').Where(line => !line.StartsWith(skip, StringComparison.Ordinal)));
+        async Task<string> Untouched() => string.Join("\n", await git.Git(checkout, "symbolic-ref", "HEAD"), await git.Git(checkout, "status", "--porcelain", "--ignored"),
+            Lines(await git.Git(checkout, "worktree", "list", "--porcelain"), "HEAD "),
+            // origin/HEAD is listed by the branch it names, not by that branch's commit, which a pull moves.
+            string.Join("\n", (await git.Git(checkout, "for-each-ref", "--format=%(refname) %(if)%(symref)%(then)-> %(symref)%(else)%(objectname)%(end)")).Split('\n')
+                .Where(line => !line.StartsWith("refs/heads/master ", StringComparison.Ordinal) && !line.StartsWith("refs/remotes/origin/master ", StringComparison.Ordinal))),
+            Files.Hash(staleCore));
+        async Task<string> Refs(string repository) => string.Join("\n", await git.Git(repository, "rev-parse", "HEAD"),
+            await git.Git(repository, "for-each-ref", "--format=%(refname) %(objectname)"));
         var before = await Untouched();
+        var refs = await Refs(checkout);
         var logs = Path.Combine(Files.Home, "Logs");
         int BridgeLogs() => Directory.Exists(logs) ? Directory.GetFiles(logs, "bridge-*").Length : 0;
         var bridgeLogs = BridgeLogs();
@@ -169,7 +176,8 @@ internal static partial class SelfTest
             "the projects Page compiles against are support projects: a HintPath to an untracked build output, and a ProjectReference without the webfarm target");
         Check(!Directory.Exists(folder20) && !Directory.Exists(Path.Combine(Files.Home, "Releases")) && Runs() == runs,
             "the preview builds and writes nothing");
-        Check(await Untouched() == before, "the preview leaves the checkout, its refs and remote-tracking branches as they were, and deletes its private refs");
+        Check(await Untouched() == before && await Refs(checkout) == refs && preview.Pull is { Outcome: ReleasePullOutcome.Behind, Commits: 2 },
+            "the preview leaves the checkout, its refs and remote-tracking branches as they were, deletes its private refs, and says master is behind");
 
         var progress = new List<string>();
         var built = await release.Build(preview, progress.Add);
@@ -190,7 +198,11 @@ internal static partial class SelfTest
         Check(!Directory.Exists(Path.Combine(built.RunDirectory, "source")) && File.Exists(Path.Combine(built.RunDirectory, "release.json")) &&
             built.RunDirectory.StartsWith(Path.Combine(Files.Home, "Runs"), StringComparison.OrdinalIgnoreCase) &&
             Directory.GetFiles(Path.Combine(Files.Home, "Releases"), "*.result.json").Length == 1, "the snapshot is removed and the result is saved with the run and the folder's record");
-        Check(await Untouched() == before, "a full release run leaves the checkout's branch, HEAD, index, files, bin, local and origin branches, and worktrees as they were");
+        Check(built.Pull is { Outcome: ReleasePullOutcome.Pulled, Before: var pulledFrom, After: var pulledTo } && pulledFrom == c0 && pulledTo == m20 &&
+            await git.Git(checkout, "rev-parse", "HEAD", "refs/remotes/origin/master") == m20 + "\n" + m20 &&
+            File.ReadAllText(Path.Combine(checkout, @"Page\Value.cs")).Contains("CoreValue.NewApi"),
+            "building fast-forwards the checked-out master and origin/master to the commit it built from, and the working files follow");
+        Check(await Untouched() == before, "a full release run changes nothing in the checkout but pulling master: its branch, index, bin, other refs and worktrees stay");
 
         var reuse = await release.Preview(20, new(Folder: Path.Combine(output, "reuse"), ReuseDependencies: true));
         string? stale = null;
@@ -373,7 +385,8 @@ internal static partial class SelfTest
         File.Copy(third1, Path.Combine(checkout, @"bin\Third.dll"));
         File.Copy(fourth, Path.Combine(checkout, @"bin\Fourth.dll"));
         progress.Clear();
-        var r24 = await release.Build(await release.Preview(24, new(Folder: Path.Combine(output, "tools"))), progress.Add);
+        // Pulling master would replace the checkout's untracked bin\Third.dll with the one master now tracks; this run needs the checkout's own.
+        var r24 = await release.Build(await release.Preview(24, new(Folder: Path.Combine(output, "tools"), NoPull: true)), progress.Add);
         var releaseLog = File.ReadAllText(Path.Combine(r24.RunDirectory, "build.log"));
         Check(Listing(Path.Combine(output, "tools")).SequenceEqual(["Kit.dll", "Tools.dll"], Files.Comparer) &&
             References(Path.Combine(output, "tools", "Tools.dll"))["Third"] == "2.0.0.0" && References(Path.Combine(output, "tools", "Kit.dll"))["Third"] == "2.0.0.0" &&
@@ -520,6 +533,132 @@ internal static partial class SelfTest
                 @"(last resort: DupD cannot resolve its HintPath ..\nowhere\Dup.dll, so it uses the copy DupA resolved earlier in this build)"),
             "a dev farm build compiles each project against its own copy of a same-named DLL, and a reference only an earlier project resolved " +
             "is used as a last resort, which build.log says");
+
+        await CheckReleasePull(new(settings, git, output, m28, Gh, (number, title, branch, merge, head) => Pull(number, title, branch, merge, head),
+            (from, message, files) => Commit(from, message, files), Publish, Squash, Untouched, before), root, Refs);
+    }
+
+    /// <summary>
+    /// Building pulls master, from a second checkout of the release fixture's origin with master checked out. The pull requests change content
+    /// alone, so nothing is compiled.
+    /// </summary>
+    private static async Task CheckReleasePull(ReleaseFixture fixture, string root, Func<string, Task<string>> refs)
+    {
+        var (git, output) = (fixture.Git, fixture.Output);
+        var mine = Path.Combine(root, "mine");
+        await git.Git(root, "clone", "-q", Path.Combine(root, "origin.git"), mine);
+        Task<string> Mine(params string[] args) => git.Git(mine, args);
+        await Mine("config", "user.email", "cultivate-test@localhost");
+        await Mine("config", "user.name", "Cultivate isolated tests");
+        var settings = new Settings
+        {
+            RepositoryRoot = mine, WebfarmRoot = fixture.Settings.WebfarmRoot, StateRoot = fixture.Settings.StateRoot, MSBuild = fixture.Settings.MSBuild,
+            MappingAssembly = fixture.Settings.MappingAssembly, ReleaseRoot = output, LibraryRepositories = []
+        };
+        var release = new ReleaseFiles(settings, new GitRepository(settings), fixture.Gh);
+        var tip = fixture.Master;
+        async Task<string> Land(int number, string path)
+        {
+            var head = await fixture.Commit(tip, $"pr{number}", [(path, $"pull {number}")]);
+            await fixture.Publish(head, $"refs/pull/{number}/head");
+            tip = await fixture.Squash(tip, head, $"Pull fixture {number} (#{number})");
+            await fixture.Publish(tip, "refs/heads/master");
+            fixture.Pull(number, $"Pull fixture {number}", $"pull-{number}", tip, head);
+            return tip;
+        }
+        ReleaseOptions Options(int number, bool noPull = false) => new(Folder: Path.Combine(output, "pull" + number), NoPull: noPull);
+        string Released(int number, string name) => File.ReadAllText(Path.Combine(output, "pull" + number, name));
+        static bool SamePath(string? path, string expected) => path is not null && Files.Comparer.Equals(Files.Full(path), Files.Full(expected));
+        var view = Path.Combine(mine, @"Page\View.ascx");
+
+        // Master gains two commits on origin.
+        var start = await Mine("rev-parse", "HEAD");
+        tip = await fixture.Commit(tip, "other merged work", [(@"Docs\Other.md", "other")]);
+        var t40 = await Land(40, @"Page\Pull40.js");
+        var before40 = await refs(mine);
+        var p40 = await release.Preview(40, Options(40));
+        Check(await refs(mine) == before40 && await Mine("status", "--porcelain") == "" &&
+            p40.Pull is { Outcome: ReleasePullOutcome.Behind, Commits: 2, Before: var behindAt, Worktree: var behindIn, Detail: var behind } &&
+            behindAt == start && SamePath(behindIn, mine) && behind == $"master in {behindIn} is 2 commit(s) behind origin; building pulls it." &&
+            p40.Note?.EndsWith(behind, StringComparison.Ordinal) == true,
+            "a preview says how far the checked-out master is behind origin, and changes no ref, origin/master included");
+        var progress = new List<string>();
+        var r40 = await release.Build(p40, progress.Add);
+        var pulled = $"Pulled master: 2 new commit(s), {start[..7]} → {t40[..7]} ({r40.Pull?.Worktree})";
+        Check(r40.Pull is { Outcome: ReleasePullOutcome.Pulled, Before: var from, After: var to, Commits: 2, Detail: var detail } && from == start && to == t40 &&
+            detail == pulled && await Mine("rev-parse", "HEAD", "refs/remotes/origin/master") == t40 + "\n" + t40 && await Mine("status", "--porcelain") == "" &&
+            File.ReadAllText(Path.Combine(mine, @"Page\Pull40.js")) == "pull 40" && progress.Contains($"Pulling master in {r40.Pull.Worktree}") && progress.Contains(pulled),
+            "building fast-forwards a clean checked-out master and origin/master to the tip it fetched, the working files follow, and the progress says so");
+        Check(Released(40, "Pull40.js") == "pull 40" && await Mine("for-each-ref", "refs/cultivate") == "" &&
+            JsonSerializer.Deserialize<ReleaseResult>(File.ReadAllText(Path.Combine(r40.RunDirectory, "release.json")), Files.Json)?.Pull == r40.Pull,
+            "the release folder is written, the pull is recorded with the result, and no private ref is left");
+
+        File.WriteAllText(view, "my local edit");
+        var t41 = await Land(41, @"Page\Pull41.js");
+        var r41 = await release.Build(await release.Preview(41, Options(41)), _ => { });
+        Check(r41.Pull?.Outcome == ReleasePullOutcome.Pulled && await Mine("rev-parse", "HEAD") == t41 && File.ReadAllText(view) == "my local edit" &&
+            await Mine("status", "--porcelain") == " M Page/View.ascx" && File.ReadAllText(Path.Combine(mine, @"Page\Pull41.js")) == "pull 41",
+            "a local change to a file the pulled commits do not touch survives the fast-forward");
+
+        var t42 = await Land(42, @"Page\View.ascx");
+        var r42 = await release.Build(await release.Preview(42, Options(42)), _ => { });
+        Check(r42.Pull is { Outcome: ReleasePullOutcome.NotUpdated, Before: var kept, After: var still } && kept == t41 && still == t41 &&
+            await Mine("rev-parse", "HEAD", "refs/remotes/origin/master") == t41 + "\n" + t42 && File.ReadAllText(view) == "my local edit" &&
+            Released(42, "View.ascx") == "pull 42" && r42.Written && r42.Warnings.SingleOrDefault(warning => warning.StartsWith("master in ", StringComparison.Ordinal)) is { } refused &&
+            refused.Contains("Page/View.ascx") && refused.Contains($"still built from origin's {t42[..7]}") && refused.Contains("pull master by hand"),
+            "a local change the pulled commits would overwrite stops the pull, not the build: master and the change stay, the folder is written, and the warning names the file");
+        await Mine("checkout", "-q", "--", "Page/View.ascx");
+
+        await Mine("switch", "-q", "-c", "work");
+        var second = Path.Combine(root, "mine-master");
+        await Mine("worktree", "add", "-q", second, "master");
+        var t43 = await Land(43, @"Page\Pull43.js");
+        var r43 = await release.Build(await release.Preview(43, Options(43)), _ => { });
+        Check(r43.Pull is { Outcome: ReleasePullOutcome.Pulled, Worktree: var there } && SamePath(there, second) && await git.Git(second, "rev-parse", "HEAD") == t43 &&
+            File.Exists(Path.Combine(second, @"Page\Pull43.js")) && await Mine("symbolic-ref", "HEAD") == "refs/heads/work" && await Mine("rev-parse", "HEAD") == t41 &&
+            !File.Exists(Path.Combine(mine, @"Page\Pull43.js")),
+            "master checked out in another worktree is fast-forwarded there, and the main checkout on another branch stays as it was");
+
+        await Mine("worktree", "remove", second);
+        var t44 = await Land(44, @"Page\Pull44.js");
+        var r44 = await release.Build(await release.Preview(44, Options(44)), _ => { });
+        Check(r44.Pull is { Outcome: ReleasePullOutcome.Pulled, Worktree: null, Detail: var moved } &&
+            moved == $"Pulled master: 1 new commit(s), {t43[..7]} → {t44[..7]} (not checked out)" && await Mine("rev-parse", "master") == t44 &&
+            await Mine("reflog", "-1", "--format=%gs", "master") == "cultivate release: fast-forward to origin/master" && await Mine("rev-parse", "HEAD") == t41 &&
+            !File.Exists(Path.Combine(mine, @"Page\Pull44.js")), "master checked out nowhere is moved to origin's tip with a reflog entry, and the checkout's own branch stays");
+
+        await Mine("switch", "-q", "master");
+        File.WriteAllText(Path.Combine(mine, @"Page\Local.js"), "mine");
+        await Mine("add", "Page/Local.js");
+        await Mine("commit", "-qm", "local work");
+        var ahead = await Mine("rev-parse", "HEAD");
+        var t45 = await Land(45, @"Page\Pull45.js");
+        var p45 = await release.Preview(45, Options(45));
+        var r45 = await release.Build(p45, _ => { });
+        Check(p45.Pull?.Outcome == ReleasePullOutcome.LocalCommits && r45.Pull is { Outcome: ReleasePullOutcome.LocalCommits, Commits: 1, Worktree: var at } &&
+            await Mine("rev-parse", "HEAD", "refs/remotes/origin/master") == ahead + "\n" + t45 && Released(45, "Pull45.js") == "pull 45" && r45.Warnings.Contains(
+                $"Your local master in {at} has 1 commit(s) that are not on origin, so it was not updated to origin's {t45[..7]}. The release files were still " +
+                $"built from origin's {t45[..7]}; pull master by hand."),
+            "master with commits origin does not have is left where it is with a warning, and the release files are still built");
+        await Mine("reset", "-q", "--hard", t45);
+
+        var t46 = await Land(46, @"Page\Pull46.js");
+        var before46 = await refs(mine);
+        var p46 = await release.Preview(46, Options(46, noPull: true));
+        var r46 = await release.Build(p46, _ => { });
+        Check(p46.Pull?.Outcome == ReleasePullOutcome.Off && r46 is { NoPull: true, Pull.Detail: "Left master and origin/master where they were (--no-pull)." } &&
+            await refs(mine) == before46 && !File.Exists(Path.Combine(mine, @"Page\Pull46.js")) && Released(46, "Pull46.js") == "pull 46",
+            "--no-pull builds the release files and leaves master and origin/master where they were");
+
+        var t47 = await Land(47, @"Page\Pull47.js");
+        var p47 = await release.Preview(47, Options(47));
+        tip = await fixture.Commit(tip, "after the preview", [(@"Docs\After.md", "after")]);
+        await fixture.Publish(tip, "refs/heads/master");
+        var r47 = await release.Build(p47, _ => { });
+        Check(r47.BaseCommit == t47 && r47.Pull is { Outcome: ReleasePullOutcome.Pulled, After: var newest, Commits: 3 } && newest == tip &&
+            await Mine("rev-parse", "HEAD") == tip && r47.Warnings.Any(warning => warning.Contains("moved on origin since the preview")),
+            "when master moves on origin after the preview, the files are built from the previewed commit and master is pulled to the newest tip");
+        Check(await fixture.Untouched() == fixture.Before, "pulling another checkout's master changes nothing in the first checkout");
     }
 
     private static void CheckReleaseNames()
