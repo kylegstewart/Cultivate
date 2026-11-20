@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.2.1 — 2026-11-20
+
 - Improvement: building release files now also pulls master, so GitHub Desktop no longer shows it behind afterwards. `origin/master`
   moves to the commit the files were built from, and your local `master` fast-forwards to it in whichever checkout or worktree has it
   checked out (or just moves, when none does). Local changes the pull does not need to touch stay as they are. When `master` has
