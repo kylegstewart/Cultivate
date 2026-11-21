@@ -18,12 +18,13 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   MyMeyer's merged pull requests first; Ctrl+R lists another clone's, and a pasted pull request link builds that pull request in its own
   repository. Another repository's releases are built from master, or from origin's default branch when it has no master. Its projects
   need no `CopyBuildOutputToWebfarm` target: each project's own DLL is captured after its Debug build from master's snapshot, and a copy
-  of it that the repository tracks in Git is never mistaken for the build's. References are taken from the snapshot first (the
-  HintPath, the project's own `bin`, a `Libraries`/`Lib`-style folder), then from your checkout (the HintPath from your project
-  folder, which reaches sibling repositories such as `..\..\MyMeyer\bin`, then your project's `bin`), and each DLL taken from your
-  checkout is listed with its path, version and date. A reference found nowhere, or a NuGet package your checkout has not restored,
-  stops that repository's build and says where Cultivate looked; Cultivate never restores packages for it. SDK-style projects are not
-  supported and say so, without hiding the rest of the preview.
+  of it that the repository tracks in Git is never mistaken for the build's. References are resolved as MSBuild resolves them in your
+  checkout: the HintPath inside master's snapshot, then the HintPath from your project folder (which reaches sibling repositories such
+  as `..\..\MyMeyer\bin`), then the project's output folder, MSBuild's last stop (master's tracked copy, then yours). Each DLL taken
+  from your checkout is listed with its path, version and date. A reference or NuGet package found nowhere is left to MSBuild, as
+  Visual Studio does: the build fails only if the code needs it, and one warning lists them (`build.log` says where Cultivate looked).
+  Cultivate never restores packages for these repositories. SDK-style projects are not supported and say so, without hiding the rest
+  of the preview. When a repository's build fails after its release branch was pulled, the result reports what the pull did.
 - Feature: SQL changes are released too. A repository with no project files, such as Database--SQL, is a SQL repository: every `.sql`
   file its pull request changed is copied to the ticket folder's `SQL` subfolder as the release branch has it now (with the usual
   same / changed again / undone / deleted statuses), read straight from the commit with checkout line endings, so no checkout of the

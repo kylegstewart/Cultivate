@@ -79,10 +79,13 @@ internal sealed class SupportBuild(List<ProjectInfo> order)
     public List<ProjectInfo> Order { get; } = order;
     public List<OutsideReference> Outside { get; } = [];
     /// <summary>
-    /// False for a repository other than the MyMeyer checkout: outputs are captured after Build instead of after the webfarm copy target, packages
-    /// are never restored, a reference found nowhere is an error, and the project's own folders are searched instead of MyMeyer's root bin.
+    /// False for a repository other than the MyMeyer checkout: outputs are captured after Build instead of after the webfarm copy target,
+    /// references are resolved as MSBuild does in the developer's checkout (HintPath, then the output folder) instead of from MyMeyer's root bin,
+    /// packages are never restored, and a reference found nowhere is left to MSBuild and listed in <see cref="Unresolved"/>.
     /// </summary>
     public bool Main { get; init; } = true;
+    /// <summary>For another repository: each reference left to MSBuild because Cultivate found it nowhere, as "name (HintPath hint) for project".</summary>
+    public List<string> Unresolved { get; } = [];
 }
 
 /// <summary>A release preview, or once <see cref="Written"/>, what was built and written. Serialised as the output of <c>cultivate release</c>.</summary>

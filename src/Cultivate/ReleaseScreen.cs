@@ -278,7 +278,11 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
                 rows.Add(new Markup($"[bold {(release.Written ? TerminalStyle.Accent : Danger)}]{Terminal.Escape(release.Subfolder)}[/]  " +
                     Muted($"{release.Repository} {release.PullRequest.Label}")));
                 if (release.Written) rows.AddRange(Details(release));
-                else rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
+                else
+                {
+                    rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
+                    if (release.Pull is { } pull) rows.Add(new Markup(Muted(pull.Detail)));
+                }
             }
         }
         if (run.Skipped.Count != 0)
