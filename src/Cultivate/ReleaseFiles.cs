@@ -12,24 +12,44 @@ namespace Cultivate;
 /// Building, never previewing, also pulls the base branch: origin's remote-tracking branch moves to the fetched tip, and the local base branch
 /// follows when Git can fast-forward it without touching local changes; otherwise it stays where it is, with a warning. Nothing else in the
 /// checkout changes. No Code Release Manager mapping is looked up: it matches each uploaded file by name itself.
+/// One instance builds one repository's release: the MyMeyer checkout unless <paramref name="repository"/> names another clone, whose checkout
+/// and release branch then stand in for MyMeyer's everywhere. A repository whose base commit tracks no project file is a SQL repository: its
+/// changed SQL scripts are copied as the base branch has them, read straight from the commit, and nothing is built.
 /// </summary>
-/// <remarks>Call <see cref="Preview"/>, show it, then pass it to <see cref="Build"/>. <paramref name="gh"/> replaces the GitHub CLI in tests.</remarks>
-internal sealed partial class ReleaseFiles(Settings settings, GitRepository git, Func<string[], Task<string>>? gh = null)
+/// <remarks>Call <see cref="Preview"/>, show it, then pass it to <see cref="Build"/>. <paramref name="gh"/> replaces the GitHub CLI in tests.
+/// <see cref="ReleaseRunner"/> runs it for a pull request and the pull requests it links.</remarks>
+internal sealed partial class ReleaseFiles(Settings settings, GitRepository git, Func<string[], Task<string>>? gh = null, ReleaseRepository? repository = null)
 {
     internal const string RefPrefix = "refs/cultivate/release/";
-    private const string Fields = "number,title,author,headRefName,baseRefName,state,mergedAt,mergeCommit,headRefOid,url";
+    /// <summary>The key of a failed build's exception data that holds the <see cref="ReleasePull"/> its pull step made before the failure.</summary>
+    internal const string PulledKey = "Cultivate.ReleasePull";
+    private const string Fields = "number,title,author,headRefName,baseRefName,state,mergedAt,mergeCommit,headRefOid,url,body";
     /// <summary>Files uploaded as they are. The dev farm planner leaves handlers and the like out; a release must not.</summary>
     internal static readonly HashSet<string> ContentExtensions = new(Planner.FrontendExtensions.Concat([".ashx", ".asmx", ".master", ".asax"]), Files.Comparer);
 
-    private sealed record Catalog(HashSet<string> Tracked, Dictionary<string, string> Projects, List<ProjectInfo> Webfarm);
+    private readonly ReleaseRepository repository = repository is null ? ReleaseRepositories.MainCheckout(settings) : repository;
+    /// <summary>For another repository: its checkout and release branch, so Git, the planner and the build all run there.</summary>
+    private readonly Settings settings = repository is null || repository.Main ? settings : ReleaseRepositories.For(settings, repository);
+    private readonly string mainCheckout = settings.RepositoryRoot;
+
+    /// <summary>Every project file in the base commit by path, with its text, and the projects a changed compiled file can belong to.</summary>
+    private sealed record Catalog(HashSet<string> Tracked, Dictionary<string, string> Projects, List<ProjectInfo> Candidates);
     /// <summary>What the build needs beyond the result: the plan of release projects and every project to build, dependencies first.</summary>
     private sealed record Work(Plan Plan, List<ProjectInfo> Order);
+    /// <summary>Where a release is written and what kind it is, decided before it is analysed.</summary>
+    private sealed record Placement(string Name, string Folder, string Subfolder, string? Reason, string Kind, List<string> Linked);
 
     private static string Ref(int number, string name) => $"{RefPrefix}{number}/{name}";
     private Task<string> G(params string[] arguments) => git.Git(settings.RepositoryRoot, arguments);
+    private BasePull Base => new(settings.RepositoryRoot, git, "cultivate release");
+    /// <summary>"Pull request #N", naming the repository when it is not MyMeyer.</summary>
+    private string Named(int number) => repository.Main ? $"Pull request #{number}" : $"{repository.Name} pull request #{number}";
 
-    /// <summary><c>cultivate release --pr N [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies] [--no-pull]</c></summary>
-    internal static async Task<int> Command(Settings settings, GitRepository git, string[] args)
+    /// <summary>
+    /// <c>cultivate release --pr N|URL [--repo NAME|OWNER/NAME|PATH] [--yes] [--name NAME] [--out FOLDER] [--clean] [--reuse-dependencies]
+    /// [--no-pull] [--no-linked]</c>. Exits 2 when a preview has a repository that cannot be built, and 1 when building one failed.
+    /// </summary>
+    internal static async Task<int> Command(Settings settings, GitRepository git, string[] args, Func<string[], Task<string>>? gh = null)
     {
         string? Option(string name)
         {
@@ -38,41 +58,47 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             return index + 1 < args.Length && !args[index + 1].StartsWith("--", StringComparison.Ordinal) ? args[index + 1]
                 : throw new InvalidOperationException($"{name} needs a value.");
         }
-        var number = PullRequests.Number(Option("--pr") ?? throw new InvalidOperationException("Name the merged pull request: cultivate release --pr 1234."));
-        var release = new ReleaseFiles(settings, git);
-        var preview = await release.Preview(number, new(Option("--name"), Option("--out"), args.Contains("--clean"), args.Contains("--reuse-dependencies"),
-            args.Contains("--no-pull")));
+        var value = Option("--pr") ?? throw new InvalidOperationException("Name the merged pull request: cultivate release --pr 1234.");
+        var (target, number) = ReleaseRunner.Target(settings, value, Option("--repo"));
+        var runner = new ReleaseRunner(settings, git, gh);
+        var preview = await runner.Preview(target, number, new(Option("--name"), Option("--out"), args.Contains("--clean"), args.Contains("--reuse-dependencies"),
+            args.Contains("--no-pull"), args.Contains("--no-linked")));
         if (!args.Contains("--yes"))
         {
             Console.WriteLine(JsonSerializer.Serialize(preview, Files.Json));
-            return preview.CanBuild ? 0 : 2;
+            return preview.Complete ? 0 : 2;
         }
-        var result = await release.Build(preview, message => Console.Error.WriteLine(message));
+        var result = await runner.Build(preview, message => Console.Error.WriteLine(message));
         Console.WriteLine(JsonSerializer.Serialize(result, Files.Json));
-        return 0;
+        return result.Complete ? 0 : 1;
     }
 
     /// <summary>
     /// Asks the GitHub CLI about the merged pull request, fetches it and the base branch, and works out what would be built and written, and
     /// what building would do to the local base branch. Builds, writes and pulls nothing; the private refs are deleted before it returns, whatever
-    /// happens.
+    /// happens. The files go in this repository's subfolder of the ticket folder: <paramref name="place"/>, given the pull request and the
+    /// repository's kind, can choose another subfolder name and say why; otherwise it is the repository's name, or SQL.
     /// </summary>
-    public async Task<ReleaseResult> Preview(int number, ReleaseOptions? options = null)
+    public async Task<ReleaseResult> Preview(int number, ReleaseOptions? options = null,
+        Func<ReleasePullRequest, string, (string Subfolder, string? Reason)>? place = null)
     {
         var watch = Stopwatch.StartNew();
         options ??= new();
         if (options.Name?.Trim() is { Length: > 0 } given) SafeName(given);
-        var request = await Describe(number);
+        var (request, linked) = await Describe(number);
         var name = FolderName(request, options.Name);
-        var folder = Folder(name, options.Folder);
+        var ticket = Folder(name, options.Folder);
         try
         {
             var (head, tip) = await Fetch(request);
-            var (result, _) = await Analyse(request, head, tip, options, name, folder);
+            var kind = await KindOf(tip);
+            var (subfolder, reason) = place?.Invoke(request, kind) ?? (Subfolder(kind), null);
+            var folder = Path.Combine(ticket, subfolder);
+            var (result, _) = await Analyse(request, head, tip, options, new(name, folder, subfolder, reason, kind, linked));
             var record = ReleaseFolder.Load(folder);
             result.Existing.AddRange(ReleaseFolder.Existing(folder, record, []));
             if (options.Clean) result.Removed.AddRange(ReleaseFolder.Removable(folder, record).Select(file => file.Name));
-            result.Pull = options.NoPull ? Off(request.BaseBranch, false) : await Pending(request.BaseBranch, tip);
+            result.Pull = options.NoPull ? BasePull.Off(request.BaseBranch, false) : await Base.Pending(request.BaseBranch, tip);
             result.Note = result.CanBuild ? $"Preview only: nothing was built or written. Building writes {Planned(result)} file(s) to {folder}. {result.Pull.Detail}"
                 : "These release files cannot be built: " + string.Join(" ", result.Errors);
             result.Seconds = Math.Round(watch.Elapsed.TotalSeconds, 1);
@@ -83,6 +109,42 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
 
     private static int Planned(ReleaseResult result) => result.Projects.Count + result.Packages.Select(package => package.Name).Distinct(Files.Comparer).Count() +
         result.Content.Count;
+
+    /// <summary>The usual subfolder: SQL for a SQL repository, otherwise the repository's name.</summary>
+    internal string Subfolder(string kind) => kind == ReleaseRepositoryKind.Sql ? "SQL" : repository.Name;
+
+    /// <summary>Whether the base commit tracks any project file; the MyMeyer checkout is always a code repository.</summary>
+    private async Task<string> KindOf(string tip) => repository.Main || (await Tracked(tip)).Any(path =>
+        path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase))
+        ? ReleaseRepositoryKind.Code : ReleaseRepositoryKind.Sql;
+
+    private readonly Dictionary<string, Task<HashSet<string>>> trees = [];
+
+    /// <summary>Every file the commit tracks, with backslashes; read once per commit.</summary>
+    private Task<HashSet<string>> Tracked(string tip)
+    {
+        lock (trees)
+            return trees.TryGetValue(tip, out var known) ? known : trees[tip] = Read();
+        async Task<HashSet<string>> Read() => (await G("ls-tree", "-r", "--name-only", "-z", tip)).Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => path.Replace('/', '\\')).ToHashSet(Files.Comparer);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="path"/> as <paramref name="commit"/> holds it to <paramref name="destination"/>, with the bytes a checkout of that commit
+    /// would write: its .gitattributes and the line-ending settings apply. Needs no worktree, so paths that differ only by case each keep their own content.
+    /// </summary>
+    private async Task Extract(string commit, string path, string destination)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var start = new ProcessStartInfo("git.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var argument in new[] { "-c", "core.quotepath=false", "-C", settings.RepositoryRoot, "--attr-source=" + commit, "cat-file", "--filters", $"{commit}:{path}" })
+            start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Cannot start git.exe.");
+        var error = process.StandardError.ReadToEndAsync();
+        await using (var file = File.Create(destination)) await process.StandardOutput.BaseStream.CopyToAsync(file);
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0) throw new InvalidOperationException($"git.exe failed ({process.ExitCode}).\nCould not read {path} from {commit[..7]}: {(await error).Trim()}");
+    }
 
     /// <summary>
     /// Builds and writes what <paramref name="preview"/> showed: the same pull request head and base commit, fetched again so nothing depends on
@@ -96,6 +158,7 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         var request = preview.PullRequest;
         var run = Path.Combine(Files.Home, "Runs", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-release-" + Guid.NewGuid().ToString("N")[..8]);
         string? snapshot = null;
+        ReleasePull? pulled = null;
         var stage = "Release fetch";
         try
         {
@@ -107,31 +170,53 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             try { await G("cat-file", "-e", preview.BaseCommit + "^{commit}"); }
             catch (InvalidOperationException) { throw new InvalidOperationException($"{preview.BaseCommit} is no longer available. Preview again; nothing was built."); }
             var options = new ReleaseOptions(preview.Name, preview.Folder, preview.Clean, preview.ReuseDependencies, preview.NoPull);
-            var (result, work) = await Analyse(request, head, preview.BaseCommit, options, preview.Name, preview.Folder);
+            var (result, work) = await Analyse(request, head, preview.BaseCommit, options,
+                new(preview.Name, preview.Folder, preview.Subfolder, preview.Placement, preview.Kind, preview.Linked));
             if (tip != preview.BaseCommit)
                 result.Warnings.Add($"{request.BaseBranch} moved on origin since the preview (now {tip[..7]}). These files were built from " +
                     $"{preview.BaseCommit[..7]}, the commit the preview showed; preview again to include the newer changes.");
             if (!result.CanBuild) throw new InvalidOperationException(string.Join("\n", result.Errors));
             cancel.ThrowIfCancellationRequested();
-            result.Pull = result.NoPull ? Off(request.BaseBranch, true) : await PullBase(request.BaseBranch, tip, result.Warnings, progress);
+            result.Pull = pulled = result.NoPull ? BasePull.Off(request.BaseBranch, true) : await Base.PullBase(request.BaseBranch, tip, result.Warnings, progress,
+                $"The release files were still built from origin's {tip[..7]}");
             progress(result.Pull.Detail);
             Directory.CreateDirectory(run);
             result.RunDirectory = run;
-            stage = "Snapshot";
-            progress($"Snapshotting {request.BaseBranch} at {preview.BaseCommit[..7]}");
-            snapshot = Path.Combine(run, "source");
-            await G("worktree", "add", "--detach", snapshot, preview.BaseCommit);
             var files = new List<ReleaseFolder.Source>();
-            if (work.Plan.Projects.Count != 0)
+            if (result.Kind == ReleaseRepositoryKind.Sql)
+            {
+                // Only the changed scripts are needed; a checkout of a large SQL repository is slow, and on Windows it cannot hold two paths
+                // that differ only by case.
+                stage = "SQL scripts";
+                progress($"Reading {TicketWorkspaces.Count(result.Content.Count, "SQL script")} from {request.BaseBranch} at {preview.BaseCommit[..7]}");
+                foreach (var (path, index) in result.Content.Select((path, index) => (path, index)))
+                {
+                    var extracted = Path.Combine(run, "sql", index.ToString(), Path.GetFileName(path));
+                    await Extract(preview.BaseCommit, path, extracted);
+                    files.Add(new(Path.GetFileName(path), ReleaseKind.Sql, path.Replace('/', '\\'), extracted, null, null));
+                }
+            }
+            else
+            {
+                stage = "Snapshot";
+                progress($"Snapshotting {request.BaseBranch} at {preview.BaseCommit[..7]}");
+                snapshot = Path.Combine(run, "source");
+                await G("worktree", "add", "--detach", snapshot, preview.BaseCommit);
+            }
+            if (work.Plan.Projects.Count != 0 && snapshot is not null)
             {
                 cancel.ThrowIfCancellationRequested();
                 stage = "Build";
                 if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "Capture.targets")))
                     throw new FileNotFoundException("Cultivate's build capture target is missing. Reinstall Cultivate.");
-                var support = new SupportBuild(result.ReuseDependencies ? work.Plan.Projects : work.Order);
+                var support = new SupportBuild(result.ReuseDependencies ? work.Plan.Projects : work.Order) { Main = repository.Main };
                 var outputs = await new Pipeline(settings, git, new Bridge(settings)).Build(work.Plan, snapshot, run, progress, support);
                 result.OutsideReferences.AddRange(support.Outside.GroupBy(reference => reference.Path, Files.Comparer).Select(group =>
                     group.First() with { Project = string.Join(", ", group.Select(reference => reference.Project).Distinct(Files.Comparer)) }));
+                if (support.Unresolved.Count != 0)
+                    result.Warnings.Add($"Cultivate found {TicketWorkspaces.Count(support.Unresolved.Count, "reference")} nowhere and left " +
+                        $"{(support.Unresolved.Count == 1 ? "it" : "them")} to MSBuild, as Visual Studio does: {string.Join("; ", support.Unresolved)}. The build fails " +
+                        "with a compiler error if the code needs one; this one compiled, so it did not. build.log says where Cultivate looked.");
                 string Output(string name) => outputs.Single(file => Files.Comparer.Equals(file.RelativePath, @"bin\" + name)).Source;
                 files.AddRange(work.Plan.Projects.Select(project =>
                     new ReleaseFolder.Source(project.Assembly + ".dll", ReleaseKind.ProjectDll, project.RelativePath, Output(project.Assembly + ".dll"), project.Assembly, null)));
@@ -143,8 +228,9 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                         string.Join(", ", result.OutsideReferences.Select(reference => $"{reference.Name} ({reference.Path}, {reference.LastWriteTime:yyyy-MM-dd HH:mm})")
                             .Distinct()) + ". Check they match master before releasing.");
             }
-            files.AddRange(result.Content.Select(path =>
-                new ReleaseFolder.Source(Path.GetFileName(path), ReleaseKind.Content, path.Replace('/', '\\'), Files.Child(snapshot, path), null, null)));
+            if (snapshot is not null)
+                files.AddRange(result.Content.Select(path =>
+                    new ReleaseFolder.Source(Path.GetFileName(path), ReleaseKind.Content, path.Replace('/', '\\'), Files.Child(snapshot, path), null, null)));
             stage = "Release verification";
             progress("Staging and verifying the release files");
             var staged = ReleaseFolder.Stage(files, Path.Combine(run, "release"), result.Warnings);
@@ -153,7 +239,8 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             progress($"Writing {staged.Count} file(s) to {result.Folder}");
             ReleaseFolder.Write(staged, result, request.Number);
             result.Written = true;
-            result.Note = $"Wrote {result.Files.Count} file(s) to {result.Folder}. Upload them to the Code Release Manager.";
+            result.Note = $"Wrote {result.Files.Count} file(s) to {result.Folder}. " + (result.Kind == ReleaseRepositoryKind.Sql
+                ? "Release them through the database process; Cultivate never runs SQL." : "Upload them to the Code Release Manager.");
             result.Seconds = Math.Round(watch.Elapsed.TotalSeconds, 1);
             ReleaseFolder.Save(result, run);
             return result;
@@ -165,6 +252,13 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             {
                 Branch = request.Label, Snapshot = snapshot, RunDirectory = Directory.Exists(run) ? run : null, Log = Path.Combine(run, "build.log")
             });
+            // The pull already happened: what it did is reported with the failure, not the preview's plan.
+            if (pulled is not null) exception.Data[PulledKey] = pulled;
+            throw;
+        }
+        catch (OperationCanceledException exception) when (pulled is not null)
+        {
+            exception.Data[PulledKey] = pulled;
             throw;
         }
         finally
@@ -177,29 +271,35 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
     private string Package(ReleasePackage package) => Path.GetRelativePath(settings.RepositoryRoot, Path.GetFullPath(
         Path.Combine(settings.RepositoryRoot, Path.GetDirectoryName(package.Project)!, package.HintPath)));
 
-    /// <summary>The pull request as the GitHub CLI describes it, or why it cannot be released.</summary>
-    private async Task<ReleasePullRequest> Describe(int number)
+    /// <summary>The pull request as the GitHub CLI describes it and the pull requests its description links, or why it cannot be released.</summary>
+    private async Task<(ReleasePullRequest Request, List<string> Linked)> Describe(int number)
     {
         string json;
-        try { json = await (gh ?? PullRequests.GitHub(settings))(["pr", "view", number.ToString(), "--json", Fields]); }
+        // The GitHub CLI finds MyMeyer from the checkout it runs in; any other repository is named.
+        string[] arguments = repository.Main || repository.GitHub is null ? ["pr", "view", number.ToString(), "--json", Fields]
+            : ["pr", "view", number.ToString(), "--repo", repository.GitHub, "--json", Fields];
+        try { json = await (gh ?? PullRequests.GitHub(settings))(arguments); }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             if (exception.Message.Contains("Could not resolve to a PullRequest", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException($"Pull request #{number} was not found on GitHub. Check the number; nothing was fetched or built.");
+                throw new InvalidOperationException($"{Named(number)} was not found on GitHub. Check the number; nothing was fetched or built.");
             throw new InvalidOperationException($"{PullRequests.Problem(exception)}. Building release files needs the GitHub CLI to find the commit " +
                 "the pull request was merged as; nothing was fetched or built.");
         }
         var request = Parse(json);
         if (request is null || request.Number != number)
-            throw new InvalidOperationException($"The GitHub CLI returned no details for pull request #{number}; nothing was fetched or built.");
+            throw new InvalidOperationException($"The GitHub CLI returned no details for {(repository.Main ? "" : repository.Name + " ")}pull request #{number}; " +
+                "nothing was fetched or built.");
         if (request.State != "MERGED" || request.MergeCommit.Length == 0)
-            throw new InvalidOperationException($"Pull request #{number} is {(request.State == "CLOSED" ? "closed without being merged" : "not merged yet")}. " +
-                $"Release files are built from {settings.BaseBranch} after the merge. To try it on your dev webfarm instead, use Review a pull request " +
-                $"or `cultivate activate --pr {number} --yes`.");
+            throw new InvalidOperationException($"{Named(number)} is {(request.State == "CLOSED" ? "closed without being merged" : "not merged yet")}. " +
+                $"Release files are built from {settings.BaseBranch} after the merge." + (repository.Main
+                    ? $" To try it on your dev webfarm instead, use Review a pull request or `cultivate activate --pr {number} --yes`." : ""));
         if (request.BaseBranch != settings.BaseBranch)
-            throw new InvalidOperationException($"Pull request #{number} was merged into {request.BaseBranch}, not {settings.BaseBranch}. Release files are " +
+            throw new InvalidOperationException($"{Named(number)} was merged into {request.BaseBranch}, not {settings.BaseBranch}. Release files are " +
                 $"built only from {settings.BaseBranch}; release it once its changes reach {settings.BaseBranch}.");
-        return request;
+        using var document = JsonDocument.Parse(json);
+        var body = document.RootElement.TryGetProperty("body", out var text) && text.ValueKind == JsonValueKind.String ? text.GetString() : null;
+        return (request, ReleaseRepositories.Associated(body).Select(link => link.Url).ToList());
     }
 
     internal static ReleasePullRequest? Parse(string json)
@@ -216,7 +316,7 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
 
     /// <summary>
     /// Fetches the pull request's head and the base branch into this run's private refs. Origin's remote-tracking branches stay as they are here;
-    /// only <see cref="PullBase"/>, when building, moves the base branch's.
+    /// only <see cref="BasePull.PullBase"/>, when building, moves the base branch's.
     /// </summary>
     private async Task<(string Head, string Tip)> Fetch(ReleasePullRequest request)
     {
@@ -229,18 +329,18 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         }
         catch (InvalidOperationException exception) when (exception.Message.Contains($"refs/pull/{number}/head", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException($"Pull request #{number} was not found on origin. Check the number; nothing was built.");
+            throw new InvalidOperationException($"{Named(number)} was not found on origin. Check the number; nothing was built.");
         }
         catch (InvalidOperationException exception) when (exception.Message.Contains($"refs/heads/{branch}", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException($"Origin has no {branch} branch to build release files from. Nothing was built.");
+            throw new InvalidOperationException($"Origin{(repository.Main ? "" : " of " + repository.Name)} has no {branch} branch to build release files from. Nothing was built.");
         }
         var head = await G("rev-parse", "--verify", Ref(number, "head") + "^{commit}");
         var tip = await G("rev-parse", "--verify", Ref(number, "base") + "^{commit}");
         try { await G("merge-base", "--is-ancestor", request.MergeCommit, tip); }
         catch (InvalidOperationException)
         {
-            throw new InvalidOperationException($"Pull request #{number} was merged as {request.MergeCommit[..Math.Min(7, request.MergeCommit.Length)]}, which is not " +
+            throw new InvalidOperationException($"{Named(number)} was merged as {request.MergeCommit[..Math.Min(7, request.MergeCommit.Length)]}, which is not " +
                 $"part of origin's {branch} ({tip[..7]}); it may have been removed by a force push. Nothing was built.");
         }
         return (head, tip);
@@ -257,133 +357,24 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         catch (InvalidOperationException) { }
     }
 
-    private static bool PullFailed(Exception exception) => exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or
-        UnauthorizedAccessException or FormatException;
-
-    private static ReleasePull Off(string branch, bool built) => new(branch, null, "", "", 0, ReleasePullOutcome.Off, built
-        ? $"Left {branch} and origin/{branch} where they were (--no-pull)." : $"Building leaves {branch} and origin/{branch} where they are (--no-pull).");
-
-    /// <summary>The local <paramref name="branch"/>'s commit, the worktree it is checked out in and whether that folder is missing, and the commits
-    /// it has that <paramref name="tip"/> lacks and lacks that <paramref name="tip"/> has; null when there is no such local branch.</summary>
-    private async Task<(string Commit, string? Worktree, bool Missing, int Ahead, int Behind)?> Local(string branch, string tip)
-    {
-        var commit = await G("for-each-ref", "--format=%(objectname)", "refs/heads/" + branch);
-        if (commit.Length == 0) return null;
-        var fields = (await G("worktree", "list", "--porcelain", "-z")).Split("\0\0", StringSplitOptions.RemoveEmptyEntries).Select(block => block.Split('\0'))
-            .FirstOrDefault(block => block.Contains("branch refs/heads/" + branch));
-        var worktree = fields?.FirstOrDefault(field => field.StartsWith("worktree ", StringComparison.Ordinal))?[9..].Replace('/', '\\');
-        var missing = fields is not null && (worktree is null || !Directory.Exists(worktree) || fields.Any(field => field.StartsWith("prunable", StringComparison.Ordinal)));
-        var counts = (await G("rev-list", "--left-right", "--count", $"{commit}...{tip}")).Split('\t');
-        return (commit, worktree, missing, int.Parse(counts[0]), int.Parse(counts[1]));
-    }
-
-    /// <summary>What building would do to the local base branch, for the preview; it changes nothing.</summary>
-    private async Task<ReleasePull> Pending(string branch, string tip)
-    {
-        try
-        {
-            if (await Local(branch, tip) is not { } at)
-                return new(branch, null, "", "", 0, ReleasePullOutcome.NoBranch, $"You have no local {branch} branch, so building pulls nothing.");
-            var (commit, worktree, missing, ahead, behind) = at;
-            var where = worktree is null ? "" : " in " + worktree;
-            ReleasePull Pull(string outcome, int commits, string detail) => new(branch, worktree, commit, commit, commits, outcome, detail);
-            return ahead != 0 ? Pull(ReleasePullOutcome.LocalCommits, ahead, $"{branch}{where} has {ahead} local commit(s) not on origin, so building leaves it as it is.")
-                : behind == 0 ? Pull(ReleasePullOutcome.UpToDate, 0, $"{branch}{where} is up to date with origin.")
-                : missing ? Pull(ReleasePullOutcome.NotUpdated, behind, $"{branch} is {behind} commit(s) behind origin, but it is checked out in {worktree}, " +
-                    "which is missing, so building cannot pull it.")
-                : Pull(ReleasePullOutcome.Behind, behind, $"{branch}{where} is {behind} commit(s) behind origin; building pulls it.");
-        }
-        catch (Exception exception) when (PullFailed(exception))
-        {
-            return new(branch, null, "", "", 0, ReleasePullOutcome.NotUpdated, $"Could not tell where your local {branch} is: {GitProblem(exception)}.");
-        }
-    }
-
-    /// <summary>
-    /// Pulls the base branch as <c>git pull --ff-only</c> would, without ever stopping the build: origin's remote-tracking branch moves to
-    /// <paramref name="tip"/>, and the local branch follows when it is behind, by a fast-forward merge in the worktree it is checked out in, or
-    /// by moving the ref when it is checked out nowhere. Local commits, local files the merge would overwrite, or any Git failure leave it as it
-    /// was, with a warning in <paramref name="warnings"/>. It never resets, checks out, stashes or forces anything.
-    /// </summary>
-    private async Task<ReleasePull> PullBase(string branch, string tip, List<string> warnings, Action<string> progress)
-    {
-        var (to, built) = (tip[..7], $"The release files were still built from origin's {tip[..7]}");
-        try { await G("update-ref", "-m", $"cultivate release: fetch origin {branch}", $"refs/remotes/origin/{branch}", tip); }
-        catch (Exception exception) when (PullFailed(exception)) { warnings.Add($"Could not move origin/{branch} to the fetched {to}: {GitProblem(exception)}."); }
-        (string Commit, string? Worktree, bool Missing, int Ahead, int Behind)? local = null;
-        try
-        {
-            local = await Local(branch, tip);
-            if (local is not { } at)
-                return new(branch, null, "", "", 0, ReleasePullOutcome.NoBranch, $"You have no local {branch} branch, so there was nothing to pull.");
-            var (commit, worktree, missing, ahead, behind) = at;
-            var where = worktree is null ? "" : " in " + worktree;
-            ReleasePull Left(string outcome, int commits, string detail, string? warning = null)
-            {
-                if (warning is not null) warnings.Add(warning);
-                return new(branch, worktree, commit, commit, commits, outcome, detail);
-            }
-            if (ahead != 0)
-                return Left(ReleasePullOutcome.LocalCommits, ahead, $"Did not pull {branch}: it has {ahead} local commit(s) not on origin.",
-                    $"Your local {branch}{where} has {ahead} commit(s) that are not on origin, so it was not updated to origin's {to}. {built}; pull {branch} by hand.");
-            if (behind == 0) return Left(ReleasePullOutcome.UpToDate, 0, $"{branch}{where} is already up to date with origin ({to}).");
-            if (missing)
-                return Left(ReleasePullOutcome.NotUpdated, behind, $"Did not pull {branch}: it is checked out in {worktree}, which is missing.",
-                    $"{branch} is checked out in {worktree}, which is missing, so it was not pulled. {built}; run `git worktree prune`, then pull {branch} by hand.");
-            try
-            {
-                if (worktree is null) await G("update-ref", "-m", $"cultivate release: fast-forward to origin/{branch}", $"refs/heads/{branch}", tip, commit);
-                else
-                {
-                    progress($"Pulling {branch} in {worktree}");
-                    // Git refuses the whole merge, changing nothing, when it would overwrite a local change; local changes it does not touch stay.
-                    await git.Git(worktree, "merge", "--ff-only", "--no-autostash", "--quiet", tip);
-                }
-            }
-            catch (InvalidOperationException exception) when (exception.Message.Contains("would be overwritten", StringComparison.Ordinal))
-            {
-                var files = exception.Message.Split('\n').Where(line => line.StartsWith('\t')).Select(line => line.Trim()).ToList();
-                var named = string.Join(", ", files.Take(8)) + (files.Count > 8 ? $" and {files.Count - 8} more" : "");
-                return Left(ReleasePullOutcome.NotUpdated, behind, $"Did not pull {branch}: it would overwrite local files in {worktree}.",
-                    $"{branch} in {worktree} was not pulled, and nothing in it changed: pulling would overwrite your local changes to {named}. {built}; " +
-                    $"commit, stash or undo those changes, then pull {branch} by hand.");
-            }
-            return new(branch, worktree, commit, tip, behind, ReleasePullOutcome.Pulled,
-                $"Pulled {branch}: {behind} new commit(s), {commit[..7]} → {to} ({worktree ?? "not checked out"})");
-        }
-        catch (Exception exception) when (PullFailed(exception))
-        {
-            warnings.Add($"Could not pull {branch}{(local?.Worktree is { } path ? " in " + path : "")}: {GitProblem(exception)}. {built}; pull {branch} by hand.");
-            return new(branch, local?.Worktree, local?.Commit ?? "", local?.Commit ?? "", local?.Behind ?? 0, ReleasePullOutcome.NotUpdated,
-                $"Did not pull {branch}: {GitProblem(exception)}.");
-        }
-    }
-
-    /// <summary>The line of a Git failure that says what went wrong, without Git's exit code or its error: prefix.</summary>
-    private static string GitProblem(Exception exception)
-    {
-        var lines = exception.Message.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Skip(exception.Message.StartsWith("git.exe failed", StringComparison.Ordinal) ? 1 : 0).ToList();
-        var line = lines.FirstOrDefault(text => text.StartsWith("fatal: ", StringComparison.Ordinal) || text.StartsWith("error: ", StringComparison.Ordinal)) ??
-            lines.FirstOrDefault() ?? exception.Message;
-        return Regex.Replace(line, "^(fatal|error): ", "").TrimEnd('.');
-    }
-
     /// <summary>
     /// Works out the release from commits alone: the pull request's files from its fork point to its head, each compared with the base commit
     /// <paramref name="tip"/>, the projects that own its compiled files, their changed packages, and the unchanged projects they compile against.
     /// </summary>
-    private async Task<(ReleaseResult Result, Work Work)> Analyse(ReleasePullRequest request, string head, string tip, ReleaseOptions options, string name, string folder)
+    private async Task<(ReleaseResult Result, Work Work)> Analyse(ReleasePullRequest request, string head, string tip, ReleaseOptions options, Placement place)
     {
         var (number, branch, merge) = (request.Number, request.BaseBranch, request.MergeCommit);
+        var sql = place.Kind == ReleaseRepositoryKind.Sql;
         // M^1 is the base before the merge for squash, merge-commit and rebase merges alike. merge-base(H, B) would be H itself after a
         // merge-commit merge, and the pull request would seem to change nothing.
         var fork = await G("merge-base", head, merge + "^1");
         var result = new ReleaseResult
         {
-            PullRequest = request with { HeadCommit = head }, BaseBranch = branch, BaseCommit = tip, ForkPoint = fork, Name = name, Folder = folder,
-            Clean = options.Clean, ReuseDependencies = options.ReuseDependencies, NoPull = options.NoPull
+            PullRequest = request with { HeadCommit = head }, Repository = repository.Name, GitHub = repository.GitHub, Checkout = settings.RepositoryRoot,
+            Kind = place.Kind, BaseBranch = branch, BaseCommit = tip, ForkPoint = fork, Name = place.Name, Folder = place.Folder, Subfolder = place.Subfolder,
+            Placement = place.Reason, Linked = place.Linked, Clean = options.Clean, ReuseDependencies = options.ReuseDependencies, NoPull = options.NoPull
         };
+        if (place.Reason is not null) result.Warnings.Add(place.Reason);
         if (request.HeadCommit.Length != 0 && request.HeadCommit != head)
             result.Warnings.Add($"Origin's refs/pull/{number}/head is {head[..7]}, but GitHub reports the head as {request.HeadCommit[..Math.Min(7, request.HeadCommit.Length)]}. " +
                 "The fetched head was used.");
@@ -397,7 +388,8 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             var status = current == before ? ReleaseStatus.NotOnBase : Absent(current) ? ReleaseStatus.Deleted :
                 current == after ? ReleaseStatus.Same : ReleaseStatus.ChangedAgain;
             var change = new Change(path, Absent(current));
-            var kind = Planner.IsCompiledInput(change) ? ReleaseKind.Compiled :
+            var kind = sql ? Path.GetExtension(path).Equals(".sql", StringComparison.OrdinalIgnoreCase) ? ReleaseKind.Sql : ReleaseKind.NotIncluded :
+                Planner.IsCompiledInput(change) ? ReleaseKind.Compiled :
                 ContentExtensions.Contains(Path.GetExtension(path)) && !Planner.IsExcluded(path) ? ReleaseKind.Content : ReleaseKind.NotIncluded;
             var commits = status == ReleaseStatus.ChangedAgain
                 ? (await Merged()).Where(other => other.Paths.Contains(path, StringComparer.Ordinal)).Select(other => other.Commit).ToList() : [];
@@ -414,11 +406,12 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             if (kind == ReleaseKind.Compiled) compiled.Add(change);
             else if (change.Deleted)
                 result.Deleted.Add(new(path, kind == ReleaseKind.Content ? "Not on " + branch + ": nothing to upload. Remove it from production by hand if it was released."
+                    : kind == ReleaseKind.Sql ? "Not on " + branch + ": nothing to release. Drop it from the database by hand if it was released."
                     : "Not on " + branch + ": nothing to upload."));
-            else if (kind == ReleaseKind.Content) result.Content.Add(path);
-            else result.NotIncluded.Add(new(path, Reason(path)));
+            else if (kind is ReleaseKind.Content or ReleaseKind.Sql) result.Content.Add(path);
+            else result.NotIncluded.Add(new(path, sql ? SqlReason(path) : Reason(path)));
         }
-        foreach (var config in result.NotIncluded.Where(note => Path.GetFileName(note.Path).Equals("web.config", StringComparison.OrdinalIgnoreCase)))
+        foreach (var config in result.NotIncluded.Where(note => !sql && Path.GetFileName(note.Path).Equals("web.config", StringComparison.OrdinalIgnoreCase)))
             result.Warnings.Add($"{config.Path} changed. Cultivate never releases configuration: compare it with production and release it by hand if needed.");
         var plan = new Plan
         {
@@ -430,11 +423,30 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         if (compiled.Count != 0)
         {
             var catalog = await ReadCatalog(tip);
-            plan.Projects.AddRange(Planner.BuildOrder(catalog.Webfarm, compiled, plan.Errors));
-            await new Planner(settings, git, new Bridge(settings)).AddPackageDependencies(plan, compiled);
+            // An SDK-style project compiles every file in its folder without listing it, so its changed files are matched by folder.
+            var sdk = repository.Main ? [] : catalog.Candidates.Where(project => SdkStyle().IsMatch(catalog.Projects[project.RelativePath])).ToList();
+            var unsupported = new HashSet<string>(Files.Comparer);
+            void Unsupported(ProjectInfo project)
+            {
+                if (unsupported.Add(project.RelativePath))
+                    plan.Errors.Add($"{project.RelativePath} is an SDK-style project, which Build release files does not support. Build {project.Assembly} in " +
+                        "Visual Studio and release its files by hand; if it is deployed by publishing, publish it instead.");
+            }
+            var supported = compiled.Where(change =>
+            {
+                var path = change.Path.Replace('/', '\\');
+                var owner = sdk.FirstOrDefault(project => project.Owns(path) || (Path.GetDirectoryName(project.RelativePath) is { Length: > 0 } directory
+                    ? path.StartsWith(directory + "\\", StringComparison.OrdinalIgnoreCase) : !path.Contains('\\')));
+                if (owner is not null) Unsupported(owner);
+                return owner is null;
+            }).ToList();
+            try { plan.Projects.AddRange(Planner.BuildOrder(catalog.Candidates.Except(sdk).ToList(), supported, plan.Errors)); }
+            catch (InvalidOperationException exception) when (!repository.Main) { plan.Errors.Add(exception.Message); }
+            await new Planner(settings, git, new Bridge(settings)).AddPackageDependencies(plan, supported, anyPackagesFolder: !repository.Main);
             result.Packages.AddRange(plan.Projects.SelectMany(project => project.PackageDependencies.Select(hint =>
                 new ReleasePackage(Path.GetFileName(hint), project.HintVersions.GetValueOrDefault(hint) ?? "", hint, project.RelativePath))));
             order = Support(catalog, plan.Projects, result);
+            foreach (var project in order.Where(project => !repository.Main && SdkStyle().IsMatch(catalog.Projects[project.RelativePath]))) Unsupported(project);
             var others = await Merged();
             result.Projects.AddRange(plan.Projects.Select(project => new ReleaseProject(project.RelativePath, project.Assembly,
                 others.Where(other => other.Paths.Any(project.Owns)).Select(other => other.Commit).ToList())));
@@ -470,17 +482,27 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         var extension => $"{extension} files are not released by Cultivate; release it by hand if production needs it."
     };
 
-    /// <summary>Every project file in the base commit, and the projects with the webfarm copy target that the dev farm planner also considers.</summary>
+    private static string SqlReason(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".md" or ".txt" => "Documentation: not released.",
+        _ => "Not a SQL script: only the .sql files of a SQL repository are released. Release it by hand if needed."
+    };
+
+    private static bool HasWebfarmTarget(string text) => text.Contains("CopyBuildOutputToWebfarm", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Every project file in the base commit, and the projects a changed compiled file can belong to: in MyMeyer those with the webfarm copy
+    /// target that the dev farm planner also considers; in another repository every project outside bin, obj, packages and Backup folders.
+    /// </summary>
     private async Task<Catalog> ReadCatalog(string tip)
     {
-        var tracked = (await G("ls-tree", "-r", "--name-only", "-z", tip)).Split('\0', StringSplitOptions.RemoveEmptyEntries)
-            .Select(path => path.Replace('/', '\\')).ToHashSet(Files.Comparer);
+        var tracked = await Tracked(tip);
         var paths = tracked.Where(path => path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)).Order(Files.Comparer).ToList();
         var texts = await Task.WhenAll(paths.Select(async path => (await G("show", $"{tip}:{path.Replace('\\', '/')}")).TrimStart('﻿')));
         var projects = paths.Zip(texts).ToDictionary(pair => pair.First, pair => pair.Second, Files.Comparer);
-        var webfarm = projects.Where(pair => pair.Value.Contains("CopyBuildOutputToWebfarm", StringComparison.Ordinal))
+        var candidates = projects.Where(pair => repository.Main ? HasWebfarmTarget(pair.Value) : !Planner.IsExcluded(pair.Key))
             .Select(pair => ProjectInfo.Read(settings.RepositoryRoot, pair.Key, pair.Value)).ToList();
-        return new(tracked, projects, webfarm);
+        return new(tracked, projects, candidates);
     }
 
     /// <summary>
@@ -490,16 +512,18 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
     /// </summary>
     private List<ProjectInfo> Support(Catalog catalog, List<ProjectInfo> release, ReleaseResult result)
     {
-        var webfarm = catalog.Webfarm.ToDictionary(project => project.RelativePath, Files.Comparer);
-        // Only projects with the webfarm target are matched by assembly name: Backup copies share their names.
-        var byAssembly = catalog.Webfarm.ToDictionary(project => project.Assembly, Files.Comparer);
+        var webfarm = catalog.Candidates.ToDictionary(project => project.RelativePath, Files.Comparer);
+        // In MyMeyer only projects with the webfarm target are matched by assembly name: Backup copies share their names. Elsewhere an assembly
+        // more than one project builds is matched by none.
+        var byAssembly = catalog.Candidates.GroupBy(project => project.Assembly, Files.Comparer).Where(group => repository.Main || group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single(), Files.Comparer);
         var chosen = release.ToDictionary(project => project.RelativePath, Files.Comparer);
         var queue = new Queue<ProjectInfo>(release);
         void Add(ProjectInfo project, string reason)
         {
             chosen[project.RelativePath] = project;
             queue.Enqueue(project);
-            result.SupportProjects.Add(new(project.RelativePath, project.Assembly, reason, webfarm.ContainsKey(project.RelativePath), !result.ReuseDependencies));
+            result.SupportProjects.Add(new(project.RelativePath, project.Assembly, reason, HasWebfarmTarget(catalog.Projects[project.RelativePath]), !result.ReuseDependencies));
         }
         while (queue.TryDequeue(out var project))
         {
@@ -517,7 +541,8 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                     : $"{project.Assembly} references {hints[0]}, a build output Git does not track");
             }
         }
-        var names = chosen.Values.Where(project => webfarm.ContainsKey(project.RelativePath)).ToDictionary(project => project.Assembly, project => project.RelativePath, Files.Comparer);
+        var names = chosen.Values.Where(project => byAssembly.GetValueOrDefault(project.Assembly) == project)
+            .ToDictionary(project => project.Assembly, project => project.RelativePath, Files.Comparer);
         var ordered = new List<ProjectInfo>();
         var visiting = new HashSet<string>(Files.Comparer);
         void Visit(ProjectInfo project)
@@ -586,14 +611,20 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         else folder = Path.Combine(Files.Full(settings.ReleaseRoot), name);
         if (Path.GetPathRoot(folder) is { } root && Files.Comparer.Equals(Files.Full(root), folder))
             throw new InvalidOperationException($"Release files need their own folder, not the drive root {folder}.");
-        var repository = Files.Full(settings.RepositoryRoot);
-        if (Files.Comparer.Equals(folder, repository) || folder.StartsWith(repository + "\\", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"{folder} is inside your MyMeyer checkout. Choose a release folder outside it.");
+        foreach (var (checkout, label) in new[] { (mainCheckout, "MyMeyer"), (settings.RepositoryRoot, repository.Name) })
+        {
+            var inside = Files.Full(checkout);
+            if (Files.Comparer.Equals(folder, inside) || folder.StartsWith(inside + "\\", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"{folder} is inside your {label} checkout. Choose a release folder outside it.");
+        }
         return folder;
     }
 
     [GeneratedRegex(@"^\s*(\d{3,})\b")]
     private static partial Regex TitleTicket();
+
+    [GeneratedRegex(@"<Project\b[^>]*\bSdk\s*=|<Sdk\b|<Import\b[^>]*\bSdk\s*=", RegexOptions.IgnoreCase)]
+    private static partial Regex SdkStyle();
 
     [GeneratedRegex(@"^(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?$", RegexOptions.IgnoreCase)]
     private static partial Regex ReservedName();

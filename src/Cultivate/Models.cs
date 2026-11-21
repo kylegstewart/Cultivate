@@ -78,6 +78,8 @@ internal sealed class Settings
     public bool WarmUpAfterDeploy { get; set; } = true;
     /// <summary>Folder holding one subfolder of SQL files per ticket or branch, compared with each ticket's SQL repository changes.</summary>
     public string SqlMirrorRoot { get; set; } = "";
+    /// <summary>The MeyerOnline checkout that Build MeyerOnline release switches to master, pulls and builds in.</summary>
+    public string MeyerOnlineRoot { get; set; } = "";
     /// <summary>Ticket page address; {0} is replaced with the ticket number.</summary>
     public string TicketUrl { get; set; } = "https://mymeyer.meyerdistributing.com/it/ticket-list?ticketNum={0}";
     /// <summary>Stop the old WebfarmFileSync watcher without asking whenever it would overwrite a deployment.</summary>
@@ -87,7 +89,7 @@ internal sealed class Settings
     public List<string>? LibraryRepositories { get; set; }
     /// <summary>Days a worktree must go unused before Clean up offers to delete it, when deleting it loses nothing.</summary>
     public int CleanupDays { get; set; } = 14;
-    /// <summary>Folder that holds one folder of release files per ticket, built by <c>cultivate release</c>.</summary>
+    /// <summary>Folder that holds one folder of release files per ticket, built by <c>cultivate release</c>; <c>Documents\Releases</c> by default.</summary>
     public string ReleaseRoot { get; set; } = "";
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
@@ -144,9 +146,18 @@ internal sealed class Settings
             var guess = Path.Combine(clones, "SQL", "SPs");
             if (Directory.Exists(guess)) SqlMirrorRoot = guess;
         }
+        if (string.IsNullOrWhiteSpace(MeyerOnlineRoot) && OnlineRelease.Discover(RepositoryRoot) is { } online) MeyerOnlineRoot = online;
         if (LibraryRepositories is null && LibraryLoop.Discover(RepositoryRoot) is { Count: > 0 } libraries) LibraryRepositories = libraries;
-        if (string.IsNullOrWhiteSpace(ReleaseRoot)) ReleaseRoot = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        ReleaseRoot = ReleaseRootFor(ReleaseRoot, Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
     }
+
+    /// <summary>
+    /// The release root for a saved <paramref name="saved"/>: unset, or the <paramref name="documents"/> folder itself, the default before
+    /// release files moved into its Releases folder, means <c>Documents\Releases</c>; any other folder is kept. Creates nothing.
+    /// </summary>
+    internal static string ReleaseRootFor(string saved, string documents) =>
+        string.IsNullOrWhiteSpace(saved) || Path.IsPathFullyQualified(saved) && Files.Comparer.Equals(Files.Full(saved), Files.Full(documents))
+            ? Path.Combine(documents, "Releases") : saved;
 
     public List<string> Problems()
     {
@@ -165,9 +176,11 @@ internal sealed class Settings
             problems.Add("StateRoot must be an absolute folder for the deployment journal and backups.");
         if (!string.IsNullOrWhiteSpace(SiteUrl) && !(Uri.TryCreate(SiteUrl, UriKind.Absolute, out var site) && site.Scheme is "http" or "https"))
             problems.Add("SiteUrl must be the http or https address of your dev site, for example https://mywebfarm-dev02.example.com/.");
+        if (!string.IsNullOrWhiteSpace(MeyerOnlineRoot) && !Path.IsPathFullyQualified(MeyerOnlineRoot))
+            problems.Add("MeyerOnlineRoot must be the absolute folder of your MeyerOnline checkout.");
         if (CleanupDays < 1) problems.Add("CleanupDays must be 1 or more.");
         if (!string.IsNullOrWhiteSpace(ReleaseRoot) && !Path.IsPathFullyQualified(ReleaseRoot))
-            problems.Add("ReleaseRoot must be an absolute folder for release files, for example your Documents folder.");
+            problems.Add("ReleaseRoot must be an absolute folder for release files, for example Documents\\Releases.");
         return problems;
     }
 

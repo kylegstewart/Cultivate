@@ -41,22 +41,27 @@ internal static class ReleaseFolder
 
     /// <summary>
     /// Gives each file a name in the flat folder, copies it to <paramref name="stage"/> and verifies it there. Files sharing a name keep the first
-    /// at the top level; each other one goes in a subfolder named after its source folder, with a warning.
+    /// at the top level; each other one goes in a subfolder named after its source folder, with a warning. Names that differ only by case share
+    /// a name too, since a Windows folder cannot hold both.
     /// </summary>
     internal static List<Staged> Stage(List<Source> sources, string stage, List<string> warnings)
     {
-        var used = new HashSet<string>(Files.Comparer);
+        var used = new Dictionary<string, string>(Files.Comparer);
         var staged = new List<Staged>();
         foreach (var source in sources)
         {
             var name = source.Name;
-            if (!used.Add(name))
+            if (!used.TryAdd(name, name))
             {
+                var first = used[name];
                 var directory = Path.GetDirectoryName(source.Origin) ?? "";
                 name = Path.Combine(Path.GetFileName(directory) is { Length: > 0 } parent ? parent : "root", source.Name);
-                if (!used.Add(name) && !used.Add(name = Path.Combine(directory.Replace('\\', '_'), source.Name)))
+                if (!used.TryAdd(name, name) && !used.TryAdd(name = Path.Combine(directory.Replace('\\', '_'), source.Name), name))
                     throw new InvalidDataException($"More than one release file would be written as {name}.");
-                warnings.Add($"More than one release file is named {source.Name}: {source.Origin} is written as {name}. Upload it to its own destination.");
+                warnings.Add(first == source.Name
+                    ? $"More than one release file is named {source.Name}: {source.Origin} is written as {name}. Upload it to its own destination."
+                    : $"{first} and {source.Name} differ only by case, so one folder cannot hold both: {source.Origin} is written as {name}. " +
+                      "Check which one production needs; Git tracks both.");
             }
             var file = Files.Child(stage, name);
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);

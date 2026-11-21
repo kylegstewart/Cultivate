@@ -24,7 +24,7 @@ internal static class Setup
         }
         var settings = await Settings.Read();
         var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
-            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days", "--release-root" };
+            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days", "--release-root", "--meyeronline" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -49,6 +49,7 @@ internal static class Setup
         if (Option("--warmup") is { } warmup)
             settings.WarmUpAfterDeploy = bool.TryParse(warmup, out var enabled) ? enabled : throw new InvalidOperationException("--warmup expects true or false.");
         if (Option("--sql-mirror") is { } mirror) settings.SqlMirrorRoot = Files.Full(mirror);
+        if (Option("--meyeronline") is { } online) settings.MeyerOnlineRoot = Files.Full(online);
         if (Option("--stop-legacy-watcher") is { } stopLegacy)
             settings.StopLegacyWatcher = bool.TryParse(stopLegacy, out var stop) ? stop : throw new InvalidOperationException("--stop-legacy-watcher expects true or false.");
         if (Option("--library-repositories") is { } libraries) settings.LibraryRepositories = LibraryLoop.ParseRepositories(libraries);
@@ -107,6 +108,10 @@ internal static class Setup
         var mirror = Ask("[bold]SQL files folder[/] with a subfolder per ticket (Ticket workspaces compares it; blank for none)",
             settings.SqlMirrorRoot, value => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path.", optional: true);
         settings.SqlMirrorRoot = mirror.Length == 0 ? "" : Files.Full(mirror);
+        var online = Ask("[bold]MeyerOnline checkout[/] that Build MeyerOnline release switches to master and builds in (blank for none)",
+            settings.MeyerOnlineRoot, value => !Path.IsPathFullyQualified(value) ? "Enter an absolute path." :
+                Path.Exists(Path.Combine(value, ".git")) ? null : "That folder is not a Git checkout.", optional: true);
+        settings.MeyerOnlineRoot = online.Length == 0 ? "" : Files.Full(online);
         settings.StopLegacyWatcher = AnsiConsole.Confirm(
             "Stop the old WebfarmFileSync watcher without asking when it could overwrite a deployment?", settings.StopLegacyWatcher);
         settings.LibraryRepositories = LibraryLoop.ParseRepositories(Ask(

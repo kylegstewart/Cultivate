@@ -5,6 +5,53 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: build the Meyer Online web release package. The new home action Build MeyerOnline release (and `cultivate online-release`)
+  does in your MeyerOnline checkout what you did by hand: it switches the checkout to `master` and pulls it (fast-forward only), runs
+  `npm install` when `node_modules` is missing or the pull changed `package.json`, publishes `Meyer.Online.Server` with its
+  `FolderProfile` publish profile exactly as Visual Studio does while `npm run build-prod` builds the app, copies the app's `www` folder
+  into the publish folder as `wwwroot`, and zips the publish folder into `MORelease\MORelease.zip` in your release folder, replacing the
+  old zip only once the new one is complete and checked. Anything Git cannot do exactly stops it before anything else changes: a merge
+  or rebase in progress, modified tracked files (unless you confirm, or pass `--allow-local-changes`), local commits on `master`, or
+  `master` checked out in another worktree. The preview says what building would do; the result gives the zip's size, files and SHA-256,
+  the commit built, what was pulled and switched, and each step's time. The checkout is found beside your MyMeyer checkout, or set with
+  `cultivate setup --meyeronline PATH`. It never touches a webfarm or a database.
+- Improvement: release files now go in a `Releases` folder in your Documents folder (`Documents\Releases\<ticket>`) instead of
+  straight into Documents. Settings that still have the old default, the Documents folder itself, move there on their own; a folder
+  you chose stays. The folder is created the first time release files are written, and release folders already in Documents stay
+  where they are.
+- Improvement: **Open solution** → **Open main worktree solution** now pulls the main worktree's branch before Visual Studio starts,
+  so the solution opens on current code. It fetches the branch from origin and fast-forwards it, the same way building release files
+  pulls master: local commits, or local changes the pull would overwrite, leave it as it is with a warning. One line says what was
+  pulled, or why not (detached HEAD, a branch origin does not have, a failed fetch), and which branch it is on when that is not the
+  base branch. The solution opens either way; a warning stays on screen until you press a key. Opening a worktree or a local branch
+  pulls nothing.
+- Feature: building release files now also builds the pull requests a pull request links. After describing the requested pull request,
+  Cultivate reads the **Associated PRs** section of its description and of every linked pull request's own description (each one once),
+  and builds each merged one in its local clone beside your MyMeyer checkout, in the same run. Everything goes in the ticket folder, now
+  always with one subfolder per repository (for example `Releases\39126\MyMeyer` and `Releases\39126\Public--Applications`). A linked
+  pull request that is not merged, is merged into a branch other than its repository's release branch, cannot be read by the GitHub CLI,
+  or whose repository is not cloned is listed with the reason and skipped. One repository failing to build no longer stops the others:
+  their files are written, the result says which repository failed and why, and `cultivate release --yes` exits 1. `--no-linked` builds
+  only the requested pull request. Each repository's release branch is pulled as master is, and `--no-pull` leaves them all.
+- Feature: build release files for any cloned repository. `cultivate release --pr` also takes a pull request URL, and `--repo NAME`,
+  `--repo OWNER/NAME` or `--repo PATH` picks a clone beside MyMeyer for a number. In the terminal UI, **Build release files** still lists
+  MyMeyer's merged pull requests first; Ctrl+R lists another clone's, and a pasted pull request link builds that pull request in its own
+  repository. Another repository's releases are built from master, or from origin's default branch when it has no master. Its projects
+  need no `CopyBuildOutputToWebfarm` target: each project's own DLL is captured after its Debug build from master's snapshot, and a copy
+  of it that the repository tracks in Git is never mistaken for the build's. References are resolved as MSBuild resolves them in your
+  checkout: the HintPath inside master's snapshot, then the HintPath from your project folder (which reaches sibling repositories such
+  as `..\..\MyMeyer\bin`), then the project's output folder, MSBuild's last stop (master's tracked copy, then yours). Each DLL taken
+  from your checkout is listed with its path, version and date. A reference or NuGet package found nowhere is left to MSBuild, as
+  Visual Studio does: the build fails only if the code needs it, and one warning lists them (`build.log` says where Cultivate looked).
+  Cultivate never restores packages for these repositories. SDK-style projects are not supported and say so, without hiding the rest
+  of the preview. When a repository's build fails after its release branch was pulled, the result reports what the pull did.
+- Feature: SQL changes are released too. A repository with no project files, such as Database--SQL, is a SQL repository: every `.sql`
+  file its pull request changed is copied to the ticket folder's `SQL` subfolder as the release branch has it now (with the usual
+  same / changed again / undone / deleted statuses), read straight from the commit with checkout line endings, so no checkout of the
+  whole repository is needed and two scripts whose names differ only by case each keep their own content. Such twins cannot share
+  the folder: the second goes in a subfolder, with a warning. Nothing is built or run. When two linked pull requests would use the
+  same subfolder, the second gets its own (`SQL (Other--SQL)`, `MyMeyer (PR 2824)`) and the preview says why.
+
 ## 1.2.1 — 2026-11-20
 
 - Improvement: building release files now also pulls master, so GitHub Desktop no longer shows it behind afterwards. `origin/master`

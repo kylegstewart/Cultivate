@@ -5,8 +5,10 @@ using Spectre.Console.Rendering;
 
 namespace Cultivate;
 
-/// <summary>A pull request merged into the base branch, as the GitHub CLI lists it. Only <see cref="Number"/> is certain for one typed by number.</summary>
-internal sealed record MergedPullRequest(int Number, string Title = "", string Author = "", string HeadBranch = "", DateTimeOffset? MergedAt = null)
+/// <summary>A pull request merged into the base branch, as the GitHub CLI lists it. Only <see cref="Number"/> is certain for one typed by number.
+/// <see cref="Repository"/> is the "owner/name" of a pasted pull request link, which may be another repository's.</summary>
+internal sealed record MergedPullRequest(int Number, string Title = "", string Author = "", string HeadBranch = "", DateTimeOffset? MergedAt = null,
+    string Repository = "")
 {
     public string Label => Title.Length == 0 ? $"PR #{Number}" : $"PR #{Number}: {Title}";
     /// <summary>The ticket the branch is named after, else the branch.</summary>
@@ -17,7 +19,8 @@ internal enum ReleaseTab { Mine, All }
 
 /// <summary>
 /// The searchable list of recently merged pull requests to build release files for: the developer's own on one tab, everyone's on the other,
-/// newest merge first. A typed number can be chosen even when it is not listed.
+/// newest merge first. A typed number can be chosen even when it is not listed, and so can a pasted pull request link, from any repository.
+/// When other repositories are cloned, Ctrl+R asks to list another repository's instead.
 /// </summary>
 internal sealed class ReleasePicker
 {
@@ -25,30 +28,43 @@ internal sealed class ReleasePicker
     private readonly MergedPullRequest[] mine, all;
     private readonly string? problem;
     private readonly string baseBranch;
+    private readonly string? repository;
+    private readonly bool canChange;
     private readonly DateTimeOffset now;
     internal ReleaseTab Tab { get; private set; }
     internal string Query { get; private set; } = "";
     internal IReadOnlyList<MergedPullRequest> Matches { get; private set; } = [];
     internal int Index { get; private set; }
     internal MergedPullRequest? Selected => Matches.Count == 0 ? null : Matches[Index];
+    /// <summary>The pull request Enter chose in <see cref="Show"/>, with the repository of a pasted link.</summary>
+    internal MergedPullRequest? Chosen { get; private set; }
+    /// <summary>Whether <see cref="Show"/> closed because Ctrl+R asked for another repository.</summary>
+    internal bool ChangeRepository { get; private set; }
 
+    /// <param name="repository">The repository listed, named on the screen; null leaves it unnamed, as when only MyMeyer is cloned.</param>
+    /// <param name="canChange">Whether Ctrl+R can choose another repository.</param>
     internal ReleasePicker(IEnumerable<MergedPullRequest> mine, IEnumerable<MergedPullRequest> all, string? problem = null, string baseBranch = "master",
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null, string? repository = null, bool canChange = false)
     {
         static MergedPullRequest[] Newest(IEnumerable<MergedPullRequest> requests) =>
             requests.OrderByDescending(request => request.MergedAt ?? DateTimeOffset.MinValue).ThenByDescending(request => request.Number).ToArray();
         (this.mine, this.all) = (Newest(mine), Newest(all));
         this.problem = problem;
         this.baseBranch = baseBranch;
+        this.repository = repository;
+        this.canChange = canChange;
         this.now = now ?? DateTimeOffset.Now;
         Tab = this.mine.Length != 0 || this.all.Length == 0 ? ReleaseTab.Mine : ReleaseTab.All;
         Filter();
     }
 
     /// <summary>The developer's merged pull requests and everyone's, from two GitHub CLI calls, or none and why.</summary>
-    internal static async Task<(List<MergedPullRequest> Mine, List<MergedPullRequest> All, string? Problem)> Load(Func<string[], Task<string>> gh, string baseBranch)
+    /// <param name="github">"owner/name" of a repository other than the one the GitHub CLI runs in; null for MyMeyer.</param>
+    internal static async Task<(List<MergedPullRequest> Mine, List<MergedPullRequest> All, string? Problem)> Load(Func<string[], Task<string>> gh, string baseBranch,
+        string? github = null)
     {
-        string[] Arguments(params string[] more) => ["pr", "list", "--state", "merged", "--base", baseBranch, .. more, "--json", Fields];
+        string[] Arguments(params string[] more) => ["pr", "list", .. github is null ? Array.Empty<string>() : ["--repo", github], "--state", "merged",
+            "--base", baseBranch, .. more, "--json", Fields];
         try
         {
             var (own, everyone) = (gh(Arguments("--author", "@me", "--limit", "50")), gh(Arguments("--limit", "100")));
@@ -115,6 +131,13 @@ internal sealed class ReleasePicker
 
     private void Filter()
     {
+        // A pasted pull request link is built as it is, in whichever repository it names.
+        if (ReleaseRepositories.Link(Query) is { } link)
+        {
+            Matches = [new MergedPullRequest(link.Number, Repository: link.GitHub)];
+            Index = 0;
+            return;
+        }
         var terms = Query.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var matches = Listed(Tab).Where(request => terms.All(term => ("#" + request.Number).Contains(term, StringComparison.OrdinalIgnoreCase) ||
             request.Title.Contains(term, StringComparison.OrdinalIgnoreCase) || request.Author.Contains(term, StringComparison.OrdinalIgnoreCase) ||
@@ -143,9 +166,9 @@ internal sealed class ReleasePicker
             var label = (tab == ReleaseTab.Mine ? "MINE " : "ALL ") + Listed(tab).Length;
             return tab == Tab ? $"[bold {TerminalStyle.Accent} on {TerminalStyle.Surface}] {label} [/]" : $"[{TerminalStyle.Muted}]{label}[/]";
         }));
-        var description = problem is not null ? $"{problem}. Type a pull request number to build it anyway." :
-            Tab == ReleaseTab.Mine ? $"Your pull requests merged into {baseBranch}, newest first. Type a number for any other." :
-            $"Pull requests merged into {baseBranch} by anyone, newest first. Type a number for any other.";
+        var description = (repository is null ? "" : repository + ": ") + (problem is not null ? $"{problem}. Type a pull request number to build it anyway." :
+            Tab == ReleaseTab.Mine ? $"Your pull requests merged into {baseBranch}, newest first. Type a number or paste a link for any other." :
+            $"Pull requests merged into {baseBranch} by anyone, newest first. Type a number or paste a link for any other.");
         const int numberWidth = 7, mergedWidth = 13;
         var available = Math.Max(30, width - 14);
         var authorWidth = Math.Clamp(available / 7, 6, 14);
@@ -170,7 +193,8 @@ internal sealed class ReleasePicker
             var listed = IsListed(item);
             table.AddRow(TerminalStyle.Line(row == Index ? ">" : "", style), TerminalStyle.Line("#" + item.Number, style),
                 TerminalStyle.Line(TicketWorkspaceView.Fit(item.Ticket, ticketWidth), style),
-                TerminalStyle.Line(TicketWorkspaceView.Fit(listed ? item.Title : "Build by number", titleWidth), style),
+                TerminalStyle.Line(TicketWorkspaceView.Fit(listed ? item.Title : item.Repository.Length != 0 ? "Build " + item.Repository + " by link" : "Build by number",
+                    titleWidth), style),
                 TerminalStyle.Line(TicketWorkspaceView.Fit(item.Author, authorWidth), style),
                 TerminalStyle.Line(item.MergedAt is null ? "" : TicketPicker.Age(item.MergedAt, now), style));
         }
@@ -185,7 +209,9 @@ internal sealed class ReleasePicker
                         $"#{selected.Number}" + (selected.Author.Length == 0 ? "" : " by " + selected.Author), selected.HeadBranch,
                         selected.MergedAt is { } merged ? $"merged {merged.ToLocalTime():yyyy-MM-dd HH:mm}" : ""
                     }.Where(part => part.Length != 0))
-                    : $"Not listed. Enter asks GitHub about it; only a pull request merged into {baseBranch} can be built.", width - 4)));
+                    : selected.Repository.Length != 0
+                        ? $"From a link. Enter asks GitHub about {selected.Repository} #{selected.Number}; it is built in that repository's clone once merged into its release branch."
+                        : $"Not listed. Enter asks GitHub about it; only a pull request merged into {baseBranch} can be built.", width - 4)));
         return new Rows(
             TerminalStyle.Header("RELEASE FILES", "Build a merged pull request's release files."),
             new Text(""),
@@ -199,16 +225,21 @@ internal sealed class ReleasePicker
             new Markup($"[{TerminalStyle.Muted}]{(Matches.Count == 0 ? "0 matches" : $"{start + 1}-{end} of {Matches.Count}")}   |   Enter previews it; nothing is built yet.[/]"),
             TerminalStyle.Card(details, "SELECTED PULL REQUEST"),
             new Markup($"[{TerminalStyle.Gold}]Tab[/] mine/all   [{TerminalStyle.Gold}]arrows[/] move   [{TerminalStyle.Gold}]Enter[/] preview   [{TerminalStyle.Gold}]Esc[/] back"),
-            new Markup($"[{TerminalStyle.Muted}]{(width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
+            new Markup($"[{TerminalStyle.Muted}]{(canChange
+                ? width < 80 ? "Type to search  Ctrl+R: repository  Ctrl+U: clear" : "Type to search   Ctrl+R: repository   PgUp/PgDn: page   Ctrl+U: clear"
+                : width < 80 ? "Type to search  PgUp/PgDn: page  Ctrl+U: clear" : "Type to search   PgUp/PgDn: page   Home/End: jump   Ctrl+U: clear")}[/]"));
     }
 
+    /// <summary>The number Enter chose, or null for Esc, or for Ctrl+R with <see cref="ChangeRepository"/> set.</summary>
     internal int? Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
     {
         int? chosen = null;
+        (Chosen, ChangeRepository) = (null, false);
         KeyScreen.Show(console, Render, (key, height) =>
         {
             if (key.Key == ConsoleKey.Escape) return true;
-            if (key.Key == ConsoleKey.Enter && Selected is not null) return (chosen = Selected.Number) is not null;
+            if (key.Key == ConsoleKey.R && key.Modifiers.HasFlag(ConsoleModifiers.Control) && canChange) return ChangeRepository = true;
+            if (key.Key == ConsoleKey.Enter && Selected is not null) return (chosen = (Chosen = Selected).Number) is not null;
             HandleKey(key, PageSize(height));
             return false;
         }, readKey);
