@@ -132,7 +132,10 @@ internal static class Program
             }
             else if (args.Length == 0 && !Console.IsInputRedirected && !Console.IsOutputRedirected &&
                      await Settings.Read() is var draft && draft.Problems().Count != 0)
-                settings = await Setup.Interactive(draft, null, firstRun: !File.Exists(Settings.FilePath));
+            {
+                if (Setup.Guided(draft, null, firstRun: !File.Exists(Settings.FilePath)) is not { } configured) return 0;
+                settings = configured;
+            }
             else settings = await Settings.Load();
             var git = new GitRepository(settings);
             var bridge = new Bridge(settings);

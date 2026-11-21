@@ -184,6 +184,8 @@ internal sealed class VersionPicker
     internal Target? Show(IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
     {
         Target? chosen = null;
+        // Shown again after going back from what it opened, it starts without a choice.
+        OpenMainWorktree = false;
         KeyScreen.Show(console, Render, (key, height) =>
         {
             if (key.Key == ConsoleKey.Escape) return true;

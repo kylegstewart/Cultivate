@@ -115,12 +115,15 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
     {
         if (checkouts.Count <= 1) return checkouts.FirstOrDefault();
         var choices = checkouts.Select(checkout => new MenuAction(checkout.Checkout.Repository + "  |  " + checkout.Checkout.Branch,
-            checkout.Checkout.Path)).Append(new(Back, back)).ToList();
-        var label = Terminal.Select(title, choices);
+            checkout.Checkout.Path)).Append(new(Back, back, Back: true)).ToList();
+        var label = Terminal.Select(title, choices, search: true);
         return label == Back ? null : checkouts[choices.FindIndex(choice => choice.Label == label)];
     }
 
-    /// <summary>Opens each checkout's solution in turn; one that fails is reported and the rest still open.</summary>
+    /// <summary>
+    /// Opens each checkout's solution in turn; one that fails is reported and the rest still open. Esc or Back when asked which solution
+    /// to open stops there and returns to the workspace at once.
+    /// </summary>
     private async Task OpenSolutions(IReadOnlyList<TicketCheckout> checkouts)
     {
         var notes = new List<string>();
@@ -135,7 +138,9 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
             }
             try
             {
-                await terminal.OpenTarget(checkout.Checkout.ToTarget(), !checkout.MyMeyer);
+                if (!await terminal.OpenTarget(checkout.Checkout.ToTarget(), !checkout.MyMeyer))
+                    return;
+
                 notes.Add($"[{TerminalStyle.Accent}]Opened {Terminal.Escape(name)}.[/]");
                 opened++;
             }
@@ -183,7 +188,7 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
         if (pullRequests != 0) actions.Add(new(OpenPullRequests, $"Open {Count(pullRequests, "pull request")} in your browser."));
         if (details.Sql is { FolderExists: true }) actions.Add(new(OpenSqlFolder, $"Open this {(details.Workspace.Ticket is null ? "branch" : "ticket")}'s SQL files folder in Explorer."));
         actions.Add(new(Refresh, "Read the checkouts, pull requests, and SQL files again."));
-        actions.Add(new(Back, "Return to the list of workspaces."));
+        actions.Add(new(Back, "Return to the list of workspaces.", Back: true));
         return actions;
     }
 

@@ -40,6 +40,7 @@ internal static partial class SelfTest
             CheckScreens();
             CheckReleaseScreens();
             CheckOnlineScreens();
+            CheckSettings(home);
             await CheckDiagnostics(home);
             await CheckVisualStudio();
             CheckSolutionFiles(home);
@@ -1234,20 +1235,25 @@ internal static partial class SelfTest
             "moving the action highlight replaces the footer explanation");
         foreach (var character in "RESTORE")
             menu.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
-        Check(menu.Matches.Count == 1 && menu.Selected?.Label == "Restore original webfarm files",
-            "action filtering remains case-insensitive");
-        Check(Capture(menu.Render("Actions", 24), 60, 24).Contains("Stop automatic updates"),
-            "filtered actions retain their own footer explanation");
-        menu.HandleKey(new('\0', ConsoleKey.U, false, false, true), 7);
+        menu.HandleKey(new('\b', ConsoleKey.Backspace, false, false, false), 7);
+        Check(menu.Query.Length == 0 && menu.Matches.Count == Terminal.HomeActions.Count && menu.Selected?.Label == "Open solution" &&
+            !Capture(menu.Render("Actions", 30), 100, 30).Contains("/  "), "typing in a fixed action menu, home's included, changes nothing");
+        menu.HandleKey(new('\0', ConsoleKey.UpArrow, false, false, false), 7);
         menu.HandleKey(new('\0', ConsoleKey.UpArrow, false, false, false), 7);
         Check(menu.Selected?.Label == "Exit", "action navigation wraps without losing the selected explanation");
+        var search = new ActionPicker(Terminal.HomeActions, search: true);
+        foreach (var character in "RESTORE")
+            search.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
+        Check(search.Matches.Count == 1 && search.Selected?.Label == "Restore original webfarm files",
+            "a searchable menu filters case-insensitively");
+        Check(Capture(search.Render("Actions", 24), 60, 24).Contains("Stop automatic updates") && Capture(search.Render("Actions", 24), 60, 24).Contains("/  RESTORE"),
+            "filtered actions retain their own footer explanation and show the search");
+        search.HandleKey(new('\0', ConsoleKey.U, false, false, true), 7);
+        Check(search.Query.Length == 0 && search.Matches.Count == Terminal.HomeActions.Count, "Ctrl+U clears a menu's search");
         foreach (var character in "no-such-action")
-            menu.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
-        Check(menu.Selected is null && Capture(menu.Render("Actions", 24), 60, 24).Contains("No matching actions"),
+            search.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
+        Check(search.Selected is null && Capture(search.Render("Actions", 24), 60, 24).Contains("No matching actions"),
             "empty action searches cannot select a hidden action");
-        menu.HandleKey(new('\0', ConsoleKey.Escape, false, false, false), 7);
-        Check(menu.Query.Length == 0 && menu.Matches.Count == Terminal.HomeActions.Count,
-            "Escape clears an action search without closing the app");
         Check(Terminal.HomeActions.Concat(Terminal.PreviewActions(true)).All(action => !string.IsNullOrWhiteSpace(action.Description)),
             "every home and preview action has contextual help");
         Check(Terminal.HomeActions.Any(action => action.Label == "Open solution"), "the homepage offers opening a solution");

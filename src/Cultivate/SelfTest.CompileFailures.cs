@@ -96,13 +96,16 @@ internal static partial class SelfTest
         {
             var chosen = new ActionPicker(SkipOffer.Actions).Show(offer.Title, LiveConsole(output), Script(Press(ConsoleKey.Enter, '\r')));
             var shown = Shown(output.ToString());
-            Check(chosen.Label == "No" && shown.Contains("Deploy the rest without Legacy?") && shown.Contains("Its errors are not from your changes.") &&
+            Check(chosen?.Label == "No" && shown.Contains("Deploy the rest without Legacy?") && shown.Contains("Its errors are not from your changes.") &&
                 shown.Contains("Legacy.dll on the webfarm stays as it is") && shown.Contains("markup could run against that old DLL"),
                 "the offer explains the consequences and defaults to No");
         }
         using (var output = new StringWriter())
-            Check(new ActionPicker(SkipOffer.Actions).Show(offer.Title, LiveConsole(output), Script(Press(ConsoleKey.DownArrow), Press(ConsoleKey.Enter, '\r'))).Label == SkipOffer.Accept,
+            Check(new ActionPicker(SkipOffer.Actions).Show(offer.Title, LiveConsole(output), Script(Press(ConsoleKey.DownArrow), Press(ConsoleKey.Enter, '\r')))?.Label == SkipOffer.Accept,
                 "the offer's other choice leaves the project out");
+        using (var output = new StringWriter())
+            Check(new ActionPicker(SkipOffer.Actions).Show(offer.Title, LiveConsole(output), Script(Press(ConsoleKey.DownArrow), Press(ConsoleKey.Escape)))?.Label == "No",
+                "Esc on the offer answers No, even with the other choice highlighted");
         var without = await offer.Plan(planner, committed, [], Maps);
         Check(without is not null && without.CanDeploy && without.ExcludedPaths.SequenceEqual(["Legacy/Value.cs"]) &&
             without.Projects.Select(project => project.Assembly).SequenceEqual(["Healthy"]) && without.Frontend.Single().Source == "Legacy/View.ascx" &&
