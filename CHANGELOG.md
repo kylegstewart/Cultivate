@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.3.0 — 2026-11-21
+
 - Feature: build the Meyer Online web release package. The new home action Build MeyerOnline release (and `cultivate online-release`)
   does in your MeyerOnline checkout what you did by hand: it switches the checkout to `master` and pulls it (fast-forward only), runs
   `npm install` when `node_modules` is missing or the pull changed `package.json`, publishes `Meyer.Online.Server` with its
