@@ -97,7 +97,8 @@ internal static partial class SelfTest
                 return;
             }
             if (command.Step == OnlineRelease.PublishStep) publishStarted = true;
-            if (command.Step == OnlineRelease.PublishStep && holdPublish) await Task.Delay(Timeout.Infinite, cancel);
+            // Held until the screen test lets it go, or cancels it.
+            while (command.Step == OnlineRelease.PublishStep && holdPublish) await Task.Delay(20, cancel);
             await Task.Delay(50, cancel);
             switch (command.Step)
             {
@@ -317,9 +318,10 @@ internal static partial class SelfTest
         var questions = new List<(string Question, bool Default)>();
         var pauses = 0;
         var screen = new OnlineReleaseScreen(settings, git, fake, find);
+        StringWriter? live = null;
         async Task<string> Drive(Func<int, ConsoleKeyInfo?> keys)
         {
-            using var console = new StringWriter();
+            using var console = live = new StringWriter();
             await screen.Show(LiveConsole(console), keys, (_, actions) =>
             {
                 lock (offered) offered.Add(actions.Select(action => action.Label).ToList());
@@ -332,7 +334,14 @@ internal static partial class SelfTest
             return console.ToString();
         }
         var before = Files.Hash(zip);
-        var shown = Shown(await Drive(Script(Press(ConsoleKey.Enter, '\r'), () => offered.Count != 0)));
+        // The publish is held until the screen has shown it running: the fake's 50 ms alone can pass between two paints on a busy machine.
+        hold(true);
+        var shown = Shown(await Drive(Script(Press(ConsoleKey.Enter, '\r'), () =>
+        {
+            if (!Shown(live!.ToString()).Contains("Publish server running")) return false;
+            hold(false);
+            return true;
+        }, () => offered.Count != 0)));
         Check(shown.Contains("MEYERONLINE RELEASE Check the checkout and the package before you build.") && shown.Contains("Enter build Esc back") &&
             shown.Contains("BUILDING MEYERONLINE RELEASE") && shown.Contains("Zip " + zip) && shown.Contains("Publish server running") &&
             shown.Contains("MEYERONLINE RELEASE READY") && Files.Hash(zip) != before && explored.SequenceEqual([Path.GetDirectoryName(zip)!]) &&
