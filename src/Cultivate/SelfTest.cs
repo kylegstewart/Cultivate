@@ -40,6 +40,7 @@ internal static partial class SelfTest
             CheckScreens();
             CheckReleaseScreens();
             CheckOnlineScreens();
+            CheckSettings(home);
             await CheckDiagnostics(home);
             await CheckVisualStudio();
             CheckSolutionFiles(home);

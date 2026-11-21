@@ -166,10 +166,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                             Pause();
                         }
                         break;
-                    case "Settings":
-                        await Setup.Interactive(settings, state);
-                        Pause();
-                        break;
+                    case "Settings": new SettingsScreen(settings, state).Show(); break;
                     case "Exit": return;
                 }
             }
