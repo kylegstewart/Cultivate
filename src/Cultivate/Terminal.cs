@@ -19,7 +19,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         new("Clean up", "Remove Cultivate's old build runs and logs, and review worktrees unused for weeks that have nothing to lose."),
         new("Restore original webfarm files", "Stop automatic updates and restore the originals backed up before this test."),
         new("Settings", "Change the MyMeyer checkout, dev webfarm destination, MSBuild, and automatic-update default."),
-        new("Exit", "Close this menu without stopping active automatic updates.")
+        new("Exit", "Close this menu without stopping active automatic updates.", Back: true)
     ];
 
     internal static List<MenuAction> PreviewActions(bool canDeploy, bool hasSelectableChanges = false, bool hasLibraries = false)
@@ -37,11 +37,53 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         if (hasLibraries)
             actions.Add(new(LibraryLoop.ChooseAction, "Build a matching library worktree's changed projects and deploy their DLLs with this version, or leave them out."));
         actions.Add(new("Show every changed file", "Show all Git changes, including files with no deployment action."));
-        actions.Add(new("Back", "Return home without deploying this version."));
+        actions.Add(new("Back", "Return to where you chose this version, without deploying it.", Back: true));
         return actions;
     }
 
-    internal static string Select(string title, IEnumerable<MenuAction> choices) => new ActionPicker(choices).Show(title).Label;
+    internal static string Select(string title, IEnumerable<MenuAction> choices) => Select(title, choices, search: false);
+
+    /// <summary>The chosen action's label; Esc gives the menu's back action, or an empty label when it has none.</summary>
+    internal static string Select(string title, IEnumerable<MenuAction> choices, bool search) => new ActionPicker(choices, search).Show(title)?.Label ?? "";
+
+    /// <summary>The home menu, with the update action before Exit when one is available, and <paramref name="highlighted"/> highlighted.</summary>
+    internal static ActionPicker HomeMenu(UpdateInfo? update, string? highlighted)
+    {
+        var actions = HomeActions.ToList();
+        if (update is not null)
+            actions.Insert(actions.Count - 1, new(UpdateAction,
+                $"Download and install {update.Version}, then restart. Active deployments and automatic updates keep running."));
+        return new ActionPicker(actions, top: true, highlight: highlighted);
+    }
+
+    internal static bool Confirm(string question, bool preset) => Confirm(question, preset, AnsiConsole.Console, KeyScreen.ReadKey);
+
+    /// <summary>
+    /// Asks the yes or no <paramref name="question"/>, written in markup. One key answers: Y is yes, N is no, Enter takes
+    /// <paramref name="preset"/>, and Esc is always no; other keys are ignored. The keys line is replaced by the answer.
+    /// </summary>
+    internal static bool Confirm(string question, bool preset, IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
+    {
+        console.MarkupLine(question);
+        console.Markup($"[{TerminalStyle.Gold}]Y[/] yes   [{TerminalStyle.Gold}]N[/] no   [{TerminalStyle.Gold}]Enter[/] {(preset ? "yes" : "no")}   " +
+            $"[{TerminalStyle.Gold}]Esc[/] no");
+        bool? answer = null;
+        while (answer is null)
+        {
+            if (readKey(200) is not { } key || key.Modifiers.HasFlag(ConsoleModifiers.Control) || key.Modifiers.HasFlag(ConsoleModifiers.Alt)) continue;
+            answer = key.Key switch
+            {
+                ConsoleKey.Y => true,
+                ConsoleKey.N or ConsoleKey.Escape => false,
+                ConsoleKey.Enter => preset,
+                _ => null
+            };
+        }
+        if (console.Profile.Capabilities.Ansi) console.Write(new ControlCode("\r\u001b[2K"));
+        else console.WriteLine();
+        console.MarkupLine(answer.Value ? $"[{TerminalStyle.Accent}]Yes[/]" : $"[{TerminalStyle.Muted}]No[/]");
+        return answer.Value;
+    }
 
     internal static List<(Change Change, string Action)> ActionableChanges(Plan plan)
     {
@@ -80,19 +122,18 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         var updateCheck = settings.CheckForUpdates && Updater.IsInstalled ? Updater.CheckQuietly() : Task.FromResult<UpdateInfo?>(null);
         _ = Task.Run(() => CultivateFiles.Automatic(settings));
         KeyScreen.Buffer(AnsiConsole.Console);
+        string? highlighted = null;
         while (true)
         {
             // The status read takes most of a second, so the screen and menu are drawn first and its card is filled in when it arrives.
             var status = bridge.Status();
             var update = updateCheck.IsCompletedSuccessfully ? updateCheck.Result : null;
-            var actions = HomeActions.ToList();
-            if (update is not null)
-                actions.Insert(actions.Count - 1, new(UpdateAction,
-                    $"Download and install {update.Version}, then restart. Active deployments and automatic updates keep running."));
-            var chosen = new ActionPicker(actions).Show("What would you like to do?", AnsiConsole.Console, KeyScreen.ReadKey,
-                (_, _) => Home(status.IsCompletedSuccessfully ? status.Result : null, !status.IsCompletedSuccessfully, update, actions.Count), status);
+            var menu = HomeMenu(update, highlighted);
+            var chosen = menu.Show("What would you like to do?", AnsiConsole.Console, KeyScreen.ReadKey,
+                (_, _) => Home(status.IsCompletedSuccessfully ? status.Result : null, !status.IsCompletedSuccessfully, update, menu.Matches.Count), status);
             if (chosen?.Label == "Exit") return;
             var action = chosen!.Label;
+            highlighted = action;
             // Nothing acts on the deployment until its status is read; a failed read stops here, as it always has. Release files never
             // touch the dev webfarm, so they neither wait for the status nor need it.
             var state = action is ReleaseScreen.Action or OnlineReleaseScreen.Action ? null :
@@ -102,7 +143,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 switch (action)
                 {
                     case UpdateAction when update is not null:
-                        if (!AnsiConsole.Confirm($"Update Cultivate {Escape(Files.Version)} to {Escape(update.Version)}?", true)) break;
+                        if (!Confirm($"Update Cultivate {Escape(Files.Version)} to {Escape(update.Version)}?", true)) break;
                         var release = await AnsiConsole.Status().StartAsync("Checking the release...", _ => Updater.Fetch(update.Version));
                         await AnsiConsole.Status().StartAsync("Updating...", context => Updater.Install(release, message => context.Status(Escape(message))));
                         AnsiConsole.MarkupLine($"[{TerminalStyle.Accent}]Updated to Cultivate {Escape(release.Version)}.[/] Restarting...");
@@ -117,7 +158,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     case "Tidy worktrees": await new WorktreeTidy(settings, git).Run(state); break;
                     case "Clean up": await new CleanupScreen(settings, git, bridge).Run(); break;
                     case "Restore original webfarm files":
-                        if (AnsiConsole.Confirm("Stop automatic updates and restore files from before this test?", false))
+                        if (Confirm("Stop automatic updates and restore files from before this test?", false))
                         {
                             await AnsiConsole.Status().StartAsync("Restoring journaled originals...", _ => bridge.Call("Restore"));
                             await PullRequests.Prune(git, settings, null);
@@ -186,18 +227,39 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             return (myMeyer, await git.OtherWorktrees(myMeyer));
         });
         var picker = new VersionPicker(targets.Concat(others), state, openSolution: true);
-        var target = picker.Show();
-        if (picker.OpenMainWorktree)
+        List<string>? roots = null;
+        while (true)
         {
-            var roots = await AnsiConsole.Status().StartAsync("Finding repositories' main worktrees...", _ =>
-                git.MainWorktrees(targets.Concat(others)));
-            if (roots.Count == 0) throw new InvalidOperationException("No main worktrees containing a solution were found.");
-            var choices = roots.Select(root => new MenuAction(Path.GetFileName(root) + "  |  " + root,
-                "Open this repository's main worktree solution without opening specific files.")).ToList();
-            choices.Add(new("Back", "Return home without opening a solution."));
-            var choice = Select("Which repository's main worktree?", choices);
-            if (choice == "Back") return;
-            var root = roots[choices.FindIndex(item => item.Label == choice)];
+            var target = picker.Show();
+            if (picker.OpenMainWorktree)
+            {
+                roots ??= await AnsiConsole.Status().StartAsync("Finding repositories' main worktrees...", _ =>
+                    git.MainWorktrees(targets.Concat(others)));
+                if (roots.Count == 0) throw new InvalidOperationException("No main worktrees containing a solution were found.");
+                if (await OpenMainWorktree(roots)) return;
+                continue;
+            }
+            if (target is null) return;
+            if (await OpenTarget(target, others.Contains(target))) return;
+        }
+    }
+
+    /// <summary>
+    /// Asks which repository's main worktree to open, pulls it, and opens its solution. Returns false, having opened nothing, when Esc or
+    /// Back leaves the question, so the picker shows again.
+    /// </summary>
+    private async Task<bool> OpenMainWorktree(List<string> roots)
+    {
+        var choices = roots.Select(root => new MenuAction(Path.GetFileName(root) + "  |  " + root,
+            "Open this repository's main worktree solution without opening specific files.")).ToList();
+        choices.Add(new("Back", "Return to the worktrees and branches without opening a solution.", Back: true));
+        var menu = new ActionPicker(choices, search: true);
+        while (true)
+        {
+            AnsiConsole.Clear();
+            var choice = menu.Show("Which repository's main worktree?");
+            if (choice is null || choice.Back) return false;
+            var root = roots[choices.IndexOf(choice)];
             // Pulling never stops the solution from opening; a warning stays on screen until a key is pressed.
             var pull = await AnsiConsole.Status().StartAsync("Pulling the main worktree...", async context =>
             {
@@ -206,21 +268,20 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                     message => context.Status(Escape(message) + "..."));
             });
             AnsiConsole.MarkupLine($"[{(pull.Warning ? TerminalStyle.Gold : TerminalStyle.Muted)}]{Escape(pull.Detail)}[/]");
-            var mainSolution = SelectSolution(root);
+            if (SelectSolution(root) is not { } mainSolution) continue;
             var ide = await Settings.FindVisualStudio()
                 ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution.");
             await Open(ide, mainSolution, [], "Opening the main worktree solution...", pull.Warning);
-            return;
+            return true;
         }
-        if (target is null) return;
-        await OpenTarget(target, others.Contains(target));
     }
 
     /// <summary>
     /// Opens a checkout's solution with its changed source files. A MyMeyer checkout opens the files of its deployment plan;
     /// one from another repository has no plan, so <paramref name="otherRepository"/> opens every changed source file under its solution.
+    /// Returns false, having opened nothing, when Esc or Back leaves the choice of solution.
     /// </summary>
-    internal async Task OpenTarget(Target target, bool otherRepository)
+    internal async Task<bool> OpenTarget(Target target, bool otherRepository)
     {
         var visualStudio = await Settings.FindVisualStudio()
             ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution and its changed files.");
@@ -230,7 +291,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         {
             // Another repository has no deployment plan, so every changed source file under its solution opens.
             var root = target.Worktree!;
-            solution = SelectSolution(root);
+            if (SelectSolution(root) is not { } chosen) return false;
+            solution = chosen;
             var changes = await AnsiConsole.Status().StartAsync("Finding changed source files to open...", async _ =>
                 (await git.Inspect(target, await git.DefaultBranch(root))).Changes);
             files = SolutionOpener.FilesToOpen(root, solution, changes);
@@ -245,6 +307,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             files = SolutionOpener.FilesToOpen(root, solution, ChangesToOpen(plan));
         }
         await Open(visualStudio, solution, files, "Opening the solution and changed source files...");
+        return true;
     }
 
     /// <summary>Fills in the solution's missing ignored references first, so Visual Studio loads its projects with them resolved.
@@ -273,35 +336,50 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         Pause();
     }
 
-    private static string SelectSolution(string root)
+    /// <summary>The solution to open in <paramref name="root"/>, asking when it has several; null when Esc or Back leaves the question.</summary>
+    private static string? SelectSolution(string root)
     {
         var solutions = SolutionOpener.Solutions(root);
         if (solutions.Count == 0) throw new InvalidOperationException($"No solution was found in {root}.");
-        return solutions.Count == 1 ? solutions[0] : AnsiConsole.Prompt(new SelectionPrompt<string>()
-            .Title($"[{TerminalStyle.Accent}]Which solution in {Escape(Path.GetFileName(root))}?[/]")
-            .HighlightStyle(TerminalStyle.Selection).UseConverter(path => Escape(Path.GetRelativePath(root, path)))
-            .AddChoices(solutions));
+        if (solutions.Count == 1) return solutions[0];
+        var choices = solutions.Select(path => new MenuAction(Path.GetRelativePath(root, path), path)).ToList();
+        choices.Add(new("Back", "Return without opening a solution.", Back: true));
+        var choice = new ActionPicker(choices).Show($"[{TerminalStyle.Accent}]Which solution in {Escape(Path.GetFileName(root))}?[/]");
+        return choice is null || choice.Back ? null : solutions[choices.IndexOf(choice)];
     }
 
     private async Task Choose(DeploymentState? state)
     {
         var targets = await AnsiConsole.Status().StartAsync("Finding worktrees and cached branches...", _ => git.Targets());
-        var target = new VersionPicker(targets, state).Show();
-        if (target is not null) await Preview(target, state);
+        var picker = new VersionPicker(targets, state);
+        await Previews(() => Task.FromResult(picker.Show()), target => Preview(target, state));
     }
 
     private async Task ReviewPullRequest(DeploymentState? state)
     {
         var (open, problem) = await AnsiConsole.Status().StartAsync("Listing open pull requests with the GitHub CLI...", _ =>
             PullRequests.Open(PullRequests.GitHub(settings)));
-        if (new PullRequestPicker(open, problem, state).Show() is not { } number) return;
-        var target = await AnsiConsole.Status().StartAsync($"Fetching pull request #{number} from origin...", _ =>
-            PullRequests.Fetch(settings, git, number, state));
-        await Preview(target, state);
+        var picker = new PullRequestPicker(open, problem, state);
+        await Previews(async () => picker.Show() is { } number
+            ? await AnsiConsole.Status().StartAsync($"Fetching pull request #{number} from origin...", _ => PullRequests.Fetch(settings, git, number, state))
+            : null, target => Preview(target, state));
     }
 
-    /// <summary>The deployment preview of one MyMeyer version, through to its activation.</summary>
-    internal async Task Preview(Target target, DeploymentState? state)
+    /// <summary>
+    /// A list and the previews it opens: going back from a preview shows the same list again, as it was, and a preview that has finished,
+    /// by deploying or after an error, ends the loop. The list gives null when Esc leaves it.
+    /// </summary>
+    internal static async Task Previews(Func<Task<Target?>> list, Func<Target, Task<bool>> preview)
+    {
+        while (await list() is { } target)
+            if (await preview(target)) return;
+    }
+
+    /// <summary>
+    /// The deployment preview of one MyMeyer version, through to its activation. Returns false when Back or Esc leaves it without deploying,
+    /// and true once it has finished: after a deployment, or after an activation error.
+    /// </summary>
+    internal async Task<bool> Preview(Target target, DeploymentState? state)
     {
         var planner = new Planner(settings, git, bridge);
         var excluded = state?.Active == true && state.SourceRef == target.Ref &&
@@ -342,24 +420,22 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             foreach (var note in plan.Notes) AnsiConsole.MarkupLine($"[grey]{Escape(note)}[/]");
             foreach (var error in plan.Errors) AnsiConsole.MarkupLine($"[red]{Escape(error)}[/]");
             var action = Select("[bold]Preview only[/] - choose an action", PreviewActions(plan.CanDeploy, selectable.Count != 0, plan.Libraries.Count != 0));
-            if (action == "Back") return;
+            if (action == "Back") return false;
             if (action == LibraryLoop.ChooseAction)
             {
-                libraries = LibraryLoop.Choose(plan);
+                if (LibraryLoop.Choose(plan) is not { } chosen) continue;
+                libraries = chosen;
                 plan = await AnsiConsole.Status().StartAsync("Updating library changes and owning projects...", _ =>
                     planner.Create(target, excludedPaths: excluded, libraries: libraries));
                 continue;
             }
             if (action == "Choose files to deploy")
             {
-                AnsiConsole.Clear();
-                AnsiConsole.Write(TerminalStyle.Header("SELECT DEPLOYMENT FILES", "Checked files deploy. Unchecked files stay excluded from automatic updates."));
-                var prompt = new MultiSelectionPrompt<string>().Title($"[{TerminalStyle.Accent}]Choose files to deploy[/]")
-                    .NotRequired().PageSize(12).HighlightStyle(TerminalStyle.Selection)
-                    .InstructionsText("[grey](Space toggles a file; Enter applies the selection)[/]")
-                    .UseConverter(Escape).AddChoices(selectable);
-                foreach (var path in selectable.Where(path => !IsExcluded(plan, path))) prompt.Select(path);
-                var included = AnsiConsole.Prompt(prompt).ToHashSet(Files.Comparer);
+                var checklist = new Checklist<string>(TerminalStyle.Header("SELECT DEPLOYMENT FILES",
+                    "Checked files deploy. Unchecked files stay excluded from automatic updates."), "Choose files to deploy", selectable, path => path,
+                    selectable.Where(path => !IsExcluded(plan, path)));
+                if (checklist.Show() is not { } checkedFiles) continue;
+                var included = checkedFiles.ToHashSet(Files.Comparer);
                 excluded = plan.ExcludedPaths.Where(path => !selectable.Contains(path, Files.Comparer))
                     .Concat(selectable.Where(path => !included.Contains(path))).ToList();
                 plan = await AnsiConsole.Status().StartAsync("Updating selected files and owning projects...", _ =>
@@ -373,7 +449,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 Pause();
                 continue;
             }
-            if (!AnsiConsole.Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
+            if (!Confirm($"Deploy[{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
             if (!StopLegacyWatcher()) continue;
             var watch = action == "Activate and automatically update saved changes";
             var screen = new WarmupScreen(Warmup.SnakePath);
@@ -386,7 +462,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 if (SkipOffer.Of(plan, report) is not { } skip || Select(skip.Title, SkipOffer.Actions) != SkipOffer.Accept)
                 {
                     Pause();
-                    return;
+                    return true;
                 }
                 excluded = skip.Exclusions;
                 var without = await AnsiConsole.Status().StartAsync($"Leaving {Escape(skip.Project.Assembly)} out and updating the plan...", _ =>
@@ -395,7 +471,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 {
                     AnsiConsole.MarkupLine($"[red]Leaving out {Escape(skip.Project.RelativePath)}'s changed code did not remove it from the plan, so nothing was changed.[/]");
                     Pause();
-                    return;
+                    return true;
                 }
                 plan = without;
                 continue;
@@ -407,7 +483,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 "[grey]This is a one-time deployment. Later saves will not be published.[/]");
             await Warmup.AfterActivation(settings, activated, screen);
             Pause();
-            return;
+            return true;
         }
     }
 
@@ -423,7 +499,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             var choice = Select($"The old [{TerminalStyle.Gold}]WebfarmFileSync[/] watcher is running and could overwrite this deployment", [
                 new("Stop it and continue", $"End WebfarmFileSync (process {ids}) and deploy. Cultivate asks again next time."),
                 new("Always stop it without asking", "Save this choice, then stop it now, at later activations, and before automatic updates."),
-                new("Cancel", "Return to the preview without deploying or stopping anything.")]);
+                new("Cancel", "Return to the preview without deploying or stopping anything.", Back: true)]);
             if (choice == "Cancel") return false;
             if (choice == "Always stop it without asking")
             {
@@ -447,8 +523,8 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         return table;
     }
 
-    // Lines below the cards on the home screen: a blank line, the menu title, its actions, the highlighted help, the cursor.
-    private static int MenuLines(int actions) => actions + 4;
+    // Lines below the cards on the home screen: a blank line, the menu title, its actions, the highlighted help, the keys, the cursor.
+    private static int MenuLines(int actions) => actions + 5;
     // Pause's blank line and prompt, plus the cursor.
     private const int PauseLines = 3;
 
@@ -475,7 +551,7 @@ internal sealed record SkipOffer(ProjectInfo Project, List<string> Exclusions, i
     internal const string Accept = "Leave it out and preview again";
     internal static IReadOnlyList<MenuAction> Actions { get; } =
     [
-        new("No", "Return home without deploying anything."),
+        new("No", "Leave the preview without deploying anything.", Back: true),
         new(Accept, "Exclude its changed code files and show the new plan; nothing deploys until you confirm there.")
     ];
 

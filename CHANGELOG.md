@@ -5,6 +5,16 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: Esc now goes back one screen, at once, everywhere in Cultivate: every screen, menu, question and list. It never
+  needs Enter and never confirms anything: in a menu it does what its Back, Cancel or No does, a yes or no question takes it as No,
+  and a list of files or library changes to check goes back with nothing changed. While a build or warm-up runs, Esc still cancels
+  or stops waiting. On the home screen Esc moves to Exit instead of closing Cultivate, so pressing it a few times always brings you
+  home. Back now returns to the screen you came from: from a deployment preview to the version or pull request list as you left it,
+  and from Open solution's repository list to the worktrees and branches. Yes or no questions take one key (Y, N, or Enter for the
+  answer shown), choosing a solution no longer needs Enter to leave, and every screen and menu lists its keys on its last line. Home
+  keeps the action you last chose highlighted when you come back to it. Typing on the home screen and in the short action menus no
+  longer searches them; the longer lists of repositories and checkouts still filter as you type.
+
 ## 1.3.0 — 2026-11-21
 
 - Feature: build the Meyer Online web release package. The new home action Build MeyerOnline release (and `cultivate online-release`)

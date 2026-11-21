@@ -312,20 +312,21 @@ internal static partial class SelfTest
         var offered = new List<List<string>>();
         var answers = new Queue<bool>([false, true]);
         var questions = new List<string>();
+        var pauses = 0;
         var screenOutput = new StringWriter();
         await new CleanupScreen(settings, git, bridge).Show(LiveConsole(screenOutput), (_, actions) =>
         {
             offered.Add(actions.Select(action => action.Label).ToList());
             return picks.Dequeue();
-        }, question => { questions.Add(question); return answers.Dequeue(); }, () => { }, data, () => now);
+        }, question => { questions.Add(question); return answers.Dequeue(); }, () => pauses++, data, () => now);
         var screen = screenOutput.ToString();
         Check(picks.Count == 0 && offered[0].SequenceEqual([CleanupScreen.RemoveFiles, CleanupScreen.ReviewWorktrees, CleanupScreen.Back]) &&
             offered[1].SequenceEqual([CleanupScreen.ReviewWorktrees, CleanupScreen.Back]) && !Path.Exists(Path.Combine(data, @"Runs\old-ui-run")),
             "Clean up offers removing Cultivate's files and reviewing worktrees, and removing the files leaves only the worktree review");
         Check(questions.Count == 2 && questions[0].StartsWith("Delete 1 worktree and free", StringComparison.Ordinal) &&
-            screen.Contains("Nothing was deleted") && !Directory.Exists(Folder("ui-clean")) &&
+            !screen.Contains("Nothing was deleted") && pauses == 2 && !Directory.Exists(Folder("ui-clean")) &&
             (await git.Git(alpha, "rev-parse", "--verify", "refs/heads/ui-clean")).Length != 0,
-            "the worktree review lists them and asks first; declining deletes nothing, and confirming deletes them and keeps the branch");
+            "the worktree review lists them and asks first; declining deletes nothing and goes straight back, and confirming deletes them and keeps the branch");
         Check(screen.Contains("CLEAN UP") && screen.Contains("CULTIVATE FILES") && screen.Contains("WORKTREES UNUSED FOR 14 DAYS") &&
             screen.Contains("CLEANED UP") && screen.Contains("REVIEW DELETION") && screen.Contains("TIDY COMPLETE"),
             "the Clean up screens show the files, the worktrees, the review and both results in the existing cards");

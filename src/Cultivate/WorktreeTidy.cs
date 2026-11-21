@@ -133,9 +133,11 @@ internal sealed class WorktreeTidy(Settings settings, GitRepository git)
             _ => Task.WhenAll(chosen.Select(Candidate)));
         var review = new TidyReview(candidates);
         AnsiConsole.Write(review.Render());
-        var (targets, kept) = TidyRemoval.Confirm(review, question => AnsiConsole.Confirm(Terminal.Escape(question), false));
+        var (targets, kept) = TidyRemoval.Confirm(review, question => Terminal.Confirm(Terminal.Escape(question), false));
         if (targets.Count == 0)
         {
+            // Declining goes straight back to the list; with nothing deletable no question was asked, so the review stays until a key is pressed.
+            if (review.Safe.Count + review.Risky.Count != 0) return [];
             AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]Nothing was deleted.[/]");
             Terminal.Pause();
             return [];

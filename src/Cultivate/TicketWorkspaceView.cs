@@ -6,8 +6,8 @@ namespace Cultivate;
 /// <summary>The opened workspace: its checkouts' state and pull requests, and how its SQL files compare with the SQL files folder.</summary>
 internal static class TicketWorkspaceView
 {
-    /// <summary>Lines the action menu below the screen takes: its title, actions, an explanation that may wrap once, and the cursor.</summary>
-    internal static int MenuLines(int actions) => actions + 4;
+    /// <summary>Lines the action menu below the screen takes: its title, actions, an explanation that may wrap once, its keys, and the cursor.</summary>
+    internal static int MenuLines(int actions) => actions + 5;
 
     internal static string StateText(CheckoutStatus? status, string? error)
     {
