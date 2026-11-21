@@ -446,7 +446,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
                 Pause();
                 continue;
             }
-            if (!Confirm($"Deploy[{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
+            if (!Confirm($"Deploy [{TerminalStyle.Accent}]{Escape(target.Branch)}[/] to [{TerminalStyle.Gold}]{Escape(settings.WebfarmRoot)}[/]?", true)) continue;
             if (!StopLegacyWatcher()) continue;
             var watch = action == "Activate and automatically update saved changes";
             var screen = new WarmupScreen(Warmup.SnakePath);
