@@ -5,6 +5,16 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: **Settings** is now a list you can leave at any time with Esc, instead of fifteen questions in a row. Each setting
+  shows its value, and the highlighted one is explained in a card below with any warning about it (a webfarm that cannot be reached,
+  a mapping assembly that is not built yet). Enter edits a text setting in place (the arrows, Home and End move in it, Ctrl+U
+  clears it, and a pasted path works), and saves it at once; Esc cancels the edit. A value that is not valid keeps the field open
+  with the reason under it. Enter or Space turns a yes/no setting on or off. Every rule still applies: changing the MyMeyer checkout
+  resets the mapping assembly, changing the webfarm root suggests the site address again, and the webfarm root cannot change while a
+  deployment is active. `cultivate setup` opens the same list. The first run still asks one question after another, but Esc now goes
+  back to the previous question, Y or N answers a yes/no question in one key, and Esc on the first question leaves setup without
+  saving anything.
+
 ## 1.3.0 — 2026-11-21
 
 - Feature: build the Meyer Online web release package. The new home action Build MeyerOnline release (and `cultivate online-release`)
