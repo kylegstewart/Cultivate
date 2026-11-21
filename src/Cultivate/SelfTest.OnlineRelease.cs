@@ -334,6 +334,9 @@ internal static partial class SelfTest
             return console.ToString();
         }
         var before = Files.Hash(zip);
+        // The fixture builds the same files every time and a zip keeps their times to two seconds, so a build straight after another can
+        // write the same bytes; the zip's own time shows it was replaced.
+        var written = File.GetLastWriteTimeUtc(zip);
         // The publish is held until the screen has shown it running: the fake's 50 ms alone can pass between two paints on a busy machine.
         hold(true);
         var shown = Shown(await Drive(Script(Press(ConsoleKey.Enter, '\r'), () =>
@@ -344,7 +347,7 @@ internal static partial class SelfTest
         }, () => offered.Count != 0)));
         Check(shown.Contains("MEYERONLINE RELEASE Check the checkout and the package before you build.") && shown.Contains("Enter build Esc back") &&
             shown.Contains("BUILDING MEYERONLINE RELEASE") && shown.Contains("Zip " + zip) && shown.Contains("Publish server running") &&
-            shown.Contains("MEYERONLINE RELEASE READY") && Files.Hash(zip) != before && explored.SequenceEqual([Path.GetDirectoryName(zip)!]) &&
+            shown.Contains("MEYERONLINE RELEASE READY") && File.GetLastWriteTimeUtc(zip) > written && explored.SequenceEqual([Path.GetDirectoryName(zip)!]) &&
             offered.All(actions => actions.SequenceEqual([ReleaseScreen.OpenFolder, ReleaseScreen.Back])),
             "the screen previews, builds with live progress, shows the result, and opens the zip's folder through the injected launcher");
 
