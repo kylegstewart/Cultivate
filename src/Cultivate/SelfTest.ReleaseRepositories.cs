@@ -211,6 +211,9 @@ internal static partial class SelfTest
         var tracked = await Library("Tracked", "2.0.0.0", "public class TrackedValue { public static int Value => 2; }");
         var fallback = await Library("Fallback", "3.0.0.0", "public class FallbackValue { public static int Value => 3; }");
         var stale = await Library("SalesPortal", "9.9.9.9", "public class Stale { }");
+        // The PMA project's Objects: the MyMeyer checkout's current build, and the stale copy the PMA repository tracks.
+        var objects = await Library("Objects", "2.0.0.0", "public class ObjectsValue { public static int Value => 1; public static int NewApi => 2; }");
+        var staleObjects = await Library("Objects", "1.0.0.0", "public class ObjectsValue { public static int Value => 1; }");
 
         // MyMeyer: content-only pull requests #10 and #11 for ticket 39126.
         var myMeyer = await Bare("MyMeyer");
@@ -219,6 +222,7 @@ internal static partial class SelfTest
         var mainClone = await Clone("MyMeyer", myMeyer, $"https://github.com/{owner}/MyMeyer.git");
         Directory.CreateDirectory(Path.Combine(mainClone, "bin"));
         File.WriteAllBytes(Path.Combine(mainClone, "bin", "Sibling.dll"), sibling);
+        File.WriteAllBytes(Path.Combine(mainClone, "bin", "Objects.dll"), objects);
 
         // Public--Applications: SalesPortal has no webfarm target, tracks its bin (its own stale output included), references a sibling
         // repository's build, a DLL only the checkout's bin has, and SalesCore by ProjectReference.
@@ -238,12 +242,18 @@ internal static partial class SelfTest
         var applicationsClone = await Clone("Public--Applications", applications, $"https://github.com/{owner}/Public--Applications.git");
         File.WriteAllBytes(Path.Combine(applicationsClone, "SalesPortal", "bin", "Fallback.dll"), fallback);
 
-        // MyMeyer--PMA-and-CategoryHierarchy: #238 references a DLL that exists nowhere; #239 changes an SDK-style project.
+        // MyMeyer--PMA-and-CategoryHierarchy: #238 uses Objects through a HintPath into the MyMeyer checkout's bin, beside stale copies the
+        // repository tracks in Libraries and in the project's bin, and has a reference and a package that exist nowhere but that no code uses.
+        // #239 changes an SDK-style project.
         var pma = await Bare("MyMeyer--PMA-and-CategoryHierarchy");
         var p0 = await Commit(pma, null, "base",
-            ("PartsMatrixAdminV2/PartsMatrixAdminV2.csproj", Classic("PartsMatrixAdminV2",
-                """<Reference Include="Nowhere"><HintPath>..\..\DesktopModules\POPv3\bin\Nowhere.dll</HintPath></Reference>""", """<Compile Include="PMAObjects.cs" />""")),
+            ("PartsMatrixAdminV2/PartsMatrixAdminV2.csproj", Classic("PartsMatrixAdminV2", """
+                <Reference Include="Objects"><HintPath>..\..\MyMeyer\bin\Objects.dll</HintPath></Reference>
+                <Reference Include="Nowhere"><HintPath>..\..\DesktopModules\POPv3\bin\Nowhere.dll</HintPath></Reference>
+                <Reference Include="Pkg, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL"><HintPath>packages\Missing.Package.1.0.0\lib\net471\Pkg.dll</HintPath></Reference>
+                """, """<Compile Include="PMAObjects.cs" />""")),
             ("PartsMatrixAdminV2/Value.cs", "public class PmaValue { }"), ("PartsMatrixAdminV2/PMAObjects.cs", "public class PmaObjects { }"),
+            ("PartsMatrixAdminV2/Libraries/Objects.dll", staleObjects), ("PartsMatrixAdminV2/bin/Objects.dll", staleObjects),
             ("PartsMatrixAdminV2/Controls/ucMainAddOrEditPart.ascx", "part 0"),
             ("ModernApi/ModernApi.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>"),
             ("ModernApi/Program.cs", "class Program { static void Main() { } }"));
@@ -264,6 +274,12 @@ internal static partial class SelfTest
         var o0 = await Commit(otherSql, null, "base", ("Procs/Other.sql", "other 0\n"));
         await Publish(otherSql, o0, "refs/heads/master");
         await Clone("Other--SQL", otherSql, $"git@github.com:{owner}/Other--SQL.git");
+
+        // Broken--App: #5 does not compile.
+        var broken = await Bare("Broken--App");
+        var b0 = await Commit(broken, null, "base", ("Broken/Broken.csproj", Classic("Broken")), ("Broken/Value.cs", "public class BrokenValue { }"));
+        await Publish(broken, b0, "refs/heads/master");
+        var brokenClone = await Clone("Broken--App", broken, $"https://github.com/{owner}/Broken--App.git");
 
         // Not clones: a plain folder, and a linked worktree of a clone.
         Directory.CreateDirectory(Path.Combine(github, "NotARepo"));
@@ -296,7 +312,7 @@ internal static partial class SelfTest
         await Publish(applications, h193, "refs/pull/193/head");
         Pull("Public--Applications", 193, "39127 - Skip the copy", "39127", m193, h193, []);
 
-        var h238 = await Commit(pma, p0, "pr238", ("PartsMatrixAdminV2/PMAObjects.cs", "public class PmaObjects { public static int Value => 238; }"),
+        var h238 = await Commit(pma, p0, "pr238", ("PartsMatrixAdminV2/PMAObjects.cs", "public class PmaObjects { public static int Value => ObjectsValue.NewApi; }"),
             ("PartsMatrixAdminV2/Controls/ucMainAddOrEditPart.ascx", "part 238"));
         var m238 = await Squash(pma, p0, h238, "39187 - Parts (#238)");
         var h239 = await Commit(pma, m238, "pr239", ("ModernApi/Program.cs", "class Program { static void Main() { System.Console.WriteLine(); } }"),
@@ -321,14 +337,20 @@ internal static partial class SelfTest
         var m3 = await Squash(otherSql, o0, h3, "39187 - Other (#3)");
         await Publish(otherSql, h3, "refs/pull/3/head");
         await Publish(otherSql, m3, "refs/heads/master");
-        Pull("Other--SQL", 3, "39187 - Other", "39187", m3, h3, []);
+        Pull("Other--SQL", 3, "39187 - Other", "39187", m3, h3, [Url("Broken--App", 5)]);
+
+        var h5 = await Commit(broken, b0, "pr5", ("Broken/Value.cs", "public class BrokenValue { public static int Value => \"text\"; }"));
+        var m5 = await Squash(broken, b0, h5, "39187 - Broken (#5)");
+        await Publish(broken, h5, "refs/pull/5/head");
+        await Publish(broken, m5, "refs/heads/master");
+        Pull("Broken--App", 5, "39187 - Broken", "39187", m5, h5, []);
 
         // Discovery reads each clone's config: no Git process, main checkouts only.
         var calls = git.Calls;
         var clones = ReleaseRepositories.Clones(settings);
         Check(git.Calls == calls && clones[0] is { Main: true, Name: "MyMeyer", GitHub: "Meyer-Fixture/MyMeyer", Branch: "master" } &&
             clones.Select(clone => clone.Name).Order(StringComparer.Ordinal).SequenceEqual(
-                ["Database--SQL", "MyMeyer", "MyMeyer--PMA-and-CategoryHierarchy", "Other--SQL", "Public--Applications"]),
+                ["Broken--App", "Database--SQL", "MyMeyer", "MyMeyer--PMA-and-CategoryHierarchy", "Other--SQL", "Public--Applications"]),
             "the clones beside MyMeyer are found by their origin without starting Git, MyMeyer first; a plain folder and a linked worktree are not clones");
         Check(ReleaseRepositories.Find(settings, "meyer-fixture/PUBLIC--applications")?.Root == applicationsClone &&
             ReleaseRepositories.Find(settings, $"{owner}/Other--SQL")?.GitHub == $"{owner}/Other--SQL" && ReleaseRepositories.Find(settings, $"{owner}/Not--Cloned") is null &&
@@ -359,7 +381,7 @@ internal static partial class SelfTest
         var ticket = Path.Combine(output, "39126");
         var preview = await runner.Preview(mainRepository, 10);
         ReleaseResult In(ReleaseRun run, string subfolder) => run.Releases.Single(release => release.Subfolder == subfolder);
-        string[] subfolders = ["MyMeyer", "Public--Applications", "MyMeyer (PR 11)", "MyMeyer--PMA-and-CategoryHierarchy", "SQL", "SQL (Other--SQL)"];
+        string[] subfolders = ["MyMeyer", "Public--Applications", "MyMeyer (PR 11)", "MyMeyer--PMA-and-CategoryHierarchy", "SQL", "SQL (Other--SQL)", "Broken--App"];
         Check(preview is { Name: "39126", Written: false, CanBuild: true, Complete: true } && preview.Folder == ticket &&
             preview.Releases.Select(release => release.Subfolder).SequenceEqual(subfolders) &&
             preview.Releases.All(release => release.Name == "39126" && release.Folder == Path.Combine(ticket, release.Subfolder)) && !Directory.Exists(ticket),
@@ -399,7 +421,7 @@ internal static partial class SelfTest
         // The screens for several repositories.
         static string Flat(string text) => Regex.Replace(text, @"\s+", " ");
         var screen = Flat(Capture(new ReleasePreview(preview, ReleaseScreen.Removables(preview)).Render(400, 400), 400, 400));
-        Check(screen.Contains($"PR #10: 39126 - Remove price levels in MyMeyer, and 5 linked pull requests it lists TICKET FOLDER {ticket} One subfolder per repository: MyMeyer MyMeyer PR #10, 1 file") &&
+        Check(screen.Contains($"PR #10: 39126 - Remove price levels in MyMeyer, and 6 linked pull requests it lists TICKET FOLDER {ticket} One subfolder per repository: MyMeyer MyMeyer PR #10, 1 file") &&
             screen.Contains("SQL Database--SQL PR #5415, 4 files") && screen.Contains("LINKED PULL REQUESTS NOT BUILT (4) Public--Applications #191 Public--Applications pull request #191 is not merged yet") &&
             screen.Contains("━━ SQL Meyer-Fixture/Database--SQL, SQL scripts") && screen.Contains("SQL SCRIPTS (4)") &&
             screen.Contains("Building writes 4 SQL scripts, as main has them. Nothing is built or run.") && screen.Contains("━━ PUBLIC--APPLICATIONS Meyer-Fixture/Public--Applications, built from master") &&
@@ -415,7 +437,7 @@ internal static partial class SelfTest
             paging.HandleKey(Press(ConsoleKey.PageDown), 24);
         }
         var building = Flat(Capture(new ReleaseBuildView(preview).Render(400, 30), 400, 30));
-        Check(fits && building.Contains("6 repositories, each built from its release branch") && building.Contains("PR #10: 39126 - Remove price levels and 5 linked pull requests") &&
+        Check(fits && building.Contains("7 repositories, each built from its release branch") && building.Contains("PR #10: 39126 - Remove price levels and 6 linked pull requests") &&
             building.Contains("Folder " + ticket), "several repositories' preview pages in an 80x24 terminal, and the build screen names the ticket folder");
 
         // Building: PMA's missing reference fails only its own release.
@@ -423,15 +445,31 @@ internal static partial class SelfTest
         var built = await runner.Build(preview, progress.Add);
         string[] expected = [@"MyMeyer\View.ascx", @"MyMeyer (PR 11)\Other.ascx", @"Public--Applications\SalesPortal.aspx", @"Public--Applications\SalesPortal.dll",
             @"SQL\PMA_ACES_GetPartDataV9.sql", @"SQL\PMA_ACES_UpdateExistingPartV28.sql", @"SQL\UpdateBOAFByMFG.sql", @"SQL\StoredProcedures\UpdateBOAFbyMFG.sql",
-            @"SQL (Other--SQL)\Other.sql"];
+            @"SQL (Other--SQL)\Other.sql", @"MyMeyer--PMA-and-CategoryHierarchy\PartsMatrixAdminV2.dll", @"MyMeyer--PMA-and-CategoryHierarchy\ucMainAddOrEditPart.ascx"];
         Check(Listing(ticket).SequenceEqual(expected.Order(Files.Comparer), StringComparer.Ordinal) && built.Written && !built.Complete,
-            "building writes each repository's files to its subfolder: MyMeyer's, the second MyMeyer pull request's, Public--Applications' DLL and page, and both SQL repositories' scripts");
+            "building writes each repository's files to its subfolder: both MyMeyer pull requests', Public--Applications' and PMA's DLL and page, and both SQL repositories' scripts");
+        var brokenBuilt = In(built, "Broken--App");
+        Check(!brokenBuilt.Written && brokenBuilt.Failure?.Contains("error CS0029") == true && !Directory.Exists(Path.Combine(ticket, "Broken--App")) &&
+            built.Note?.Contains("Not written: Broken--App; see each one's failure.") == true &&
+            brokenBuilt.Pull is { Outcome: ReleasePullOutcome.Pulled, After: var brokenTip } && brokenTip == m5 && await git.Git(brokenClone, "rev-parse", "master") == m5,
+            "a repository that does not compile fails only its own release, reports what its pull really did, and the others are still written; the run says it is incomplete");
         var pmaBuilt = In(built, "MyMeyer--PMA-and-CategoryHierarchy");
-        Check(!pmaBuilt.Written && pmaBuilt.Failure is { } failure && failure.Contains(@"PartsMatrixAdminV2\PartsMatrixAdminV2.csproj references Nowhere.dll (HintPath ..\..\DesktopModules\POPv3\bin\Nowhere.dll), which was found nowhere") &&
-            failure.Contains(@"the snapshot's PartsMatrixAdminV2\bin\Nowhere.dll") && failure.Contains(Path.Combine(github, @"DesktopModules\POPv3\bin\Nowhere.dll")) &&
-            failure.Contains(Path.Combine(pmaClone, @"PartsMatrixAdminV2\bin\Nowhere.dll")) && !Directory.Exists(Path.Combine(ticket, "MyMeyer--PMA-and-CategoryHierarchy")) &&
-            built.Note?.Contains("Not written: MyMeyer--PMA-and-CategoryHierarchy; see each one's failure.") == true,
-            "a reference found nowhere fails that repository's release, naming the reference, the project and every place looked; the others are still written and the run says it is incomplete");
+        var pmaDll = Path.Combine(ticket, "MyMeyer--PMA-and-CategoryHierarchy", "PartsMatrixAdminV2.dll");
+        Check(pmaBuilt.Written && References(pmaDll)["Objects"] == "2.0.0.0" &&
+            pmaBuilt.OutsideReferences.Single() is { Name: "Objects.dll", Version: "2.0.0.0", Path: var objectsPath } && objectsPath == Path.Combine(mainClone, @"bin\Objects.dll") &&
+            File.ReadAllText(Path.Combine(pmaBuilt.RunDirectory, "build.log")).Contains($"Reference Objects.dll: {Path.Combine(mainClone, @"bin\Objects.dll")}\n"),
+            "a HintPath into a sibling repository wins over the stale copies the repository tracks in a Libraries folder and in the project's bin, as in MSBuild");
+        var unresolved = $@"Cultivate found 2 references nowhere and left them to MSBuild, as Visual Studio does: Nowhere.dll (HintPath ..\..\DesktopModules\POPv3\bin\Nowhere.dll) " +
+            @"for PartsMatrixAdminV2\PartsMatrixAdminV2.csproj; Pkg.dll (HintPath packages\Missing.Package.1.0.0\lib\net471\Pkg.dll) for PartsMatrixAdminV2\PartsMatrixAdminV2.csproj. " +
+            "The build fails with a compiler error if the code needs one; this one compiled, so it did not. build.log says where Cultivate looked.";
+        var pmaLog = File.ReadAllText(Path.Combine(pmaBuilt.RunDirectory, "build.log"));
+        Check(pmaBuilt.Warnings.Contains(unresolved) &&
+            pmaLog.Contains($@"Unresolved reference Nowhere.dll for PartsMatrixAdminV2: ..\..\DesktopModules\POPv3\bin\Nowhere.dll was not found. Looked in: " +
+                $@"{Path.Combine(github, @"DesktopModules\POPv3\bin\Nowhere.dll")}; the snapshot's PartsMatrixAdminV2\bin\Nowhere.dll; the snapshot copies of the projects it depends on; " +
+                $@"{Path.Combine(pmaClone, @"PartsMatrixAdminV2\bin\Nowhere.dll")}. Left to MSBuild.") &&
+            pmaLog.Contains($"Package Missing.Package.1.0.0 for PartsMatrixAdminV2 is in neither the snapshot nor your checkout ({Path.Combine(pmaClone, @"PartsMatrixAdminV2\packages\Missing.Package.1.0.0")})") &&
+            pmaLog.Contains(@"Unresolved reference Pkg.dll for PartsMatrixAdminV2: packages\Missing.Package.1.0.0\lib\net471\Pkg.dll was not found in version 1.0.0.0."),
+            "a reference and a package found nowhere that the code does not use are left to MSBuild: the build succeeds with one warning, and build.log says where Cultivate looked");
         var portal = Path.Combine(ticket, "Public--Applications", "SalesPortal.dll");
         var applicationsBuilt = In(built, "Public--Applications");
         Check(AssemblyName.GetAssemblyName(portal).Version?.ToString() == "1.0.0.0" && !File.ReadAllBytes(portal).SequenceEqual(stale) &&
@@ -453,7 +491,7 @@ internal static partial class SelfTest
         Check(progress.Contains("Public--Applications: Building SalesCore (1/2, dependency: needed to compile, not released)") &&
             progress.Contains("Public--Applications: Building SalesPortal (2/2, release file)") &&
             progress.Any(line => line.StartsWith($"SQL: Reading 4 SQL scripts from main at {later[..7]}", StringComparison.Ordinal)) &&
-            progress.Any(line => line.StartsWith("MyMeyer--PMA-and-CategoryHierarchy: failed.", StringComparison.Ordinal)),
+            progress.Any(line => line.StartsWith("Broken--App: failed.", StringComparison.Ordinal)),
             "each progress line names the repository subfolder its step belongs to");
         Check(In(built, "MyMeyer").Pull?.Outcome == ReleasePullOutcome.Pulled && In(built, "MyMeyer (PR 11)").Pull?.Outcome == ReleasePullOutcome.UpToDate &&
             applicationsBuilt.Pull?.Outcome == ReleasePullOutcome.Pulled && await git.Git(applicationsClone, "rev-parse", "master") == m190 &&
@@ -464,10 +502,11 @@ internal static partial class SelfTest
         Check(ReleaseFolder.Load(Path.Combine(ticket, "SQL")).Files.Count == 4 && ReleaseFolder.Load(Path.Combine(ticket, "MyMeyer")).Files.Single().Name == "View.ascx",
             "each subfolder has its own record of the files Cultivate wrote");
         var card = Shown(Capture(ReleaseScreen.ResultCard(built), 400, 200));
-        Check(card.Contains("RELEASE FILES PARTLY WRITTEN") && card.Contains("Wrote 9 files for PR #10: 39126 - Remove price levels and 5 linked pull requests") &&
-            card.Contains("One subfolder per repository: MyMeyer (1 file), Public--Applications (2 files), MyMeyer (PR 11) (1 file), MyMeyer--PMA-and-CategoryHierarchy (not written), " +
-                "SQL (4 files), SQL (Other--SQL) (1 file).") && card.Contains("Release these scripts through the database process") &&
-            card.Contains("Linked pull requests not built (4):") && card.Contains("which was found nowhere"),
+        Check(card.Contains("RELEASE FILES PARTLY WRITTEN") && card.Contains("Wrote 11 files for PR #10: 39126 - Remove price levels and 6 linked pull requests") &&
+            card.Contains("One subfolder per repository: MyMeyer (1 file), Public--Applications (2 files), MyMeyer (PR 11) (1 file), MyMeyer--PMA-and-CategoryHierarchy (2 files), " +
+                "SQL (4 files), SQL (Other--SQL) (1 file), Broken--App (not written).") && card.Contains("Release these scripts through the database process") &&
+            card.Contains("Linked pull requests not built (4):") && card.Contains("error CS0029") && card.Contains("Pulled master: 1 new commit(s)") &&
+            card.Contains("Cultivate found 2 references nowhere"),
             "the result of several repositories lists each subfolder with its files or its failure, and the links not built");
 
         // --clean and the files already there, per subfolder.
@@ -478,7 +517,7 @@ internal static partial class SelfTest
             In(again, "MyMeyer").Existing.Select(file => file.Name).SequenceEqual(["View.ascx"]) &&
             In(again, "SQL").Existing.Single(file => file.Name == "hand.sql").Origin == "Not written by Cultivate" &&
             In(again, "SQL").Existing.Single(file => file.Name == "UpdateBOAFByMFG.sql").Origin.StartsWith("Written by Cultivate for PR #5415", StringComparison.Ordinal) &&
-            In(again, "MyMeyer--PMA-and-CategoryHierarchy").Removed.Count == 0 && File.Exists(Path.Combine(ticket, "SQL", "UpdateBOAFByMFG.sql")),
+            In(again, "Broken--App").Removed.Count == 0 && File.Exists(Path.Combine(ticket, "SQL", "UpdateBOAFByMFG.sql")),
             "--clean and the files already in the folder are worked out per subfolder, so one repository's files are never another's");
 
         // --no-linked, --name, --out and --no-pull.
@@ -488,7 +527,7 @@ internal static partial class SelfTest
             asked.Skip(before).All(line => line.StartsWith("pr view 10 ", StringComparison.Ordinal)) && alone.Releases[0].Pull?.Outcome == ReleasePullOutcome.Off,
             "--no-linked builds only the requested pull request, still in its repository's subfolder");
         var named = await runner.Preview(mainRepository, 10, new(Name: "Hotfix", NoPull: true));
-        Check(named.Folder == Path.Combine(output, "Hotfix") && named.Releases.Count == 6 &&
+        Check(named.Folder == Path.Combine(output, "Hotfix") && named.Releases.Count == 7 &&
             named.Releases.All(release => release.Name == "Hotfix" && release.Folder == Path.Combine(output, "Hotfix", release.Subfolder) && release.Pull?.Outcome == ReleasePullOutcome.Off),
             "--name names the ticket folder for every repository, and --no-pull applies to every repository");
         var elsewhere = Path.Combine(root, "elsewhere");
@@ -520,7 +559,7 @@ internal static partial class SelfTest
         var (failedCode, failedJson) = await Command("--pr", "190", "--repo", "Public--Applications", "--out", commandOut, "--no-pull", "--yes");
         Check(failedCode == 1 && failedJson.RootElement.GetProperty("Written").GetBoolean() &&
             failedJson.RootElement.GetProperty("Releases").EnumerateArray().Select(release => release.GetProperty("Subfolder").GetString()).SequenceEqual(
-                ["Public--Applications", "MyMeyer", "MyMeyer--PMA-and-CategoryHierarchy", "MyMeyer (PR 11)", "SQL", "SQL (Other--SQL)"]) &&
+                ["Public--Applications", "MyMeyer", "MyMeyer--PMA-and-CategoryHierarchy", "MyMeyer (PR 11)", "SQL", "SQL (Other--SQL)", "Broken--App"]) &&
             File.Exists(Path.Combine(commandOut, "Public--Applications", "SalesPortal.dll")) && failedJson.RootElement.GetProperty("Skipped").GetArrayLength() == 4,
             "building from another repository's pull request writes every repository it links, and a repository that failed makes the command exit 1");
 

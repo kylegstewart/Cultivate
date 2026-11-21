@@ -119,14 +119,16 @@ internal sealed class ReleaseRunner(Settings settings, GitRepository git, Func<s
             if (!single && !release.CanBuild)
             {
                 release.Failure = "Not built: " + string.Join(" ", release.Errors);
+                release.Pull = new(release.BaseBranch, null, "", "", 0, ReleasePullOutcome.NotUpdated, $"Did not pull {release.BaseBranch}: its files were not built.");
                 run.Releases.Add(release);
                 continue;
             }
             try { run.Releases.Add(await Engine(Of(release)).Build(release, message => progress($"{release.Subfolder}: {message}"), cancel)); }
             catch (OperationCanceledException) when (!run.Releases.Any(built => built.Written)) { throw; }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException exception)
             {
                 release.Failure = "Cancelled before its files were written.";
+                if (exception.Data[ReleaseFiles.PulledKey] is ReleasePull pulled) release.Pull = pulled;
                 run.Releases.Add(release);
             }
             catch (Exception exception) when (!single && Failed(exception))
@@ -134,6 +136,7 @@ internal sealed class ReleaseRunner(Settings settings, GitRepository git, Func<s
                 var report = Diagnostics.Record(exception, "Release build");
                 release.Failure = $"{report.Label}: {exception.Message.Trim()}" + (report.Logs.FirstOrDefault() is { } log ? $" Full report: {log}" : "");
                 release.Exception = exception;
+                if (exception.Data[ReleaseFiles.PulledKey] is ReleasePull pulled) release.Pull = pulled;
                 run.Releases.Add(release);
                 progress($"{release.Subfolder}: failed. {exception.Message.Split('\n')[0]}");
             }

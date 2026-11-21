@@ -21,6 +21,8 @@ namespace Cultivate;
 internal sealed partial class ReleaseFiles(Settings settings, GitRepository git, Func<string[], Task<string>>? gh = null, ReleaseRepository? repository = null)
 {
     internal const string RefPrefix = "refs/cultivate/release/";
+    /// <summary>The key of a failed build's exception data that holds the <see cref="ReleasePull"/> its pull step made before the failure.</summary>
+    internal const string PulledKey = "Cultivate.ReleasePull";
     private const string Fields = "number,title,author,headRefName,baseRefName,state,mergedAt,mergeCommit,headRefOid,url,body";
     /// <summary>Files uploaded as they are. The dev farm planner leaves handlers and the like out; a release must not.</summary>
     internal static readonly HashSet<string> ContentExtensions = new(Planner.FrontendExtensions.Concat([".ashx", ".asmx", ".master", ".asax"]), Files.Comparer);
@@ -156,6 +158,7 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
         var request = preview.PullRequest;
         var run = Path.Combine(Files.Home, "Runs", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-release-" + Guid.NewGuid().ToString("N")[..8]);
         string? snapshot = null;
+        ReleasePull? pulled = null;
         var stage = "Release fetch";
         try
         {
@@ -174,7 +177,7 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                     $"{preview.BaseCommit[..7]}, the commit the preview showed; preview again to include the newer changes.");
             if (!result.CanBuild) throw new InvalidOperationException(string.Join("\n", result.Errors));
             cancel.ThrowIfCancellationRequested();
-            result.Pull = result.NoPull ? BasePull.Off(request.BaseBranch, true) : await Base.PullBase(request.BaseBranch, tip, result.Warnings, progress,
+            result.Pull = pulled = result.NoPull ? BasePull.Off(request.BaseBranch, true) : await Base.PullBase(request.BaseBranch, tip, result.Warnings, progress,
                 $"The release files were still built from origin's {tip[..7]}");
             progress(result.Pull.Detail);
             Directory.CreateDirectory(run);
@@ -210,6 +213,10 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                 var outputs = await new Pipeline(settings, git, new Bridge(settings)).Build(work.Plan, snapshot, run, progress, support);
                 result.OutsideReferences.AddRange(support.Outside.GroupBy(reference => reference.Path, Files.Comparer).Select(group =>
                     group.First() with { Project = string.Join(", ", group.Select(reference => reference.Project).Distinct(Files.Comparer)) }));
+                if (support.Unresolved.Count != 0)
+                    result.Warnings.Add($"Cultivate found {TicketWorkspaces.Count(support.Unresolved.Count, "reference")} nowhere and left " +
+                        $"{(support.Unresolved.Count == 1 ? "it" : "them")} to MSBuild, as Visual Studio does: {string.Join("; ", support.Unresolved)}. The build fails " +
+                        "with a compiler error if the code needs one; this one compiled, so it did not. build.log says where Cultivate looked.");
                 string Output(string name) => outputs.Single(file => Files.Comparer.Equals(file.RelativePath, @"bin\" + name)).Source;
                 files.AddRange(work.Plan.Projects.Select(project =>
                     new ReleaseFolder.Source(project.Assembly + ".dll", ReleaseKind.ProjectDll, project.RelativePath, Output(project.Assembly + ".dll"), project.Assembly, null)));
@@ -245,6 +252,13 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
             {
                 Branch = request.Label, Snapshot = snapshot, RunDirectory = Directory.Exists(run) ? run : null, Log = Path.Combine(run, "build.log")
             });
+            // The pull already happened: what it did is reported with the failure, not the preview's plan.
+            if (pulled is not null) exception.Data[PulledKey] = pulled;
+            throw;
+        }
+        catch (OperationCanceledException exception) when (pulled is not null)
+        {
+            exception.Data[PulledKey] = pulled;
             throw;
         }
         finally
