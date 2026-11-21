@@ -177,6 +177,19 @@ internal static partial class SelfTest
         Check(allowed.CanBuild && allowed.AllowLocalChanges && allowed.Warnings.Any(warning => warning.StartsWith("Building with local changes to 1 tracked file(s)", StringComparison.Ordinal)),
             "--allow-local-changes lets the build go ahead, with a warning that the package will not match origin's master");
         await C("checkout", "--", "Meyer.Online.Server/Meyer.Online.Server.csproj");
+        // build-prod rewrites capacitor.config.json with LF endings after a CRLF checkout: status lists it from its size alone, with nothing changed.
+        var ignore = Path.Combine(checkout, ".gitignore");
+        await C("config", "core.autocrlf", "true");
+        File.Delete(ignore);
+        await C("checkout", "--", ".gitignore");
+        File.WriteAllText(ignore, File.ReadAllText(ignore).Replace("\r\n", "\n"));
+        var listed = (await C("status", "--porcelain")).Contains(".gitignore", StringComparison.Ordinal) && (await C("diff", "--name-only", "HEAD")).Length == 0;
+        var rewritten = await Release().Preview();
+        Check(listed && rewritten.CanBuild && rewritten.ModifiedFiles.Count == 0,
+            "a tracked file rewritten with other line endings, which status lists although its content is the commit's, does not count as modified");
+        await C("config", "--unset", "core.autocrlf");
+        File.Delete(ignore);
+        await C("checkout", "--", ".gitignore");
         File.Delete(Path.Combine(checkout, "scratch.txt"));
 
         // A clean run from development, with master behind origin.
@@ -192,7 +205,7 @@ internal static partial class SelfTest
         var publishCall = calls.Single(call => call.Step == OnlineRelease.PublishStep);
         var buildCall = calls.Single(call => call.Step == OnlineRelease.FrontEndStep);
         Check(publishCall.Tool == @"C:\fixture\tools\dotnet.exe" && publishCall.Directory == project &&
-            publishCall.Arguments.SequenceEqual(["publish", Path.Combine(project, "Meyer.Online.Server.csproj"), "-c", "Release", "-p:PublishProfile=FolderProfile"]) &&
+            publishCall.Arguments.SequenceEqual(["build", Path.Combine(project, "Meyer.Online.Server.csproj"), "-c", "Release", "-p:DeployOnBuild=true", "-p:PublishProfile=FolderProfile"]) &&
             buildCall.Tool == "cmd.exe" && buildCall.Directory == app && buildCall.Arguments.SequenceEqual(["/c", "npm", "run", "build-prod"]),
             "the server is published through FolderProfile with its configuration and nothing overridden, and the front end is built with npm run build-prod");
         List<string> Entries()
@@ -284,7 +297,7 @@ internal static partial class SelfTest
         calls.Clear();
         var moved = await Release().Build(await Release().Preview(), _ => { });
         Check(moved.Profile?.PublishFolder == Path.Combine(project, @"bin\Publish\custom") &&
-            calls.Single(call => call.Step == OnlineRelease.PublishStep).Arguments.SequenceEqual(["publish", Path.Combine(project, "Meyer.Online.Server.csproj"), "-c", "Staging", "-p:PublishProfile=FolderProfile"]) &&
+            calls.Single(call => call.Step == OnlineRelease.PublishStep).Arguments.SequenceEqual(["build", Path.Combine(project, "Meyer.Online.Server.csproj"), "-c", "Staging", "-p:DeployOnBuild=true", "-p:PublishProfile=FolderProfile"]) &&
             File.Exists(Path.Combine(project, @"bin\Publish\custom\wwwroot\index.html")) && Entries().Contains("wwwroot/index.html") && Entries().Contains("Meyer.Online.Server.exe"),
             "a changed PublishUrl and configuration in FolderProfile.pubxml are followed: the publish uses them and the zip comes from the new folder");
 
@@ -415,7 +428,7 @@ internal static partial class SelfTest
         var full = Flat(Capture(new OnlinePreview(Fixture()).Render(120, 200), 120, 200));
         Check(full.Contains("MEYERONLINE RELEASE") && full.Contains(@"C:\fixture\MeyerOnline on development | master at abcdef1 | origin/master at 2bc2fa7 master is 2 commit(s) behind origin; building pulls it.") &&
             full.Contains("Building switches this checkout from development to master and leaves it there.") &&
-            full.Contains("dotnet publish Meyer.Online.Server.csproj -c Release -p:PublishProfile=FolderProfile") &&
+            full.Contains("dotnet build Meyer.Online.Server.csproj -c Release -p:DeployOnBuild=true -p:PublishProfile=FolderProfile") &&
             full.Contains(@"Publish folder C:\fixture\MeyerOnline\Meyer.Online.Server\bin\Release\net5.0") && full.Contains("LastUsedBuildConfiguration Release, SelfContained true") &&
             full.Contains("npm run build-prod in Meyer.Online.App.Ionic") && full.Contains("npm not found on PATH") &&
             full.Contains(@"PACKAGE C:\fixture\Releases\MORelease\MORelease.zip Replaces the MORelease.zip there once the new one is complete and checked.") &&

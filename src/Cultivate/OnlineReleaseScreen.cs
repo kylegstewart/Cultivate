@@ -261,7 +261,7 @@ internal sealed class OnlinePreview(OnlineReleaseResult preview)
         page.Blank();
         page.Add(0, ("BUILDS", heading), ("  at the same time", muted));
         var profile = preview.Profile;
-        page.Add(2, ("Server  ", "bold " + text), ($"dotnet publish {OnlineRelease.ServerProject}.csproj -c {profile?.Configuration} -p:PublishProfile={OnlineRelease.ProfileName}", text));
+        page.Add(2, ("Server  ", "bold " + text), ($"dotnet build {OnlineRelease.ServerProject}.csproj -c {profile?.Configuration} -p:DeployOnBuild=true -p:PublishProfile={OnlineRelease.ProfileName}", text));
         if (profile is not null)
         {
             page.Add(4, ("Publish folder  ", muted), (profile.PublishFolder, text));

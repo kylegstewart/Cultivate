@@ -135,6 +135,7 @@ internal sealed class OnlineRelease(Settings settings, GitRepository git, Online
         var currentRead = Current();
         var worktreesRead = G("worktree", "list", "--porcelain", "-z");
         var statusRead = G("status", "--porcelain=v1", "-z", "--untracked-files=all");
+        var differentRead = G("diff", "--name-only", "-z", "HEAD");
 
         string[] operations = ["merge", "rebase", "rebase", "cherry-pick", "revert", "bisect"];
         var markers = (await markersRead).Split('\n', StringSplitOptions.TrimEntries);
@@ -188,6 +189,10 @@ internal sealed class OnlineRelease(Settings settings, GitRepository git, Online
                 if (entry[..2].IndexOfAny(['R', 'C']) >= 0) index++;
             }
         }
+        // Status calls a file modified from its size alone. build-prod rewrites capacitor.config.json with LF endings, so after a CRLF
+        // checkout it is listed although its content is the commit's; only files that really differ from HEAD count.
+        var different = (await differentRead).Split('\0', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+        modified.RemoveAll(path => !different.Contains(path));
         if (modified.Count != 0 && !allowLocalChanges)
             errors.Add($"{root} has {modified.Count} modified tracked file(s): {Names(modified)}. A release is built from {Branch} exactly as origin has it: " +
                 "commit, stash or undo them, or build with them anyway (--allow-local-changes); nothing was changed.");
@@ -351,8 +356,10 @@ internal sealed class OnlineRelease(Settings settings, GitRepository git, Online
                 result.Logs.Add(command.Log);
                 return command;
             }
+            // `dotnet publish -p:PublishProfile` ignores the profile's PublishUrl and DeleteExistingFiles and writes to <rid>\publish instead.
+            // A build with DeployOnBuild runs the profile's own folder publish, which is what Visual Studio's Publish does.
             var publishing = Command(PublishStep, result.Dotnet!, project, "publish.log",
-                "publish", Path.Combine(project, ServerProject + ".csproj"), "-c", profile.Configuration, "-p:PublishProfile=" + ProfileName);
+                "build", Path.Combine(project, ServerProject + ".csproj"), "-c", profile.Configuration, "-p:DeployOnBuild=true", "-p:PublishProfile=" + ProfileName);
             var installing = result.InstallReason is null ? null : Command(InstallStep, "cmd.exe", app, "npm-install.log", "/c", "npm", "install");
             var building = Command(FrontEndStep, "cmd.exe", app, "front-end.log", "/c", "npm", "run", Script);
             stage = "MeyerOnline build";
