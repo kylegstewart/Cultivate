@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.3.1 — 2026-11-21
+
 - Improvement: Esc now goes back one screen, at once, everywhere in Cultivate: every screen, menu, question and list. It never
   needs Enter and never confirms anything: in a menu it does what its Back, Cancel or No does, a yes or no question takes it as No,
   and a list of files or library changes to check goes back with nothing changed. While a build or warm-up runs, Esc still cancels
