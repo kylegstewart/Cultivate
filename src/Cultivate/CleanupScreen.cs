@@ -8,7 +8,7 @@ internal sealed class CleanupScreen(Settings settings, GitRepository git, Bridge
 {
     internal const string RemoveFiles = "Remove Cultivate's old files", ReviewWorktrees = "Review unused worktrees", Back = "Back";
 
-    internal Task Run() => Show(AnsiConsole.Console, Terminal.Select, question => AnsiConsole.Confirm(Terminal.Escape(question), false), Terminal.Pause,
+    internal Task Run() => Show(AnsiConsole.Console, Terminal.Select, question => Terminal.Confirm(Terminal.Escape(question), false), Terminal.Pause,
         Files.Home, () => DateTimeOffset.Now);
 
     internal async Task Show(IAnsiConsole console, Func<string, IEnumerable<MenuAction>, string> select, Func<string, bool> confirm, Action pause,
@@ -38,7 +38,7 @@ internal sealed class CleanupScreen(Settings settings, GitRepository git, Bridge
                     "Cultivate also does this on its own once a day."));
             if (worktrees.Qualifying.Count != 0)
                 actions.Add(new(ReviewWorktrees, "List them, then confirm before anything is deleted. Branches are always kept."));
-            actions.Add(new(Back, "Return home without removing anything."));
+            actions.Add(new(Back, "Return home without removing anything.", Back: true));
             switch (select("What would you like to clean up?", actions))
             {
                 case RemoveFiles:
@@ -52,11 +52,7 @@ internal sealed class CleanupScreen(Settings settings, GitRepository git, Bridge
                     console.Write(header);
                     console.Write(Review(worktrees, now));
                     if (!confirm($"Delete {TidyReview.Plural(worktrees.Qualifying.Count, "worktree")} and free {TidySizes.Format(worktrees.Bytes)}?"))
-                    {
-                        console.MarkupLine($"[{TerminalStyle.Muted}]Nothing was deleted.[/]");
-                        pause();
                         break;
-                    }
                     // A deployment may have started in another window since the state was read.
                     var guard = TidyGuard.Current((await CleanupDeployment.Read(bridge)).State ?? deployment.State);
                     var results = await console.Status().StartAsync("Removing worktrees...", context => CleanupWorktrees.Remove(git, worktrees.Qualifying, guard,

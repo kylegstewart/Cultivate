@@ -441,18 +441,11 @@ internal sealed partial class LibraryLoop(Settings settings, GitRepository git)
         return TerminalStyle.Card(new Markup(string.Join("\n", lines)), "MATCHING LIBRARY CHANGES");
     }
 
-    /// <summary>Asks which matching library worktrees to include and returns their paths.</summary>
-    internal static List<string> Choose(Plan plan)
-    {
-        AnsiConsole.Clear();
-        AnsiConsole.Write(TerminalStyle.Header("SELECT LIBRARY CHANGES", "Checked library worktrees build and deploy with this version."));
-        var prompt = new MultiSelectionPrompt<LibraryChange>().Title($"[{TerminalStyle.Accent}]Choose library changes[/]")
-            .NotRequired().PageSize(10).HighlightStyle(TerminalStyle.Selection)
-            .InstructionsText("[grey](Space toggles a library worktree; Enter applies the selection)[/]")
-            .UseConverter(library => Terminal.Escape($"{library.Repository}  {library.Branch}  {library.Worktree}")).AddChoices(plan.Libraries);
-        foreach (var library in plan.Libraries.Where(library => library.Included)) prompt.Select(library);
-        return AnsiConsole.Prompt(prompt).Select(library => library.Worktree).ToList();
-    }
+    /// <summary>Asks which matching library worktrees to include and returns their paths, or null when Esc goes back without changing them.</summary>
+    internal static List<string>? Choose(Plan plan) =>
+        new Checklist<LibraryChange>(TerminalStyle.Header("SELECT LIBRARY CHANGES", "Checked library worktrees build and deploy with this version."),
+            "Choose library changes", plan.Libraries, library => $"{library.Repository}  {library.Branch}  {library.Worktree}",
+            plan.Libraries.Where(library => library.Included)).Show()?.Select(library => library.Worktree).ToList();
 
     [GeneratedRegex(@"^net\d{2,3}$", RegexOptions.IgnoreCase)]
     private static partial Regex FrameworkName();

@@ -207,16 +207,22 @@ internal static partial class SelfTest
 
         using (var output = new StringWriter())
         {
-            var keys = new Queue<ConsoleKeyInfo>([new('\0', ConsoleKey.DownArrow, false, false, false), new('\r', ConsoleKey.Enter, false, false, false)]);
-            var chosen = new PullRequestPicker(requests).Show(LiveConsole(output), () =>
+            var keys = new Queue<ConsoleKeyInfo?>([null, new('\0', ConsoleKey.DownArrow, false, false, false), null, new('\r', ConsoleKey.Enter, false, false, false)]);
+            var chosen = new PullRequestPicker(requests).Show(LiveConsole(output), _ =>
             {
                 Check(output.ToString().Contains("PULL REQUESTS"), "the pull request list renders before waiting for a key");
                 return keys.Dequeue();
             });
-            Check(chosen == 12, "Enter chooses the highlighted pull request");
+            var paints = ReleasePaints(output.ToString());
+            Check(chosen == 12 && paints.Length == 2 && PaintedRows(paints[1]).Length is > 0 and <= 6,
+                "Enter chooses the highlighted pull request, and the list repaints only the lines an arrow changes, as the other pickers do");
         }
         using (var output = new StringWriter())
-            Check(new PullRequestPicker(requests).Show(LiveConsole(output), () => new('\u001b', ConsoleKey.Escape, false, false, false)) is null,
-                "Esc leaves the pull request list without fetching anything");
+        {
+            picker = new PullRequestPicker(requests);
+            foreach (var character in "carol") picker.HandleKey(new(character, ConsoleKey.A, false, false, false), 7);
+            Check(picker.Show(LiveConsole(output), Script(Press(ConsoleKey.Escape))) is null && picker.Query == "carol",
+                "Esc leaves the pull request list at once, even with a search typed, without fetching anything, and keeps the search for coming back");
+        }
     }
 }

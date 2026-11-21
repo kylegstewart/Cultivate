@@ -16,7 +16,7 @@ internal sealed class OnlineReleaseScreen(Settings settings, GitRepository git, 
     internal const string LocalChangesQuestion = "Build with your local changes anyway? The package will not match origin's master exactly.";
 
     internal Task Run() => Show(AnsiConsole.Console, KeyScreen.ReadKey, Terminal.Select,
-        (question, preset) => AnsiConsole.Confirm(Terminal.Escape(question), preset), Terminal.Pause, Explore);
+        (question, preset) => Terminal.Confirm(Terminal.Escape(question), preset), Terminal.Pause, Explore);
 
     private static void Explore(string folder)
     {
@@ -77,7 +77,7 @@ internal sealed class OnlineReleaseScreen(Settings settings, GitRepository git, 
             console.Write(ResultCard(built, escaped));
             while (select("What next?", [
                 new(ReleaseScreen.OpenFolder, "Open the folder that holds MORelease.zip."),
-                new(ReleaseScreen.Back, "Return home.")]) == ReleaseScreen.OpenFolder)
+                new(ReleaseScreen.Back, "Return home.", Back: true)]) == ReleaseScreen.OpenFolder)
                 explore(Path.GetDirectoryName(built.Zip)!);
             return;
         }

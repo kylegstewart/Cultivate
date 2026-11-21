@@ -20,8 +20,9 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
     internal const string ReuseQuestion = "Try again with your checkout's DLLs for the dependencies?";
     internal const string RepositoryQuestion = "Which repository's merged pull requests?";
 
-    internal Task Run() => Show(AnsiConsole.Console, KeyScreen.ReadKey, Terminal.Select,
-        (question, preset) => AnsiConsole.Confirm(Terminal.Escape(question), preset), Terminal.Pause, Explore);
+    // Only the repository question is as long as the machine's clones, so only it filters as you type.
+    internal Task Run() => Show(AnsiConsole.Console, KeyScreen.ReadKey, (title, actions) => Terminal.Select(title, actions, search: title == RepositoryQuestion),
+        (question, preset) => Terminal.Confirm(Terminal.Escape(question), preset), Terminal.Pause, Explore);
 
     private static void Explore(string folder)
     {
@@ -104,7 +105,7 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
                 console.Write(ResultCard(built, escaped));
                 while (select("What next?", [
                     new(OpenFolder, "Open the release folder, ready to upload its files to the Code Release Manager."),
-                    new(Back, "Return to the merged pull requests.")]) == OpenFolder)
+                    new(Back, "Return to the merged pull requests.", Back: true)]) == OpenFolder)
                     explore(built.Releases.Count == 1 ? built.Releases[0].Folder : built.Folder);
                 return;
             }
