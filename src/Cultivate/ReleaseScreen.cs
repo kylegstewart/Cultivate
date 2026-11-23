@@ -247,48 +247,41 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
     private static Paragraph FolderLink(string folder) =>
         new(folder, new Style(Color.FromHex(TerminalStyle.Text), decoration: Decoration.Bold), new Link(new Uri(folder).AbsoluteUri));
 
-    /// <summary>What was written: the folder as a link, each file with its kind, size and version, and every warning again.</summary>
+    /// <summary>What one release wrote, laid out as <see cref="ResultCard(ReleaseRun, bool)"/> lays out a single repository.</summary>
     internal static IRenderable ResultCard(ReleaseResult result, bool escaped = false) => ResultCard(ReleaseRun.Single(result), escaped);
 
     /// <summary>
-    /// What a run wrote. One repository's is shown as it always was; with several, the ticket folder comes first, then each repository's
-    /// subfolder with its files or why it was not written, then the linked pull requests that were skipped.
+    /// What a run wrote, laid out like the preview: how many files and how long it took, the folder as a link, then each repository's pull
+    /// request with its files grouped by kind and their sizes in one column. With several repositories each block starts with its subfolder's
+    /// name, one that was not written says why, and the linked pull requests that were skipped come last.
     /// </summary>
     internal static IRenderable ResultCard(ReleaseRun run, bool escaped = false)
     {
-        var rows = new List<IRenderable>();
+        var single = run.Releases.Count == 1;
         var failed = run.Releases.Any(release => !release.Written);
-        if (run.Releases.Count == 1)
+        var files = run.Releases.Where(release => release.Written).SelectMany(release => release.Files).ToList();
+        // One size column for the whole card, two spaces after its longest file name.
+        var columns = (Name: files.Select(file => file.Name.Length).DefaultIfEmpty().Max(),
+            Size: files.Select(file => TidySizes.Format(file.Size).Length).DefaultIfEmpty().Max());
+        var rows = new List<IRenderable>
         {
-            var result = run.Releases[0];
-            rows.Add(new Markup($"[bold {TerminalStyle.Accent}]Wrote {TicketWorkspaces.Count(result.Files.Count, "file")} for {Terminal.Escape(result.PullRequest.Label)}[/]  " +
-                Muted($"in {result.Seconds:0} s")));
-            rows.AddRange(Details(result));
-        }
-        else
+            new Markup($"[bold {TerminalStyle.Accent}]{TicketWorkspaces.Count(files.Count, "file")} written[/]  " + Muted($"in {run.Seconds:0} s")),
+            FolderLink(single ? run.Releases[0].Folder : run.Folder)
+        };
+        foreach (var release in run.Releases)
         {
-            var first = run.Releases[0];
-            rows.Add(new Markup($"[bold {TerminalStyle.Accent}]Wrote {TicketWorkspaces.Count(run.Releases.Sum(release => release.Files.Count), "file")} for " +
-                $"{Terminal.Escape(first.PullRequest.Label)}[/]  " + Muted($"and {TicketWorkspaces.Count(run.Releases.Count - 1, "linked pull request")}, in {run.Seconds:0} s")));
-            rows.Add(FolderLink(run.Folder));
-            rows.Add(new Markup(Muted("One subfolder per repository: " + string.Join(", ", run.Releases.Select(release =>
-                $"{release.Subfolder} ({(release.Written ? TicketWorkspaces.Count(release.Files.Count, "file") : "not written")})")) + ".")));
-            foreach (var release in run.Releases)
-            {
-                rows.Add(new Text(""));
-                rows.Add(new Markup($"[bold {(release.Written ? TerminalStyle.Accent : Danger)}]{Terminal.Escape(release.Subfolder)}[/]  " +
-                    Muted($"{release.Repository} {release.PullRequest.Label}")));
-                if (release.Written) rows.AddRange(Details(release));
-                else
-                {
-                    rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
-                    if (release.Pull is { } pull) rows.Add(new Markup(Muted(pull.Detail)));
-                }
-            }
+            rows.Add(new Text(""));
+            if (!single)
+                rows.Add(new Markup($"[bold {(release.Written ? TerminalStyle.Accent : Danger)}]━━ {Terminal.Escape(release.Subfolder.ToUpperInvariant())}[/]  " +
+                    (release.Written ? Muted(TicketWorkspaces.Count(release.Files.Count, "file")) : $"[{Danger}]not written[/]")));
+            rows.Add(new Markup($"[bold {TerminalStyle.Accent}]{Terminal.Escape(release.PullRequest.Label)}[/]"));
+            if (release.Written) rows.AddRange(Details(release, columns));
+            else rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
         }
         if (run.Skipped.Count != 0)
         {
-            rows.Add(new Markup($"[bold {TerminalStyle.Gold}]Linked pull requests not built ({run.Skipped.Count}):[/]"));
+            rows.Add(new Text(""));
+            rows.Add(Heading($"LINKED PULL REQUESTS NOT BUILT ({run.Skipped.Count})"));
             rows.AddRange(run.Skipped.Select(skipped => new Markup($"  {Terminal.Escape($"{skipped.Repository} #{skipped.Number}")}  {Muted(skipped.Reason)}")));
         }
         if (escaped) rows.Add(new Markup(Muted("Esc came after writing had started, so the build finished.")));
@@ -297,40 +290,56 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
             failed ? Danger : clean ? TerminalStyle.Accent : TerminalStyle.Gold);
     }
 
-    /// <summary>One written release: its folder as a link, what to do with it, the pull, its files, and every warning again.</summary>
-    private static List<IRenderable> Details(ReleaseResult result)
+    // A kind the build may add later still gets a group, so no written file is ever missing from the card.
+    private static readonly (string? Kind, string Heading)[] Groups =
+    [
+        (ReleaseKind.ProjectDll, "DLLS"), (ReleaseKind.Package, "CHANGED PACKAGES"), (ReleaseKind.Content, "FRONTEND FILES"), (ReleaseKind.Sql, "SQL SCRIPTS"),
+        (null, "OTHER FILES")
+    ];
+
+    private static Markup Heading(string text) => new($"[{ReleasePreview.Heading}]{Terminal.Escape(text)}[/]");
+
+    /// <summary>
+    /// One written release under its pull request: its files grouped by kind, each with its size in the card's size column, whether it replaced
+    /// one, and a changed package's version; then the files removed first, those kept in the folder, references from outside the base branch,
+    /// and every warning again. A local base branch that could not be pulled is among the warnings, so the pull itself is not repeated.
+    /// </summary>
+    private static List<IRenderable> Details(ReleaseResult result, (int Name, int Size) columns)
     {
-        var muted = new Style(Color.FromHex(TerminalStyle.Muted));
         var basis = result.BaseBranch.Length == 0 ? "the base branch" : result.BaseBranch;
-        var rows = new List<IRenderable>
+        var text = TerminalStyle.Text;
+        var rows = new List<IRenderable>();
+        if (result.Files.Count == 0) rows.Add(new Markup(Muted("Nothing needed releasing.")));
+        foreach (var (kind, heading) in Groups)
         {
-            FolderLink(result.Folder),
-            new Markup(Muted(result.Files.Count == 0 ? "Nothing needed releasing." : result.Kind == ReleaseRepositoryKind.Sql
-                ? "Release these scripts through the database process; Cultivate never runs SQL." : "Upload every file in this folder to the Code Release Manager."))
-        };
-        if (result.Pull is { } pull)
-            rows.Add(new Markup(pull.Outcome == ReleasePullOutcome.Pulled ? $"[{TerminalStyle.Accent}]{Terminal.Escape(pull.Detail)}[/]" : Muted(pull.Detail)));
-        if (result.Files.Count != 0)
-        {
-            var table = new Table().Border(TableBorder.None).Expand()
-                .AddColumn(new TableColumn(Muted("FILE"))).AddColumn(new TableColumn(Muted("KIND")) { NoWrap = true })
-                .AddColumn(new TableColumn(Muted("SIZE")) { NoWrap = true }).AddColumn(new TableColumn(Muted("VERSION")) { NoWrap = true })
-                .AddColumn(new TableColumn("") { NoWrap = true });
-            foreach (var file in result.Files)
-                table.AddRow(new Text(file.Name), new Text(file.Kind, muted), new Text(TidySizes.Format(file.Size)), new Text(file.AssemblyVersion ?? "", muted),
-                    file.Replaced ? new Text("replaced", new Style(Color.FromHex(TerminalStyle.Gold))) : new Text("new", muted));
-            rows.Add(table);
+            var group = result.Files.Where(file => kind is null ? Groups.All(other => other.Kind != file.Kind) : file.Kind == kind).ToList();
+            if (group.Count == 0) continue;
+            rows.Add(Heading($"{heading} ({group.Count})"));
+            rows.AddRange(group.Select(file => new Markup($"  [{text}]{Terminal.Escape(file.Name.PadRight(columns.Name))}[/]  " +
+                Muted(TidySizes.Format(file.Size).PadLeft(columns.Size)) + (file.Replaced ? $"  [{TerminalStyle.Gold}]replaced[/]" : "") +
+                (file.Kind == ReleaseKind.Package && file.AssemblyVersion is { } version ? "  " + Muted(version) : ""))));
         }
-        if (result.Removed.Count != 0) rows.Add(new Markup($"[{TerminalStyle.Gold}]Removed first:[/] {Terminal.Escape(string.Join(", ", result.Removed))}"));
+        if (result.Removed.Count != 0)
+        {
+            rows.Add(Heading($"REMOVED FIRST ({result.Removed.Count})"));
+            rows.AddRange(result.Removed.Select(name => new Markup($"  [{text}]{Terminal.Escape(name)}[/]")));
+        }
         if (result.Existing.Count != 0)
-            rows.Add(new Markup(Muted("Also in the folder and kept: " + string.Join(", ", result.Existing.Select(file => $"{file.Name} ({file.Origin})")))));
+        {
+            rows.Add(new Markup($"[{ReleasePreview.Heading}]ALSO IN THE FOLDER ({result.Existing.Count})[/]  " + Muted("kept, not written by this build")));
+            rows.AddRange(result.Existing.Select(file => new Markup($"  [{text}]{Terminal.Escape(file.Name)}[/]  " + Muted(file.Origin))));
+        }
         if (result.OutsideReferences.Count != 0)
         {
-            rows.Add(new Markup($"[bold {TerminalStyle.Gold}]Compiled against files from outside {Terminal.Escape(basis)}:[/]"));
+            rows.Add(Heading($"COMPILED AGAINST FILES FROM OUTSIDE {basis.ToUpperInvariant()} ({result.OutsideReferences.Count})"));
             rows.AddRange(result.OutsideReferences.Select(reference => new Markup($"  {Terminal.Escape(reference.Name)} {Terminal.Escape(reference.Version ?? "")}  " +
                 Muted($"{reference.Path}, modified {reference.LastWriteTime:yyyy-MM-dd HH:mm}, for {reference.Project}"))));
         }
-        rows.AddRange(result.Warnings.Select(warning => new Markup($"[{TerminalStyle.Gold}]![/] {Terminal.Escape(warning)}")));
+        if (result.Warnings.Count != 0)
+        {
+            rows.Add(Heading($"WARNINGS ({result.Warnings.Count})"));
+            rows.AddRange(result.Warnings.Select(warning => new Markup($"  [{TerminalStyle.Gold}]![/] {Terminal.Escape(warning)}")));
+        }
         return rows;
     }
 }
@@ -402,7 +411,7 @@ internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList
         return choice;
     }
 
-    private const string Heading = "bold " + TerminalStyle.Gold;
+    internal const string Heading = "bold " + TerminalStyle.Gold;
 
     private List<IRenderable> Body(int width)
     {
