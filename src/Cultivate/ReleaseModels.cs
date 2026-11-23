@@ -27,7 +27,7 @@ internal static class ReleaseStatus
 /// <summary>How a file is released: compiled into its project's DLL, uploaded as is, or left to the developer.</summary>
 internal static class ReleaseKind
 {
-    internal const string Compiled = "Compiled into its project's DLL", Content = "Content file", NotIncluded = "Not included",
+    internal const string Compiled = "Compiled into its project's DLL", Content = "Frontend file", NotIncluded = "Not included",
         ProjectDll = "Project DLL", Package = "Changed package", Sql = "SQL script";
 }
 

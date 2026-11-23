@@ -336,9 +336,9 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
 }
 
 /// <summary>
-/// A release preview to check before building, in the order that matters for production, scrolled when it is taller than the terminal. With
-/// several repositories it starts with the ticket folder, each repository's subfolder and the linked pull requests skipped, then each
-/// repository's preview in turn.
+/// A release preview to check before building: under each pull request, the DLLs, changed packages and frontend files it releases, then what
+/// is left out, any files already in the folder, and warnings and errors, scrolled when it is taller than the terminal. With several
+/// repositories it starts with the linked pull requests skipped, then each repository's preview under its subfolder's name.
 /// </summary>
 internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList<string>> removables)
 {
@@ -409,104 +409,54 @@ internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList
         var page = new WrappedLines(width);
         if (run.Releases.Count == 1 && run.Skipped.Count == 0)
         {
-            Release(page, run.Releases[0], removables[0]);
+            Release(page, run.Releases[0], removables[0], false);
             return page.Lines;
         }
-        var first = run.Releases[0];
-        page.Add(0, (first.PullRequest.Label, "bold " + TerminalStyle.Accent),
-            ($"  in {first.Repository}, and {TicketWorkspaces.Count(run.Releases.Count - 1, "linked pull request")} it lists", TerminalStyle.Muted));
-        page.Blank();
-        page.Add(0, ("TICKET FOLDER  ", Heading), (run.Folder, "bold " + TerminalStyle.Text));
-        page.Add(2, ("One subfolder per repository:", TerminalStyle.Text));
-        foreach (var release in run.Releases)
-            page.Add(4, (release.Subfolder, "bold " + TerminalStyle.Text), release.CanBuild
-                ? ($"  {release.Repository} PR #{release.PullRequest.Number}, {TicketWorkspaces.Count(Planned(release), "file")}", TerminalStyle.Muted)
-                : ($"  {release.Repository} PR #{release.PullRequest.Number} cannot be built, so building skips it; CANNOT BUILD below says why.", ReleaseScreen.Danger));
         if (run.Skipped.Count != 0)
         {
-            page.Blank();
             page.Add(0, ($"LINKED PULL REQUESTS NOT BUILT ({run.Skipped.Count})", Heading));
             foreach (var skipped in run.Skipped) page.Add(2, ($"{skipped.Repository} #{skipped.Number}", TerminalStyle.Text), ("  " + skipped.Reason, TerminalStyle.Muted));
         }
         foreach (var (release, removable) in run.Releases.Zip(removables))
         {
-            page.Blank();
-            page.Add(0, ("━━ " + release.Subfolder.ToUpperInvariant(), "bold " + TerminalStyle.Accent),
-                ($"  {release.GitHub ?? release.Checkout}, {(release.Kind == ReleaseRepositoryKind.Sql ? "SQL scripts" : "built from " + release.BaseBranch)}", TerminalStyle.Muted));
-            Release(page, release, removable);
+            if (page.Lines.Count != 0) page.Blank();
+            page.Add(0, ("━━ " + release.Subfolder.ToUpperInvariant(), "bold " + TerminalStyle.Accent));
+            Release(page, release, removable, true);
         }
         return page.Lines;
     }
 
-    private static int Planned(ReleaseResult release) => release.Projects.Count + release.Content.Count +
-        release.Packages.Select(package => package.Name).Distinct(Files.Comparer).Count();
-
-    /// <summary>One repository's preview: its pull request, folder, files, what is left out, and its warnings and errors.</summary>
-    private void Release(WrappedLines page, ReleaseResult preview, IReadOnlyList<string> removable)
+    /// <summary>
+    /// One repository's preview: its pull request, the files it releases, what is left out, the files already in its folder, and its warnings
+    /// and errors.
+    /// </summary>
+    private void Release(WrappedLines page, ReleaseResult preview, IReadOnlyList<string> removable, bool several)
     {
         const string heading = Heading, text = TerminalStyle.Text, muted = TerminalStyle.Muted, gold = TerminalStyle.Gold;
         static string Short(string commit) => commit[..Math.Min(7, commit.Length)];
         var canClean = run.CanBuild && !preview.Clean && removable.Count != 0;
         var sql = preview.Kind == ReleaseRepositoryKind.Sql;
-        var request = preview.PullRequest;
         var basis = preview.BaseBranch.Length == 0 ? "the base branch" : preview.BaseBranch;
-        page.Add(0, (request.Label, "bold " + TerminalStyle.Accent));
-        page.Add(0, (string.Join("  |  ", new[]
-        {
-            $"#{request.Number}" + (request.Author.Length == 0 ? "" : " by " + request.Author), request.HeadBranch,
-            DateTimeOffset.TryParse(request.MergedAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var merged)
-                ? $"merged {merged.ToLocalTime():yyyy-MM-dd HH:mm}" : "",
-            preview.BaseCommit.Length == 0 ? "" : $"built from {basis} at {Short(preview.BaseCommit)}"
-        }.Where(part => part.Length != 0)), muted));
-        if (preview.Pull is { } pull)
-            page.Add(0, (pull.Detail, pull.Outcome is ReleasePullOutcome.LocalCommits or ReleasePullOutcome.NotUpdated ? gold : muted));
-        if (!preview.CanBuild) page.Add(0, ("These release files cannot be built. CANNOT BUILD below says why.", "bold " + ReleaseScreen.Danger));
+        page.Add(0, (preview.PullRequest.Label, "bold " + TerminalStyle.Accent));
+        if (preview.Pull is { Outcome: ReleasePullOutcome.LocalCommits or ReleasePullOutcome.NotUpdated } pull) page.Add(0, (pull.Detail, gold));
+        if (!preview.CanBuild)
+            page.Add(0, (several ? "Cannot be built, so building skips it. CANNOT BUILD below says why." : "These release files cannot be built. CANNOT BUILD below says why.",
+                "bold " + ReleaseScreen.Danger));
+        if (preview.ReuseDependencies && preview.SupportProjects.Count != 0)
+            page.Add(0, ($"Dependencies are taken from your checkout instead of built from {basis}; Cultivate cannot verify they match {basis}.", gold));
 
-        var planned = preview.Projects.Select(project => project.Assembly + ".dll").Concat(preview.Packages.Select(package => package.Name))
-            .Concat(preview.Content.Select(path => Path.GetFileName(path))).ToHashSet(Files.Comparer);
-        var packages = preview.Packages.Select(package => package.Name).Distinct(Files.Comparer).Count();
-        page.Blank();
-        page.Add(0, ("FOLDER  ", heading), (preview.Folder, "bold " + text));
-        var count = preview.Projects.Count + packages + preview.Content.Count;
-        page.Add(2, sql ? (count == 0 ? "Building writes nothing: the pull request changed no SQL script." :
-            $"Building writes {TicketWorkspaces.Count(count, "SQL script")}, as {basis} has them. Nothing is built or run.", text) :
-            (count == 0 ? "Building writes nothing: there is no DLL, package or content file to release." :
-            $"Building writes {TicketWorkspaces.Count(count, "file")}: {TicketWorkspaces.Count(preview.Projects.Count, "DLL")}, " +
-            $"{TicketWorkspaces.Count(packages, "changed package")} and {TicketWorkspaces.Count(preview.Content.Count, "content file")}.", text));
-        if (preview.Existing.Count == 0) page.Add(2, ("Nothing is in the folder yet.", muted));
-        else
+        if (preview.Projects.Count != 0)
         {
-            page.Add(2, ($"Already in the folder ({preview.Existing.Count}):", text));
-            foreach (var file in preview.Existing)
-            {
-                var notes = new List<string> { TidySizes.Format(file.Size), file.Origin };
-                if (planned.Contains(file.Name)) notes.Add("replaced by this build");
-                if (removable.Contains(file.Name, Files.Comparer) && (preview.Clean || canClean)) notes.Add(preview.Clean ? "removed first" : "C removes it first");
-                page.Add(4, (file.Name, text), ("  " + string.Join(", ", notes), muted));
-            }
-            if (preview.Clean)
-                page.Add(2, (removable.Count == 0 ? "Nothing is removed first: no file here is one Cultivate wrote that is unchanged." :
-                    $"Removed first: {string.Join(", ", removable)}. Every other file is kept.", gold));
-            else if (canClean)
-                page.Add(2, ($"C removes the {TicketWorkspaces.Count(removable.Count, "file")} Cultivate wrote here that nobody has changed since, then builds. " +
-                    "Every other file is kept.", muted));
-            else if (removable.Count == 0)
-                page.Add(2, ("Every file here is kept. Cultivate removes only files it wrote that nobody has changed since, and none are here.", muted));
+            page.Blank();
+            page.Add(0, ($"DLLS TO BUILD ({preview.Projects.Count})", heading));
         }
-
-        if (!sql) page.Blank();
-        if (!sql) page.Add(0, ($"DLLS TO BUILD ({preview.Projects.Count})", heading));
-        if (!sql && preview.Projects.Count == 0) page.Add(2, ("None: the pull request changed no compiled code.", muted));
         foreach (var project in preview.Projects)
         {
-            page.Add(2, (project.Assembly + ".dll", "bold " + text), ("  " + project.Project, muted));
+            page.Add(2, (project.Assembly + ".dll", "bold " + text));
             var others = project.OtherMergedChanges;
-            if (others.Count == 0) page.Add(4, ("Carries no other merged changes.", muted));
-            else
-            {
-                page.Add(4, ($"Also carries {TicketWorkspaces.Count(others.Count, "other merged change")}, which {(others.Count == 1 ? "goes" : "go")} to production with it:", gold));
-                foreach (var commit in others) page.Add(6, (Short(commit.Commit), muted), ("  " + commit.Subject, text));
-            }
+            if (others.Count == 0) continue;
+            page.Add(4, ($"Also carries {TicketWorkspaces.Count(others.Count, "other merged change")}, which {(others.Count == 1 ? "goes" : "go")} to production with it:", gold));
+            foreach (var commit in others) page.Add(6, (Short(commit.Commit), muted), ("  " + commit.Subject, text));
         }
 
         if (preview.Packages.Count != 0)
@@ -517,10 +467,11 @@ internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList
                 page.Add(2, (package.Name, text), ($"  {(package.Version.Length == 0 ? "version not recorded" : package.Version)}  for {package.Project}", muted));
         }
 
-        page.Blank();
-        page.Add(0, ($"{(sql ? "SQL SCRIPTS" : "CONTENT FILES")} ({preview.Content.Count})", heading));
-        if (preview.Content.Count == 0)
-            page.Add(2, (sql ? "None: the pull request changed no .sql file." : "None: no markup, script, style or other content file to upload.", muted));
+        if (preview.Content.Count != 0)
+        {
+            page.Blank();
+            page.Add(0, ($"{(sql ? "SQL SCRIPTS" : "FRONTEND FILES")} ({preview.Content.Count})", heading));
+        }
         foreach (var path in preview.Content)
         {
             var change = preview.Changes.FirstOrDefault(item => item.Path == path);
@@ -532,6 +483,12 @@ internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList
             page.Add(2, (path, text), ($"  not exactly as on the pull request; {basis}'s version is copied:", gold));
             if (change.Commits.Count == 0) page.Add(6, ("the merge itself changed it (for example, resolving a conflict)", muted));
             foreach (var commit in change.Commits) page.Add(6, (Short(commit.Commit), muted), ("  " + commit.Subject, text));
+        }
+        if (preview.Projects.Count + preview.Packages.Count + preview.Content.Count == 0)
+        {
+            page.Blank();
+            page.Add(0, (sql ? "Nothing to release: the pull request changed no SQL script." : "Nothing to release: the pull request changed no DLL, package or frontend file.",
+                muted));
         }
 
         var left = preview.NotIncluded.Concat(preview.Changes.Where(change => change.Status == ReleaseStatus.NotOnBase)
@@ -548,14 +505,27 @@ internal sealed class ReleasePreview(ReleaseRun run, IReadOnlyList<IReadOnlyList
             page.Add(0, ($"DELETED BY THE PULL REQUEST ({preview.Deleted.Count})", heading));
             foreach (var note in preview.Deleted) page.Add(2, (note.Path, text), ("  " + note.Reason, muted));
         }
-        if (preview.SupportProjects.Count != 0)
+        if (preview.Existing.Count != 0)
         {
+            var planned = preview.Projects.Select(project => project.Assembly + ".dll").Concat(preview.Packages.Select(package => package.Name))
+                .Concat(preview.Content.Select(path => Path.GetFileName(path))).ToHashSet(Files.Comparer);
             page.Blank();
-            page.Add(0, ($"BUILT FIRST, NOT RELEASED ({preview.SupportProjects.Count})", heading));
-            page.Add(2, preview.ReuseDependencies
-                ? ($"Taken from your checkout instead of built from {basis}; Cultivate cannot verify they match {basis}. They are not copied to the folder.", gold)
-                : ($"Built from {basis} so the DLLs above compile. They are not copied to the folder.", muted));
-            foreach (var support in preview.SupportProjects) page.Add(4, (support.Assembly + ".dll", text), ("  " + support.Reason, muted));
+            page.Add(0, ($"ALREADY IN THE FOLDER ({preview.Existing.Count})", heading), ("  " + preview.Folder, muted));
+            foreach (var file in preview.Existing)
+            {
+                var notes = new List<string> { TidySizes.Format(file.Size), file.Origin };
+                if (planned.Contains(file.Name)) notes.Add("replaced by this build");
+                if (removable.Contains(file.Name, Files.Comparer) && (preview.Clean || canClean)) notes.Add(preview.Clean ? "removed first" : "C removes it first");
+                page.Add(2, (file.Name, text), ("  " + string.Join(", ", notes), muted));
+            }
+            if (preview.Clean)
+                page.Add(2, (removable.Count == 0 ? "Nothing is removed first: no file here is one Cultivate wrote that is unchanged." :
+                    $"Removed first: {string.Join(", ", removable)}. Every other file is kept.", gold));
+            else if (canClean)
+                page.Add(2, ($"C removes the {TicketWorkspaces.Count(removable.Count, "file")} Cultivate wrote here that nobody has changed since, then builds. " +
+                    "Every other file is kept.", muted));
+            else if (removable.Count == 0)
+                page.Add(2, ("Every file here is kept. Cultivate removes only files it wrote that nobody has changed since, and none are here.", muted));
         }
         if (preview.Warnings.Count != 0)
         {
