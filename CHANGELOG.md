@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.3.3 — 2026-11-23
+
 - Improvement: the result shown after **Build release files** now reads like the preview, so what was built is quick to check.
   Under each repository's pull request it lists what was written, grouped as DLLs, changed packages, frontend files and SQL
   scripts, with each file's size beside its name and "replaced" on a file that replaced one. The table of files, each
