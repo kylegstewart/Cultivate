@@ -5,6 +5,12 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Fix: building release files no longer fails when a project references another repository's DLL, such as `picktickets.dll` from
+  Warehouse--PickTickets, and the copy MyMeyer tracks in `bin` is too old for master's code. Cultivate still compiles against
+  master's own copy first; if the project does not compile, it tries once more with the newer DLL the project file names in your
+  checkout, and the result lists that DLL with a warning to make sure production has it. If that also fails, you see the first
+  failure, and `build.log` has both attempts.
+
 ## 1.3.2 — 2026-11-23
 
 - Improvement: the **Build release files** preview now shows only what is released, so it is quick to check. Under each
