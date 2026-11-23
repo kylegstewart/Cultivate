@@ -10,6 +10,11 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
   scripts, with each file's size beside its name and "replaced" on a file that replaced one. The table of files, each
   repository's own folder, the notes about uploading or releasing the files, and the routine note about pulling master are gone;
   a master that could not be pulled is still among the warnings.
+- Fix: building release files no longer fails when a project references another repository's DLL, such as `picktickets.dll` from
+  Warehouse--PickTickets, and the copy MyMeyer tracks in `bin` is too old for master's code. Cultivate still compiles against
+  master's own copy first; if the project does not compile, it tries once more with the newer DLL the project file names in your
+  checkout, and the result lists that DLL with a warning to make sure production has it. If that also fails, you see the first
+  failure, and `build.log` has both attempts.
 
 ## 1.3.2 — 2026-11-23
 

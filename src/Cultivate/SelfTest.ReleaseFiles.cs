@@ -536,7 +536,119 @@ internal static partial class SelfTest
             "a dev farm build compiles each project against its own copy of a same-named DLL, and a reference only an earlier project resolved " +
             "is used as a last resort, which build.log says");
 
-        await CheckReleasePull(new(settings, git, output, m28, Gh, (number, title, branch, merge, head) => Pull(number, title, branch, merge, head),
+        // PR 29, the release that failed in RGA: master tracks bin\Pick.dll 1.0.0, which lacks the two-argument Label master's Rga now calls, and
+        // Rga's HintPath names a sibling repository's local build beside the checkout, outside the snapshot.
+        async Task<string> Pick(string label, string version, string members)
+        {
+            var source = Path.Combine(root, "pick " + label);
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "Pick.csproj"), """
+                <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+                  <PropertyGroup>
+                    <OutputType>Library</OutputType><TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>
+                    <OutputPath>out\</OutputPath><AssemblyName>Pick</AssemblyName>
+                  </PropertyGroup>
+                  <ItemGroup><Compile Include="Value.cs" /><Reference Include="System" /></ItemGroup>
+                  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+                </Project>
+                """);
+            File.WriteAllText(Path.Combine(source, "Value.cs"), $"[assembly: System.Reflection.AssemblyVersion(\"{version}\")] public class PickLabels {{ {members} }}");
+            await Commands.Run(msbuild, [Path.Combine(source, "Pick.csproj"), "-nologo", "-t:Build", "-p:Configuration=Release", "-v:minimal"], source, safety);
+            return Path.Combine(source, "out", "Pick.dll");
+        }
+        const string oneLabel = "public static int Label(int a) => a;", twoLabels = oneLabel + " public static int Label(int a, int b) => a + b;";
+        var (pickTracked, pickNewer, pickOlder, pickSame) = (await Pick("tracked", "1.0.0.0", oneLabel), await Pick("newer", "2.0.0.0", twoLabels),
+            await Pick("older", "0.5.0.0", twoLabels), await Pick("same", "1.0.0.0", twoLabels));
+        var sibling = Path.Combine(root, "PickTickets", "bin", "Pick.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(sibling)!);
+        await A("checkout", "-q", "--detach", m28);
+        Directory.CreateDirectory(Path.Combine(author, "bin"));
+        File.Copy(pickTracked, Path.Combine(author, @"bin\Pick.dll"), true);
+        await A("add", "-f", "bin/Pick.dll");
+        var k0 = await Commit(null, "rga project",
+            (@"Rga\Rga.csproj", Uses("Rga", """<Reference Include="Pick"><HintPath>..\..\PickTickets\bin\Pick.dll</HintPath></Reference>""")),
+            (@"Rga\App.config", "<configuration />"), (@"Rga\Value.cs", "public class RgaValue { public static int Value => 0; }"));
+        async Task<string> Rga(string from, int number, string call)
+        {
+            var head = await Commit(from, $"pr{number}", (@"Rga\Value.cs", $"public class RgaValue {{ public static int Value => {call}; }}"));
+            await Publish(head, $"refs/pull/{number}/head");
+            var merged = await Squash(from, head, $"Rga labels (#{number})");
+            await Publish(merged, "refs/heads/master");
+            Pull(number, "Rga labels", "rga-" + number, merged, head);
+            return merged;
+        }
+        ReleaseOptions RgaOptions(string folder) => new(Folder: Path.Combine(output, folder), NoPull: true);
+        string RgaDll(string folder) => Path.Combine(output, folder, "MyMeyer", "Rga.dll");
+        const string rgaHint = @"..\..\PickTickets\bin\Pick.dll";
+        var alternateLine = $"Alternate for Pick.dll: {sibling} (2.0.0.0), newer than the snapshot's 1.0.0.0; tried only if Rga does not compile\n";
+        var retrying = "Rga did not compile against the snapshot's Pick.dll 1.0.0.0; trying your checkout's Pick.dll 2.0.0.0";
+        var m29 = await Rga(k0, 29, "PickLabels.Label(1, 2)");
+        File.Copy(pickNewer, sibling, true);
+        progress.Clear();
+        var p29 = await release.Preview(29, RgaOptions("rga"));
+        Check(p29.CanBuild && p29.OutsideReferences.Count == 0 && !p29.Warnings.Any(warning => warning.Contains("Pick.dll")),
+            "a release preview lists no outside reference or substitution warning for a reference whose tracked copy only the build can find too old");
+        var r29 = await release.Build(p29, progress.Add);
+        var rgaLog = File.ReadAllText(Path.Combine(r29.RunDirectory, "build.log"));
+        var substituted = $@"Rga did not compile against master's tracked bin\Pick.dll (1.0.0.0), so it was compiled against {sibling} (2.0.0.0, modified " +
+            $"{File.GetLastWriteTime(sibling):yyyy-MM-dd HH:mm}), the file its project names. Cultivate cannot verify that file; make sure production has a Pick.dll at least that new.";
+        Check(File.Exists(RgaDll("rga")) && References(RgaDll("rga"))["Pick"] == "2.0.0.0" &&
+            r29.OutsideReferences.Single() is { Name: "Pick.dll", Version: "2.0.0.0", Project: @"Rga\Rga.csproj", Path: var pickPath } && Files.Comparer.Equals(pickPath, sibling) &&
+            r29.Warnings.Contains(substituted),
+            "a release project that does not compile against master's tracked copy of another repository's DLL is compiled again against the newer file " +
+            "its HintPath names outside the snapshot, which the result lists as an outside reference with a warning naming the path and both versions");
+        Check(rgaLog.Contains($"Reference Pick.dll: {Path.Combine(r29.RunDirectory, "source", "bin", "Pick.dll")}\n") && rgaLog.Contains(alternateLine) &&
+            rgaLog.IndexOf("error CS1501", StringComparison.Ordinal) is var firstError and >= 0 &&
+            rgaLog.IndexOf($"{retrying}: {sibling}\n", StringComparison.Ordinal) > firstError && rgaLog.Contains("Rga compiled on the second attempt") &&
+            File.Exists(Path.Combine(r29.RunDirectory, "Rga.binlog")) && File.Exists(Path.Combine(r29.RunDirectory, "Rga.retry.binlog")) && progress.Contains(retrying),
+            "build.log records the alternate before building, then the first compile's error, then the retry, and the progress reports the retry");
+        var json = JsonSerializer.Deserialize<ReleaseRun>(JsonSerializer.Serialize(ReleaseRun.Single(r29), Files.Json), Files.Json)?.Releases.Single();
+        Check(json is not null && json.Warnings.Contains(substituted) && json.OutsideReferences.Single() is { Name: "Pick.dll", Version: "2.0.0.0" },
+            "the substitution warning and the outside reference reach the release command's JSON");
+
+        // PR 34 compiles against master's tracked copy, so the newer sibling build is recorded and never used.
+        var m34 = await Rga(m29, 34, "PickLabels.Label(3)");
+        var r34 = await release.Build(await release.Preview(34, RgaOptions("rga-tracked")), _ => { });
+        var trackedLog = File.ReadAllText(Path.Combine(r34.RunDirectory, "build.log"));
+        Check(References(RgaDll("rga-tracked"))["Pick"] == "1.0.0.0" && r34.OutsideReferences.Count == 0 && !r34.Warnings.Any(warning => warning.Contains("Pick.dll")) &&
+            trackedLog.Contains(alternateLine) && !trackedLog.Contains("did not compile against") && !File.Exists(Path.Combine(r34.RunDirectory, "Rga.retry.binlog")),
+            "a release project that compiles against master's tracked copy is built once against it, with no outside reference or warning for the newer sibling build");
+
+        // PR 35 needs the overload, but the sibling build is older, then the same version: neither is tried.
+        var m35 = await Rga(m34, 35, "PickLabels.Label(5, 6)");
+        async Task<FailureReport?> Fails(int number, string folder)
+        {
+            try { await release.Build(await release.Preview(number, RgaOptions(folder)), _ => { }); }
+            catch (InvalidOperationException exception) { return Diagnostics.Describe(exception); }
+            return null;
+        }
+        foreach (var (build, version) in new[] { (pickOlder, "0.5.0.0"), (pickSame, "1.0.0.0") })
+        {
+            File.Copy(build, sibling, true);
+            var report = await Fails(35, "rga-" + version);
+            var log = report?.Context.Log is { } path && File.Exists(path) ? File.ReadAllText(path) : "";
+            Check(report is { Context.Retry: null } && report.Errors.Any(error => error.Contains("CS1501") && error.Contains("2 arguments")) &&
+                log.Contains($"Found {sibling} ({version}), the file Rga's HintPath {rgaHint} names, but it is not newer than the snapshot's 1.0.0.0, so it is not used\n") &&
+                !log.Contains("Alternate for") && !log.Contains("did not compile against") && !log.Contains("Rga.retry.binlog") &&
+                !Directory.Exists(Path.Combine(output, "rga-" + version)),
+                $"a sibling build {(version == "1.0.0.0" ? "of the same version as" : "older than")} master's tracked copy is never tried: the release fails once " +
+                "as before, and build.log says the file was found and not used");
+        }
+
+        // PR 36 does not compile against either copy: the failure reported is the first compile's.
+        var m36 = await Rga(m35, 36, "PickLabels.Label(1, 2) + PickLabels.Missing");
+        File.Copy(pickNewer, sibling, true);
+        var both = await Fails(36, "rga-both");
+        var bothLog = both?.Context.Log is { } bothPath && File.Exists(bothPath) ? File.ReadAllText(bothPath) : "";
+        var secondFailed = $"A second attempt against {sibling} (2.0.0.0), the newer file its project names, also failed; build.log has both attempts.";
+        Check(both is { Context.Project: @"Rga\Rga.csproj", Context.BinaryLog: var firstLog } && Path.GetFileName(firstLog) == "Rga.binlog" &&
+            both.Summary.EndsWith(" " + secondFailed, StringComparison.Ordinal) && both.Text.Contains(secondFailed) &&
+            both.Errors.Any(error => error.Contains("CS1501") && error.Contains("2 arguments")) && bothLog.Contains($"{retrying}: {sibling}\n") &&
+            bothLog.Contains("Rga.retry.binlog") && !Directory.Exists(Path.Combine(output, "rga-both")),
+            "when the retry against the newer file fails too, the report is the first compile's, with its compiler errors and a sentence saying the second " +
+            "attempt failed and build.log has both, and nothing is written");
+
+        await CheckReleasePull(new(settings, git, output, m36, Gh, (number, title, branch, merge, head) => Pull(number, title, branch, merge, head),
             (from, message, files) => Commit(from, message, files), Publish, Squash, Untouched, before), root, Refs);
     }
 

@@ -72,12 +72,24 @@ internal sealed record OutsideReference(string Name, string Path, string? Versio
         new(System.IO.Path.GetFileName(path), path, Pipeline.VersionOf(path), File.GetLastWriteTime(path), project);
 }
 
+/// <summary>
+/// A reference a release project compiled against only because it did not compile against the snapshot's copy: the newer file its HintPath names
+/// in the developer's checkout. <see cref="Borrowed"/> is the project whose snapshot copy it replaced, or null for the tracked <c>bin</c> copy.
+/// </summary>
+internal sealed record SubstitutedReference(string Project, string Name, string Path, string Version, DateTime LastWriteTime, string Replaced, string? Borrowed);
+
 /// <summary>What a release adds to <see cref="Pipeline.Build"/>: the build order including support projects, and the outside references it used.</summary>
 internal sealed class SupportBuild(List<ProjectInfo> order)
 {
     /// <summary>Every project to build, dependencies first: the plan's projects and the unchanged projects they compile against.</summary>
     public List<ProjectInfo> Order { get; } = order;
+    /// <summary>Each reference taken from outside the snapshot, including every <see cref="Substituted"/> one.</summary>
     public List<OutsideReference> Outside { get; } = [];
+    /// <summary>
+    /// For MyMeyer: each snapshot copy of a reference a project did not compile against, replaced on the one retry by the newer file its HintPath
+    /// names in the developer's checkout. Snapshot copies are always tried first.
+    /// </summary>
+    public List<SubstitutedReference> Substituted { get; } = [];
     /// <summary>
     /// False for a repository other than the MyMeyer checkout: outputs are captured after Build instead of after the webfarm copy target,
     /// references are resolved as MSBuild does in the developer's checkout (HintPath, then the output folder) instead of from MyMeyer's root bin,
