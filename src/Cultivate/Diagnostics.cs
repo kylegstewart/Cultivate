@@ -23,6 +23,8 @@ internal sealed record FailureContext(string Stage)
     /// <summary>Every path to exclude to deploy the rest of the plan without the failed project: the plan's exclusions plus the
     /// changed compiled files that project owns. Null when leaving it out cannot work or leaves nothing to deploy.</summary>
     public IReadOnlyList<string>? SkipExclusions { get; init; }
+    /// <summary>For a compile retried against newer references: that the second attempt failed too. The report stays the first attempt's.</summary>
+    public string? Retry { get; init; }
 }
 
 /// <summary>A located compiler error, with its file as the report shows it, and whether the deployed version added or changed that line.</summary>
@@ -82,7 +84,8 @@ internal static class Diagnostics
                 RunDirectory = detail.RunDirectory ?? context.RunDirectory, Tool = detail.Tool ?? context.Tool,
                 ExitCode = detail.ExitCode ?? context.ExitCode, Log = detail.Log ?? context.Log,
                 BinaryLog = detail.BinaryLog ?? context.BinaryLog, Origins = detail.Origins ?? context.Origins,
-                BaseBranch = detail.BaseBranch ?? context.BaseBranch, SkipExclusions = detail.SkipExclusions ?? context.SkipExclusions
+                BaseBranch = detail.BaseBranch ?? context.BaseBranch, SkipExclusions = detail.SkipExclusions ?? context.SkipExclusions,
+                Retry = detail.Retry ?? context.Retry
             };
         exception.Data[ContextKey] = context;
         return exception;
@@ -162,6 +165,7 @@ internal static class Diagnostics
             .OfType<string>().Where(File.Exists).Distinct(Files.Comparer).ToList();
         var summary = context.ExitCode is { } exit && exit != 0 ? $"{Path.GetFileName(context.Tool ?? "Command")} exited with code {exit}." :
             Shorten(lines.FirstOrDefault() ?? exception.GetType().Name, 400);
+        if (context.Retry is { } retry) summary += " " + retry;
         return new($"{context.Stage.ToUpperInvariant()} FAILED", summary, diagnosis, context, errors, hints, logs)
         {
             LoggingError = context.LoggingError, Origins = origins, Unchanged = unchanged

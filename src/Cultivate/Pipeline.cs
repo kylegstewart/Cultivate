@@ -182,7 +182,9 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
     }
 
     /// <param name="support">For a release: every project to build in dependency order, including the unchanged projects the plan's projects
-    /// compile against, and a list that records each reference taken from outside the snapshot. Null builds only the plan's projects.</param>
+    /// compile against, and a list that records each reference taken from outside the snapshot. A project of MyMeyer's release that does not
+    /// compile against a snapshot copy is built once more against the newer files its HintPaths name in the developer's checkout, if any; a
+    /// second failure reports the first. Null builds only the plan's projects.</param>
     internal async Task<List<DeployFile>> Build(Plan plan, string snapshot, string run, Action<string> progress, SupportBuild? support = null)
     {
         var context = new FailureContext("Reference preparation");
@@ -279,7 +281,49 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     $"-bl:{Path.Combine(run, project.Assembly + ".binlog")}"
                 };
                 var started = DateTime.UtcNow;
-                await Commands.Run(settings.MSBuild, arguments, snapshot, environment, Path.Combine(run, "build.log"), context);
+                try { await Commands.Run(settings.MSBuild, arguments, snapshot, environment, Path.Combine(run, "build.log"), context); }
+                catch (InvalidOperationException failure) when (support is not null && Diagnostics.Describe(failure).Context.ExitCode is not (null or 0) &&
+                    ledger.Alternates.GetValueOrDefault(project) is { Count: > 0 } alternates)
+                {
+                    var buildLog = Path.Combine(run, "build.log");
+                    var retrying = $"{project.Assembly} did not compile against " + string.Join(", ", alternates.Select(alternate =>
+                        $"{(alternate.Borrowed is null ? "the snapshot's" : alternate.Borrowed + "'s copy of")} {alternate.Name} {alternate.Replaced}")) +
+                        "; trying your checkout's " + string.Join(", ", alternates.Select(alternate => $"{alternate.Name} {alternate.Version}"));
+                    progress(retrying);
+                    File.AppendAllText(buildLog, $"\n{retrying}: {string.Join("; ", alternates.Select(alternate => alternate.Path))}\n");
+                    // The failed build stopped before copying references to the output folder, and this project's own reference folder comes
+                    // first in ReferencePath, so replacing the copies there is what the second build compiles against.
+                    var resolutions = ledger.Resolved[project];
+                    foreach (var alternate in alternates)
+                    {
+                        var copy = resolutions[alternate.Name].Copy;
+                        File.Copy(alternate.Path, copy, true);
+                        // A copy keeps its source's time, which MSBuild's reference cache from the failed build may already hold for the old file.
+                        File.SetLastWriteTimeUtc(copy, DateTime.UtcNow);
+                        resolutions[alternate.Name] = resolutions[alternate.Name] with { Source = alternate.Path, Hash = Files.Hash(copy), FromSnapshot = false, Outside = true };
+                    }
+                    var retryLog = Path.Combine(run, project.Assembly + ".retry.binlog");
+                    arguments[^1] = $"-bl:{retryLog}";
+                    started = DateTime.UtcNow;
+                    try { await Commands.Run(settings.MSBuild, arguments, snapshot, environment, buildLog, context with { BinaryLog = retryLog }); }
+                    catch (InvalidOperationException second) when (Diagnostics.Describe(second).Context.ExitCode is not (null or 0))
+                    {
+                        // The first attempt compiled against references a release can verify, so its errors are the ones to fix.
+                        Diagnostics.Attach(failure, context with
+                        {
+                            Retry = "A second attempt against " + string.Join(", ", alternates.Select(alternate => $"{alternate.Path} ({alternate.Version})")) +
+                                $", the newer {(alternates.Count == 1 ? "file" : "files")} its project names, also failed; build.log has both attempts."
+                        });
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failure);
+                    }
+                    File.AppendAllText(buildLog, $"{project.Assembly} compiled on the second attempt, against {string.Join("; ", alternates.Select(alternate => alternate.Path))}\n");
+                    foreach (var alternate in alternates)
+                    {
+                        support.Outside.Add(OutsideReference.Of(alternate.Path, project.RelativePath));
+                        support.Substituted.Add(new(project.Assembly, alternate.Name, alternate.Path, alternate.Version, File.GetLastWriteTime(alternate.Path),
+                            alternate.Replaced, alternate.Borrowed));
+                    }
+                }
                 context = context with { Stage = "Artifact verification" };
                 if (!File.Exists(targetPath)) throw new FileNotFoundException("Build succeeded without its expected assembly.", targetPath);
                 var identity = AssemblyName.GetAssemblyName(targetPath);
@@ -329,12 +373,18 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
         }
     }
 
-    /// <summary>A reference DLL a project compiles against, as <see cref="Prepare"/> resolved it.</summary>
+    /// <summary>A reference DLL a project compiles against, as <see cref="Prepare"/> resolved it, or as <see cref="Build"/>'s one retry replaced it
+    /// with its <see cref="Alternate"/>.</summary>
     /// <param name="Source">Where it was found; this is what <c>build.log</c> and the outside references name.</param>
     /// <param name="Copy">The same file where no later build overwrites it: the project's own reference folder, or the package.</param>
     /// <param name="FromSnapshot">The snapshot's own copy (see <see cref="Ledger.FromSnapshot"/>). Only a release tells.</param>
     /// <param name="Outside">Taken from outside the snapshot.</param>
     private sealed record Resolution(ProjectInfo Project, string Name, string Source, string Copy, string Hash, bool FromSnapshot, bool Outside);
+
+    /// <summary>For a release of MyMeyer: the newer file a HintPath names in the developer's checkout, which replaces the snapshot copy
+    /// <see cref="Prepare"/> chose (<see cref="Replaced"/>, its version) only if the project does not compile against that copy.</summary>
+    /// <param name="Borrowed">The project whose snapshot copy was chosen, or null for the tracked <c>bin</c> copy.</param>
+    private sealed record Alternate(string Name, string Path, string Version, string Replaced, string? Borrowed);
 
     /// <summary>What one build knows about the references its projects compile against.</summary>
     /// <param name="pristine">For a release: see <see cref="Pristine"/>. Null for the dev farm, which keeps its lookups.</param>
@@ -346,6 +396,8 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
 
         /// <summary>Each prepared project's resolved references by file name, including the HintPaths found where they point.</summary>
         public Dictionary<ProjectInfo, Dictionary<string, Resolution>> Resolved { get; } = [];
+        /// <summary>For a release of MyMeyer: each project's references to retry with, should it not compile.</summary>
+        public Dictionary<ProjectInfo, List<Alternate>> Alternates { get; } = [];
         public bool Release => pristine is not null;
 
         /// <summary>A file Git tracks in the snapshot, unchanged since the snapshot was taken.</summary>
@@ -430,7 +482,9 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
 
     /// <param name="own">This project's reference folder, which only its own build searches.</param>
     /// <param name="ledger">What earlier projects in this build resolved. For a release it also tells the snapshot's own files from copies of
-    /// outside DLLs, so the tracked bin and the projects this one depends on are tried before the developer's checkout.</param>
+    /// outside DLLs, so the tracked bin and the projects this one depends on are tried before the developer's checkout. When one of those is
+    /// chosen for a HintPath the snapshot lacks, a newer file the HintPath names from the developer's project folder is recorded in
+    /// <see cref="Ledger.Alternates"/>, which <see cref="Build"/> compiles against only if the project does not compile against the snapshot's.</param>
     /// <param name="outside">For a release: records each reference taken from outside the snapshot. Null for the dev farm.</param>
     /// <param name="main">False for a release of another repository, resolved as MSBuild does in the developer's checkout and never more
     /// strictly: the HintPath in the snapshot, the HintPath from the developer's project folder, then the output folder (the snapshot's tracked
@@ -492,6 +546,7 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
             bool Usable(string path) => File.Exists(path) && (!package || declared is not null && VersionOf(path) == declared);
             string? source;
             Resolution? borrowed = null;
+            string? alternate = null;
             var (dependency, lastResort) = (false, false);
             if (main)
             {
@@ -512,6 +567,11 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                 // A last resort only: the copy an earlier project in this build resolved, which one shared reference folder used to supply.
                 lastResort = source is null && borrowed is null && earlier.Count != 0;
                 if (lastResort) (borrowed, dependency) = earlier[0];
+                // Master's code can need a newer build of another repository's DLL than master tracks, so the file the HintPath names is kept to
+                // retry with when it is newer; it is as often an older local build.
+                if (ledger.Release && !package && (borrowed is null ? source is not null && Files.Comparer.Equals(source, snapshotBin) &&
+                    !Files.Comparer.Equals(desired, snapshotBin) : !lastResort && borrowed.FromSnapshot))
+                    alternate = fallbacks.Take(2).FirstOrDefault(File.Exists);
             }
             else
             {
@@ -569,6 +629,17 @@ internal sealed class Pipeline(Settings settings, GitRepository git, Bridge brid
                     (dependency ? $"{project.Assembly} depends on {borrowed.Project.Assembly}, which" : $"{borrowed.Project.Assembly}, built earlier in this release,") +
                     " resolved this copy from the snapshot, so it is used instead of a DLL from outside the snapshot)\n");
             if (isOutside) outside?.Add(OutsideReference.Of(origin, project.RelativePath));
+            if (alternate is null || Files.Hash(alternate) == hash) continue;
+            var (newer, current) = (VersionOf(alternate), VersionOf(from));
+            var whose = borrowed is null ? "the snapshot's" : $"{borrowed.Project.Assembly}'s copy";
+            if (Version.TryParse(newer, out var alternateVersion) && Version.TryParse(current, out var currentVersion) && alternateVersion > currentVersion)
+            {
+                if (!ledger.Alternates.TryGetValue(project, out var alternates)) ledger.Alternates[project] = alternates = [];
+                if (!alternates.Any(known => Files.Comparer.Equals(known.Name, name))) alternates.Add(new(name, alternate, newer!, current!, borrowed?.Project.Assembly));
+                File.AppendAllText(log, $"Alternate for {name}: {alternate} ({newer}), newer than {whose} {current}; tried only if {project.Assembly} does not compile\n");
+            }
+            else File.AppendAllText(log, $"Found {alternate} ({newer ?? "no readable version"}), the file {project.Assembly}'s HintPath {hint} names, but it is not " +
+                $"newer than {whose} {current ?? "(no readable version)"}, so it is not used\n");
         }
     }
 

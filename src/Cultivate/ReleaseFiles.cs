@@ -213,6 +213,10 @@ internal sealed partial class ReleaseFiles(Settings settings, GitRepository git,
                 var outputs = await new Pipeline(settings, git, new Bridge(settings)).Build(work.Plan, snapshot, run, progress, support);
                 result.OutsideReferences.AddRange(support.Outside.GroupBy(reference => reference.Path, Files.Comparer).Select(group =>
                     group.First() with { Project = string.Join(", ", group.Select(reference => reference.Project).Distinct(Files.Comparer)) }));
+                result.Warnings.AddRange(support.Substituted.Select(reference => $"{reference.Project} did not compile against " +
+                    (reference.Borrowed is null ? $@"{request.BaseBranch}'s tracked bin\{reference.Name}" : $"{reference.Borrowed}'s copy of {reference.Name}") +
+                    $" ({reference.Replaced}), so it was compiled against {reference.Path} ({reference.Version}, modified {reference.LastWriteTime:yyyy-MM-dd HH:mm}), " +
+                    $"the file its project names. Cultivate cannot verify that file; make sure production has a {reference.Name} at least that new."));
                 if (support.Unresolved.Count != 0)
                     result.Warnings.Add($"Cultivate found {TicketWorkspaces.Count(support.Unresolved.Count, "reference")} nowhere and left " +
                         $"{(support.Unresolved.Count == 1 ? "it" : "them")} to MSBuild, as Visual Studio does: {string.Join("; ", support.Unresolved)}. The build fails " +

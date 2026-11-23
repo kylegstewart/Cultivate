@@ -134,7 +134,7 @@ internal sealed class ReleaseRunner(Settings settings, GitRepository git, Func<s
             catch (Exception exception) when (!single && Failed(exception))
             {
                 var report = Diagnostics.Record(exception, "Release build");
-                release.Failure = $"{report.Label}: {exception.Message.Trim()}" + (report.Logs.FirstOrDefault() is { } log ? $" Full report: {log}" : "");
+                release.Failure = $"{report.Label}: {exception.Message.Trim()}" + (report.Context.Retry is { } retry ? $"\n{retry}" : "") + (report.Logs.FirstOrDefault() is { } log ? $" Full report: {log}" : "");
                 release.Exception = exception;
                 if (exception.Data[ReleaseFiles.PulledKey] is ReleasePull pulled) release.Pull = pulled;
                 run.Releases.Add(release);

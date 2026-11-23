@@ -52,6 +52,7 @@ internal static partial class SelfTest
         CheckReleasePicker();
         CheckReleasePreview();
         CheckReleaseProgress();
+        CheckReleaseResult();
     }
 
     private static void CheckReleasePicker()
@@ -329,24 +330,136 @@ internal static partial class SelfTest
         var release = Diagnostics.Attach(new InvalidOperationException("MSBuild failed."), new FailureContext("Build") { Project = @"Page\Page.csproj" });
         Check(ReleaseScreen.FailedSupport(preview, support)?.Assembly == "Core" && ReleaseScreen.FailedSupport(preview, release) is null &&
             ReleaseScreen.FailedSupport(preview, new IOException("disk full")) is null, "only a failure in a support project counts as a dependency failure");
+    }
+
+    /// <summary>The card after building: under each pull request its files grouped by kind with their sizes in one column, for one repository and several.</summary>
+    private static void CheckReleaseResult()
+    {
+        static string Flat(string text) => Regex.Replace(text, @"\s+", " ");
+        // The card's lines inside its border, without the padding or trailing spaces.
+        static List<string> Lines(string captured) => [.. captured.Split('\n')[1..^1].Select(line => line[2..^1].TrimEnd())];
+        static bool Spaced(List<string> lines) => lines.Count != 0 && lines[^1].Length != 0 && !lines.Zip(lines.Skip(1)).Any(pair => pair.First.Length == 0 && pair.Second.Length == 0);
+        // The column each file row's size ends at.
+        static List<int> SizeEnds(List<string> lines) =>
+            [.. lines.Select(line => Regex.Match(line, @"^  \S+ +\d+ [KMG]?B(?=  |$)")).Where(match => match.Success).Select(match => match.Length)];
+        string[] gone = ["Wrote ", "One subfolder per repository", "Upload every file", "Release these scripts through the database process", "Pulled master", "KIND",
+            "VERSION", " new", "Project DLL", "Frontend file", "Also in the folder and kept"];
 
         var built = ReleasePreviewFixture();
         built.Written = true;
         built.Seconds = 42;
         built.Files.AddRange([new("Page.dll", ReleaseKind.ProjectDll, @"Page\Page.csproj", 5120, "hash", "1.0.0.0", true),
             new("View.ascx", ReleaseKind.Content, @"Page\View.ascx", 7, "hash", null, false)]);
+        built.Existing.RemoveAll(file => file.Name == "Page.dll");
         built.OutsideReferences.Add(new("Helpers.dll", @"C:\fixture\checkout\bin\Helpers.dll", "1.0.0.0", new DateTime(2026, 11, 1, 9, 0, 0), @"Page\Page.csproj"));
         built.Pull = built.Pull! with { After = "2bc2fa7" + new string('2', 33), Outcome = ReleasePullOutcome.Pulled,
             Detail = @"Pulled master: 7 new commit(s), 4044096 → 2bc2fa7 (C:\fixture\MyMeyer)" };
-        var card = Regex.Replace(Capture(ReleaseScreen.ResultCard(built, true), 120, 40), @"\s+", " ");
-        Check(card.Contains("RELEASE FILES READY") && card.Contains("Wrote 2 files for PR #21: 27220 Stop Pay Removed") && card.Contains(@"C:\fixture\Documents\27220") &&
-            card.Contains($"Page.dll Project DLL {TidySizes.Format(5120)} 1.0.0.0 replaced") && card.Contains($"View.ascx Frontend file {TidySizes.Format(7)} new") &&
-            card.Contains(@"Helpers.dll 1.0.0.0 C:\fixture\checkout\bin\Helpers.dll, modified 2026-11-01 09:00") && card.Contains("! Page/Again.css changed again on master") &&
-            card.Contains("Also in the folder and kept: notes.txt (Not written by Cultivate)") && card.Contains("Esc came after writing had started"),
-            "the result lists each file with its kind, size, version and whether it replaced one, outside references, and every warning again");
-        using var ansi = new StringWriter();
-        LiveConsole(ansi).Write(ReleaseScreen.ResultCard(built));
-        Check(ansi.ToString().Contains("\u001b]8;") && ansi.ToString().Contains("file:///C:/fixture/Documents/27220"), "the result links the release folder as a file: address");
+        var captured = Capture(ReleaseScreen.ResultCard(built, true), 120, 40);
+        var lines = Lines(captured);
+        Check(captured.Contains("RELEASE FILES READY") && lines.SequenceEqual([
+                "2 files written  in 42 s", @"C:\fixture\Documents\27220", "", "PR #21: 27220 Stop Pay Removed",
+                "DLLS (1)", "  Page.dll   5 KB  replaced", "FRONTEND FILES (1)", "  View.ascx   7 B",
+                "ALSO IN THE FOLDER (1)  kept, not written by this build", "  notes.txt  Not written by Cultivate",
+                "COMPILED AGAINST FILES FROM OUTSIDE MASTER (1)", @"  Helpers.dll 1.0.0.0  C:\fixture\checkout\bin\Helpers.dll, modified 2026-11-01 09:00, for Page\Page.csproj",
+                "WARNINGS (1)", "  ! Page/Again.css changed again on master after the merge (a1a1a1a); master's version is used.",
+                "Esc came after writing had started, so the build finished."]),
+            "one repository's result gives the files written and the time, its folder and pull request, its DLLs and frontend files with their sizes and " +
+            "which replaced a file, then the files kept, the outside references and the warnings");
+        Check(!gone.Any(captured.Contains) && !captured.Contains("REMOVED FIRST") && !captured.Contains("CHANGED PACKAGES") && !captured.Contains("OTHER FILES") && Spaced(lines),
+            "the result has no table, file kinds, 'new', upload note, routine pull or empty group, and no doubled or trailing blank line");
+        using (var ansi = new StringWriter())
+        {
+            LiveConsole(ansi).Write(ReleaseScreen.ResultCard(built));
+            Check(ansi.ToString().Contains("\u001b]8;") && ansi.ToString().Contains("file:///C:/fixture/Documents/27220"), "the result links the release folder as a file: address");
+        }
+
+        var more = ReleasePreviewFixture();
+        more.Written = true;
+        more.Warnings.Clear();
+        more.Existing.Clear();
+        more.Removed.Add("Old.dll");
+        more.Files.AddRange([new("Page.dll", ReleaseKind.ProjectDll, @"Page\Page.csproj", 5120, "hash", "1.0.0.0", false),
+            new("CultivateReleasePackage.dll", ReleaseKind.Package, @"..\packages\CultivateReleasePackage.dll", 2048, "hash", "2.0.0.0", true),
+            new("Layout.rdl", "Report", @"Reports\Layout.rdl", 3072, "hash", null, false)]);
+        var moreLines = Lines(Capture(ReleaseScreen.ResultCard(more), 120, 40));
+        var moreCard = Flat(string.Join(" ", moreLines));
+        Check(moreCard.Contains("PR #21: 27220 Stop Pay Removed DLLS (1) Page.dll 5 KB CHANGED PACKAGES (1) CultivateReleasePackage.dll 2 KB replaced 2.0.0.0 " +
+                "OTHER FILES (1) Layout.rdl 3 KB REMOVED FIRST (1) Old.dll") && moreLines[^1] == "  Old.dll" && !moreCard.Contains("1.0.0.0"),
+            "a changed package shows its version and a project DLL does not, a file of any other kind is still listed, and the files removed first follow");
+        Check(!new[] { "ALSO IN THE FOLDER", "COMPILED AGAINST", "WARNINGS", "NOT BUILT", "Esc came" }.Any(moreCard.Contains) && Spaced(moreLines),
+            "the files kept, outside references, warnings and links not built appear only when there are some");
+
+        foreach (var (outcome, detail) in new[] { (ReleasePullOutcome.LocalCommits, "Did not pull master: it has 2 local commit(s) not on origin."),
+            (ReleasePullOutcome.NotUpdated, @"Did not pull master: it would overwrite local files in C:\fixture\MyMeyer.") })
+        {
+            var held = ReleasePreviewFixture();
+            held.Written = true;
+            held.Pull = held.Pull! with { Outcome = outcome, Detail = detail };
+            held.Warnings.Add(@"Your local master in C:\fixture\MyMeyer was not updated to origin's 2bc2fa7. The release files were still built from origin's 2bc2fa7; pull master by hand.");
+            var heldCard = Flat(string.Join(" ", Lines(Capture(ReleaseScreen.ResultCard(held), 120, 40))));
+            Check(heldCard.Contains("WARNINGS (2) ! Page/Again.css changed again on master after the merge (a1a1a1a); master's version is used. ! " + held.Warnings[1]) &&
+                !heldCard.Contains("Did not pull"), $"a pull that {(outcome == ReleasePullOutcome.LocalCommits ? "finds local commits" : "cannot update master")} " +
+                "is told by the build's warning, not by a line of its own");
+        }
+
+        var nothing = ReleasePreviewFixture();
+        nothing.Written = true;
+        nothing.Warnings.Clear();
+        nothing.Existing.Clear();
+        Check(Lines(Capture(ReleaseScreen.ResultCard(nothing), 120, 40)).SequenceEqual(
+                ["0 files written  in 0 s", @"C:\fixture\Documents\27220", "", "PR #21: 27220 Stop Pay Removed", "Nothing needed releasing."]),
+            "a release that wrote nothing says nothing needed releasing under its pull request");
+
+        static ReleaseResult Release(string subfolder, int number, string title, bool written, params ReleaseFile[] files)
+        {
+            var release = new ReleaseResult
+            {
+                PullRequest = ReleasePreviewFixture().PullRequest with { Number = number, Title = title }, Subfolder = subfolder, BaseBranch = "master",
+                Folder = @"C:\fixture\Documents\27220\" + subfolder, Written = written
+            };
+            release.Files.AddRange(files);
+            return release;
+        }
+        const string longest = "SupersedeClassIDMatrixPriceLevelAdjustmentQueueItems.sql";
+        var run = new ReleaseRun
+        {
+            Folder = @"C:\fixture\Documents\27220", Seconds = 54,
+            Releases =
+            [
+                Release("MyMeyer", 21, "27220 Stop Pay Removed", true, new("CustomerMatrix.dll", ReleaseKind.ProjectDll, @"CustomerMatrix\CustomerMatrix.csproj", 58 * 1024, "hash",
+                    "1.0.0.0", false), new("ClassIDMatrix.ascx", ReleaseKind.Content, @"CustomerMatrix\ClassIDMatrix.ascx", 15 * 1024, "hash", null, false)),
+                Release("SQL", 5323, "27220 Extend the matrix queue", true, new(longest, ReleaseKind.Sql, @"MeyerLogic\" + longest, 2048, "hash", null, false),
+                    new("Queue.sql", ReleaseKind.Sql, @"MeyerLogic\Queue.sql", 1024, "hash", null, true)),
+                Release("Shop", 30, "27220 Shop totals", false)
+            ],
+            Skipped = [new("https://github.com/fixture/Reports/pull/40", "Reports", 40, "Reports pull request #40 is closed without being merged.")]
+        };
+        run.Releases[2].Failure = "Build: error CS0029: Cannot implicitly convert type 'int' to 'string'.";
+        run.Releases[2].Pull = new("master", null, "", "", 0, ReleasePullOutcome.NotUpdated, "Did not pull master: its files were not built.");
+        var severalCaptured = Capture(ReleaseScreen.ResultCard(run), 120, 60);
+        var several = Lines(severalCaptured);
+        static string Row(string name, string rest) => $"  {name.PadRight(longest.Length)}  {rest}";
+        Check(severalCaptured.Contains("RELEASE FILES PARTLY WRITTEN") && several.SequenceEqual([
+                "4 files written  in 54 s", @"C:\fixture\Documents\27220", "",
+                "━━ MYMEYER  2 files", "PR #21: 27220 Stop Pay Removed", "DLLS (1)", Row("CustomerMatrix.dll", "58 KB"), "FRONTEND FILES (1)", Row("ClassIDMatrix.ascx", "15 KB"), "",
+                "━━ SQL  2 files", "PR #5323: 27220 Extend the matrix queue", "SQL SCRIPTS (2)", Row(longest, " 2 KB"), Row("Queue.sql", " 1 KB  replaced"), "",
+                "━━ SHOP  not written", "PR #30: 27220 Shop totals", "Build: error CS0029: Cannot implicitly convert type 'int' to 'string'.",
+                "Did not pull master: its files were not built.", "",
+                "LINKED PULL REQUESTS NOT BUILT (1)", "  Reports #40  Reports pull request #40 is closed without being merged."]),
+            "several repositories' result gives the files written, the ticket folder, then each repository under its name with its file count or 'not written' " +
+            "and its failure, with a master that could not be pulled, then the linked pull requests not built");
+        Check(several.Count(line => line.Contains(@"C:\fixture\Documents\27220")) == 1 && !gone.Any(severalCaptured.Contains) &&
+            Spaced(several), "several repositories' result names the ticket folder once, with no folder or note per repository and no doubled or trailing blank line");
+        run.Releases[2].Pull = run.Releases[2].Pull! with { Outcome = ReleasePullOutcome.Pulled, Detail = "Pulled master: 2 new commit(s)." };
+        Check(!Capture(ReleaseScreen.ResultCard(run), 120, 60).Contains("Pulled master"), "a repository that was not written says nothing of a routine pull");
+        run.Releases[2].Pull = run.Releases[2].Pull! with { Outcome = ReleasePullOutcome.NotUpdated, Detail = "Did not pull master: its files were not built." };
+        var ends = SizeEnds(several);
+        var wide = SizeEnds(Lines(Capture(ReleaseScreen.ResultCard(run), 200, 60)));
+        Check(ends.Count == 4 && ends.All(end => end == 2 + longest.Length + 2 + "58 KB".Length) && wide.SequenceEqual(ends),
+            "file sizes end in one column across every repository, two spaces after the card's longest file name, and a 200-column console does not stretch it");
+        var narrow = Capture(ReleaseScreen.ResultCard(run), 50, 80);
+        Check(narrow.Split('\n').All(line => line.Length <= 50) && Regex.Replace(narrow, @"[\s│╭╮╰╯─]+", "").Contains(longest) &&
+            !narrow.Split('\n').Any(line => line.Contains(longest)), "on a console narrower than a row, the row wraps and keeps the whole file name");
     }
 
     /// <summary>
@@ -424,7 +537,7 @@ internal static partial class SelfTest
             shown.Contains("ALREADY IN THE FOLDER (") && shown.Contains("C removes it first"),
             "the screen lists merged pull requests, then previews the chosen one's DLL with the other merged changes it carries, and the files already in its folder");
         Check(Listing(files20).SequenceEqual(["Page.dll", "View.ascx"], Files.Comparer) && File.GetLastWriteTimeUtc(Path.Combine(files20, "Page.dll")) > writtenBefore &&
-            shown.Contains("Building Page (3/3, release file)") && shown.Contains("RELEASE FILES READY") && shown.Contains("Project DLL") && shown.Contains("replaced"),
+            shown.Contains("Building Page (3/3, release file)") && shown.Contains("RELEASE FILES READY") && shown.Contains("DLLS (1) Page.dll") && shown.Contains("replaced"),
             "building from the screen shows live progress and writes the release folder, and the result lists the files it replaced");
         Check(run.Contains("\u001b]8;") && run.Contains(new Uri(files20).AbsoluteUri) && offered.All(actions => actions.SequenceEqual([ReleaseScreen.OpenFolder, ReleaseScreen.Back])) &&
             explored.SequenceEqual([files20]), "the result links the folder and opens it in Explorer through the injected launcher, then goes back");

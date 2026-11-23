@@ -504,12 +504,15 @@ internal static partial class SelfTest
         Check(ReleaseFolder.Load(Path.Combine(ticket, "SQL")).Files.Count == 4 && ReleaseFolder.Load(Path.Combine(ticket, "MyMeyer")).Files.Single().Name == "View.ascx",
             "each subfolder has its own record of the files Cultivate wrote");
         var card = Shown(Capture(ReleaseScreen.ResultCard(built), 400, 200));
-        Check(card.Contains("RELEASE FILES PARTLY WRITTEN") && card.Contains("Wrote 11 files for PR #10: 39126 - Remove price levels and 6 linked pull requests") &&
-            card.Contains("One subfolder per repository: MyMeyer (1 file), Public--Applications (2 files), MyMeyer (PR 11) (1 file), MyMeyer--PMA-and-CategoryHierarchy (2 files), " +
-                "SQL (4 files), SQL (Other--SQL) (1 file), Broken--App (not written).") && card.Contains("Release these scripts through the database process") &&
-            card.Contains("Linked pull requests not built (4):") && card.Contains("error CS0029") && card.Contains("Pulled master: 1 new commit(s)") &&
-            card.Contains("Cultivate found 2 references nowhere"),
-            "the result of several repositories lists each subfolder with its files or its failure, and the links not built");
+        int At(string text) => card.IndexOf(text, StringComparison.Ordinal);
+        Check(card.Contains("RELEASE FILES PARTLY WRITTEN") && card.Contains("11 files written in ") &&
+            card.Contains("━━ MYMEYER 1 file PR #10: 39126 - Remove price levels FRONTEND FILES (1) View.ascx") &&
+            card.Contains("━━ PUBLIC--APPLICATIONS 2 files PR #190: 39126 - Sales portal DLLS (1) SalesPortal.dll") &&
+            card.Contains("━━ SQL 4 files PR #5415: 39187 - Procedures SQL SCRIPTS (4)") && card.Contains("━━ BROKEN--APP not written") && card.Contains("error CS0029") &&
+            At("━━ MYMEYER 1 file") < At("━━ SQL 4 files") && At("━━ SQL 4 files") < At("━━ BROKEN--APP") && At("━━ BROKEN--APP") < At("LINKED PULL REQUESTS NOT BUILT (4)") &&
+            card.Contains("Cultivate found 2 references nowhere") && card.Contains("pull main by hand") && !card.Contains("Pulled ") && !card.Contains("Did not pull") &&
+            !new[] { "Wrote ", "One subfolder per repository", "Release these scripts through the database process", "Upload every file", "KIND", "VERSION", " new" }.Any(card.Contains),
+            "the result of several repositories gives each one's files by kind or its failure under its name, a pull that was refused only as its warning, then the links not built");
 
         // --clean and the files already there, per subfolder.
         File.WriteAllText(Path.Combine(ticket, "SQL", "hand.sql"), "mine");
