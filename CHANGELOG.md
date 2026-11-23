@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.3.2 — 2026-11-23
+
 - Improvement: the **Build release files** preview now shows only what is released, so it is quick to check. Under each
   repository's pull request it lists the DLLs to build (with the other merged changes each one carries), the changed packages
   and the frontend files, then anything left out, deleted or worth a warning. The ticket folder summary, the pull request's
