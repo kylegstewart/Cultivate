@@ -134,8 +134,9 @@ internal static partial class SelfTest
             Check(new ReleasePicker(mine, all).Show(LiveConsole(output), Script(Press(ConsoleKey.Escape))) is null, "Esc leaves the release picker without fetching anything");
     }
 
-    private static ReleaseResult ReleasePreviewFixture(bool errors = false) => new()
+    private static ReleaseResult ReleasePreviewFixture(bool errors = false, bool reuse = false, string subfolder = "MyMeyer") => new()
     {
+        Subfolder = subfolder, ReuseDependencies = reuse,
         PullRequest = new(21, "27220 Stop Pay Removed", "alice", "https://github.com/fixture/MyMeyer/pull/21", "feature/stop-pay", "master", "MERGED",
             new string('1', 40), "2026-11-19T10:00:00Z", new string('2', 40)),
         BaseBranch = "master", BaseCommit = "abcdef1234567890abcdef1234567890abcdef12", Name = "27220", Folder = @"C:\fixture\Documents\27220",
@@ -164,29 +165,84 @@ internal static partial class SelfTest
     private static void CheckReleasePreview()
     {
         static string Flat(string text) => Regex.Replace(text, @"\s+", " ");
-        var full = Flat(Capture(new ReleasePreview(ReleasePreviewFixture(), ["Page.dll"]).Render(120, 200), 120, 200));
-        string[] sections = ["FOLDER C:\\fixture\\Documents\\27220", "DLLS TO BUILD (1)", "CHANGED PACKAGES (1)", "CONTENT FILES (2)", "NOT INCLUDED (2)",
-            "DELETED BY THE PULL REQUEST (1)", "BUILT FIRST, NOT RELEASED (1)", "WARNINGS (1)"];
+        static string Shot(ReleasePreview preview) => Flat(Capture(preview.Render(120, 200), 120, 200));
+        // The body's lines: below the header's four, above the position and keys lines, without the padding under a short body.
+        static List<string> Body(ReleasePreview preview)
+        {
+            var body = Capture(preview.Render(120, 200), 120, 200).Split('\n').Select(line => line.TrimEnd()).Skip(4).SkipLast(2).ToList();
+            while (body.Count != 0 && body[^1].Length == 0) body.RemoveAt(body.Count - 1);
+            return body;
+        }
+        static bool Spaced(List<string> body) => body.Count != 0 && body[0].Length != 0 && !body.Zip(body.Skip(1)).Any(pair => pair.First.Length == 0 && pair.Second.Length == 0);
+        var preview = new ReleasePreview(ReleasePreviewFixture(), ["Page.dll"]);
+        var full = Shot(preview);
+        string[] sections = ["DLLS TO BUILD (1)", "CHANGED PACKAGES (1)", "FRONTEND FILES (2)", "NOT INCLUDED (2)", "DELETED BY THE PULL REQUEST (1)",
+            @"ALREADY IN THE FOLDER (2) C:\fixture\Documents\27220", "WARNINGS (1)"];
         Check(sections.All(full.Contains) && sections.Select(section => full.IndexOf(section, StringComparison.Ordinal)).Order().SequenceEqual(sections.Select(section => full.IndexOf(section, StringComparison.Ordinal))),
-            "the release preview leads with the folder, then the DLLs, packages, content, what is left out, support projects and warnings, in that order");
-        Check(full.Contains("Building writes 4 files: 1 DLL, 1 changed package and 2 content files.") && full.Contains("Already in the folder (2):") &&
-            full.Contains("notes.txt 4 B, Not written by Cultivate") && full.Contains("Page.dll 5 KB, Written by Cultivate for PR #20 on 2026-11-18 10:00, replaced by this build, C removes it first") &&
-            full.Contains("C removes the 1 file Cultivate wrote here that nobody has changed since, then builds. Every other file is kept."),
-            "the preview says what lands in the folder, what is already there, what this build replaces, and what removing earlier files would remove");
-        Check(full.Contains("Page.dll Page\\Page.csproj Also carries 2 other merged changes, which go to production with it: c0ffee1 Other merged change beef123 a4 page"),
-            "each DLL lists the other merged changes it takes to production");
+            "the release preview lists the DLLs, packages and frontend files, then what is left out, the files already in the folder and warnings, in that order");
+        Check(full.Contains("PR #21: 27220 Stop Pay Removed DLLS TO BUILD (1) Page.dll Also carries 2 other merged changes, which go to production with it: " +
+                "c0ffee1 Other merged change beef123 a4 page CHANGED PACKAGES (1)") && Body(preview)[0] == "PR #21: 27220 Stop Pay Removed" && Spaced(Body(preview)),
+            "the preview starts with the pull request and goes straight to its DLLs, each named alone with the other merged changes it takes to production");
+        string[] gone = ["TICKET FOLDER", "One subfolder per repository", "Building writes", "Nothing is in the folder yet", "BUILT FIRST", "built from master at",
+            "merged 2026-", "by alice", @"Page.dll Page\Page.csproj", "CONTENT FILES", @"FOLDER C:\fixture", "Carries no other merged changes", "None:", "Core.dll",
+            "behind origin", "Dependencies are taken"];
+        Check(!gone.Any(full.Contains), "the preview leaves out the ticket folder, the folder summary, the pull request's details, the routine pull, the dependencies and empty sections");
         Check(full.Contains("CultivateReleasePackage.dll 2.0.0.0 for Shop\\Shop.csproj"), "changed packages show their versions");
-        Check(full.Contains("Page/Again.css not exactly as on the pull request; master's version is copied: a1a1a1a a1 again") && full.Contains("Page/View.ascx"),
-            "a content file other merged work also changed is flagged with the commits that changed it");
+        Check(full.Contains("FRONTEND FILES (2) Page/Again.css not exactly as on the pull request; master's version is copied: a1a1a1a a1 again Page/View.ascx"),
+            "frontend files are listed, and one other merged work also changed is flagged with the commits that changed it");
         Check(full.Contains("Db/Proc.sql SQL script: release it through the database process") && full.Contains("Page/Reverted.js Undone on master since the merge") &&
             full.Contains("Page/Old.js Not on master: nothing to upload. Remove it from production by hand"),
             "files left out and files deleted are each listed with their reason, never only counted");
-        Check(full.Contains(@"built from master at abcdef1 master in C:\fixture\MyMeyer is 7 commit(s) behind origin; building pulls it. FOLDER"),
-            "the preview says, under the pull request, how far the local master is behind origin and that building pulls it");
-        Check(full.Contains("Built from master so the DLLs above compile. They are not copied to the folder. Core.dll Page references ..\\bin\\Core.dll"),
-            "support projects are described as built from master so the DLLs compile, and not released");
+        Check(full.Contains(@"ALREADY IN THE FOLDER (2) C:\fixture\Documents\27220 notes.txt 4 B, Not written by Cultivate " +
+                "Page.dll 5 KB, Written by Cultivate for PR #20 on 2026-11-18 10:00, replaced by this build, C removes it first " +
+                "C removes the 1 file Cultivate wrote here that nobody has changed since, then builds. Every other file is kept. WARNINGS (1)"),
+            "a folder that already holds files is listed after what is left out, with what this build replaces and what removing earlier files would remove");
+        var empty = ReleasePreviewFixture();
+        empty.Existing.Clear();
+        var emptyScreen = Shot(new ReleasePreview(empty, []));
+        Check(!emptyScreen.Contains("ALREADY IN THE FOLDER") && !emptyScreen.Contains(empty.Folder) && emptyScreen.Contains("DELETED BY THE PULL REQUEST (1) Page/Old.js") &&
+            emptyScreen.Contains("WARNINGS (1)"), "an empty folder is not mentioned at all");
         Check(full.Contains("! Page/Again.css changed again on master") && full.Contains("Enter build") && full.Contains("C remove earlier files, then build") &&
             !full.Contains("CANNOT BUILD"), "warnings are listed, and a buildable preview offers building and removing earlier files first");
+
+        foreach (var (outcome, detail) in new[] { (ReleasePullOutcome.LocalCommits, @"master in C:\fixture\MyMeyer has 2 local commit(s) origin lacks; building does not pull it."),
+            (ReleasePullOutcome.NotUpdated, @"master in C:\fixture\MyMeyer is checked out with changes; building does not pull it.") })
+        {
+            var held = ReleasePreviewFixture();
+            held.Pull = held.Pull! with { Outcome = outcome, Detail = detail };
+            Check(Shot(new ReleasePreview(held, ["Page.dll"])).Contains($"PR #21: 27220 Stop Pay Removed {detail} DLLS TO BUILD (1)"),
+                $"a pull that {(outcome == ReleasePullOutcome.LocalCommits ? "finds local commits" : "cannot update master")} is shown under the pull request, unlike a routine one");
+        }
+        var reused = Body(new ReleasePreview(ReleasePreviewFixture(reuse: true), ["Page.dll"]));
+        Check(Flat(string.Join(" ", reused)).Contains("PR #21: 27220 Stop Pay Removed Dependencies are taken from your checkout instead of built from master; " +
+                "Cultivate cannot verify they match master. DLLS TO BUILD (1)") && !reused.Any(line => line.Contains("Core.dll")) && Spaced(reused),
+            "dependencies taken from the checkout are flagged in one line under the pull request, without listing them");
+
+        var nothing = ReleasePreviewFixture();
+        nothing.Projects.Clear();
+        nothing.Packages.Clear();
+        nothing.Content.Clear();
+        var nothingScreen = Shot(new ReleasePreview(nothing, []));
+        var sql = new ReleaseResult { PullRequest = nothing.PullRequest, Kind = ReleaseRepositoryKind.Sql, BaseBranch = "main", Folder = @"C:\fixture\Documents\27220\SQL" };
+        var sqlBody = Body(new ReleasePreview(sql, []));
+        Check(nothingScreen.Contains("PR #21: 27220 Stop Pay Removed Nothing to release: the pull request changed no DLL, package or frontend file. NOT INCLUDED (2)") &&
+            !nothingScreen.Contains("DLLS TO BUILD") && !nothingScreen.Contains("CHANGED PACKAGES") && !nothingScreen.Contains("FRONTEND FILES") &&
+            sqlBody.SequenceEqual(["PR #21: 27220 Stop Pay Removed", "", "Nothing to release: the pull request changed no SQL script."]),
+            "a pull request with nothing to release says so in one line instead of empty sections, for code and for SQL");
+
+        var several = new ReleasePreview(new ReleaseRun
+        {
+            Folder = @"C:\fixture\Documents\27220", Releases = [ReleasePreviewFixture(), ReleasePreviewFixture(errors: true, subfolder: "Shop")],
+            Skipped = [new("https://github.com/fixture/Shop/pull/30", "Shop", 30, "Shop pull request #30 is not merged yet.")]
+        }, [["Page.dll"], []]);
+        var severalBody = Body(several);
+        var severalScreen = Flat(string.Join(" ", severalBody));
+        Check(severalBody[0] == "LINKED PULL REQUESTS NOT BUILT (1)" && severalBody.Contains("━━ MYMEYER") && severalBody.Contains("━━ SHOP") && Spaced(severalBody) &&
+            severalScreen.StartsWith("LINKED PULL REQUESTS NOT BUILT (1) Shop #30 Shop pull request #30 is not merged yet. ━━ MYMEYER PR #21: 27220 Stop Pay Removed DLLS TO BUILD (1)",
+                StringComparison.Ordinal) &&
+            severalScreen.Contains("━━ SHOP PR #21: 27220 Stop Pay Removed Cannot be built, so building skips it. CANNOT BUILD below says why. DLLS TO BUILD (1)") &&
+            !severalScreen.Contains("These release files cannot be built") && !severalScreen.Contains("TICKET FOLDER") && !severalScreen.Contains("in MyMeyer, and"),
+            "several repositories start with the linked pull requests not built, then each repository under its name alone, one that cannot build saying building skips it");
 
         var screen = new ReleasePreview(ReleasePreviewFixture(), ["Page.dll"]);
         var seen = new StringBuilder();
@@ -284,7 +340,7 @@ internal static partial class SelfTest
             Detail = @"Pulled master: 7 new commit(s), 4044096 → 2bc2fa7 (C:\fixture\MyMeyer)" };
         var card = Regex.Replace(Capture(ReleaseScreen.ResultCard(built, true), 120, 40), @"\s+", " ");
         Check(card.Contains("RELEASE FILES READY") && card.Contains("Wrote 2 files for PR #21: 27220 Stop Pay Removed") && card.Contains(@"C:\fixture\Documents\27220") &&
-            card.Contains($"Page.dll Project DLL {TidySizes.Format(5120)} 1.0.0.0 replaced") && card.Contains($"View.ascx Content file {TidySizes.Format(7)} new") &&
+            card.Contains($"Page.dll Project DLL {TidySizes.Format(5120)} 1.0.0.0 replaced") && card.Contains($"View.ascx Frontend file {TidySizes.Format(7)} new") &&
             card.Contains(@"Helpers.dll 1.0.0.0 C:\fixture\checkout\bin\Helpers.dll, modified 2026-11-01 09:00") && card.Contains("! Page/Again.css changed again on master") &&
             card.Contains("Also in the folder and kept: notes.txt (Not written by Cultivate)") && card.Contains("Esc came after writing had started"),
             "the result lists each file with its kind, size, version and whether it replaced one, outside references, and every warning again");
@@ -364,9 +420,9 @@ internal static partial class SelfTest
         picks.Enqueue(ReleaseScreen.Back);
         var run = await Drive(Script(Press(ConsoleKey.Enter, '\r'), Press(ConsoleKey.Enter, '\r'), () => offered.Count == 2, Press(ConsoleKey.Escape)));
         var shown = Shown(run);
-        Check(listed == 2 && shown.Contains("MINE 1") && shown.Contains("FOLDER " + folder20) && shown.Contains("DLLS TO BUILD (1)") &&
-            shown.Contains("other merged changes, which go to production with it") && shown.Contains("C removes it first"),
-            "the screen lists merged pull requests, then previews the chosen one's folder, its existing files, and the other merged changes its DLL carries");
+        Check(listed == 2 && shown.Contains("MINE 1") && shown.Contains("DLLS TO BUILD (1)") && shown.Contains("other merged changes, which go to production with it") &&
+            shown.Contains("ALREADY IN THE FOLDER (") && shown.Contains("C removes it first"),
+            "the screen lists merged pull requests, then previews the chosen one's DLL with the other merged changes it carries, and the files already in its folder");
         Check(Listing(files20).SequenceEqual(["Page.dll", "View.ascx"], Files.Comparer) && File.GetLastWriteTimeUtc(Path.Combine(files20, "Page.dll")) > writtenBefore &&
             shown.Contains("Building Page (3/3, release file)") && shown.Contains("RELEASE FILES READY") && shown.Contains("Project DLL") && shown.Contains("replaced"),
             "building from the screen shows live progress and writes the release folder, and the result lists the files it replaced");
@@ -400,7 +456,7 @@ internal static partial class SelfTest
         paused = pauses;
         run = Shown(await Drive(Script([.. Typed("24"), Press(ConsoleKey.Enter, '\r'), Press(ConsoleKey.Enter, '\r'), () => questions.Count == 2, () => pauses > paused,
             Press(ConsoleKey.Escape), Press(ConsoleKey.Escape)])));
-        Check(questions.Count == 2 && run.Contains("Taken from your checkout instead of built from master") && run.Contains("NewApi") && !Directory.Exists(folder24),
+        Check(questions.Count == 2 && run.Contains("Dependencies are taken from your checkout instead of built from master") && run.Contains("NewApi") && !Directory.Exists(folder24),
             "retrying with the checkout's DLLs builds at once, and a failure in a released DLL shows its diagnostics without offering again");
 
         await Task.Delay(200);

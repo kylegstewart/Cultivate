@@ -421,13 +421,15 @@ internal static partial class SelfTest
         // The screens for several repositories.
         static string Flat(string text) => Regex.Replace(text, @"\s+", " ");
         var screen = Flat(Capture(new ReleasePreview(preview, ReleaseScreen.Removables(preview)).Render(400, 400), 400, 400));
-        Check(screen.Contains($"PR #10: 39126 - Remove price levels in MyMeyer, and 6 linked pull requests it lists TICKET FOLDER {ticket} One subfolder per repository: MyMeyer MyMeyer PR #10, 1 file") &&
-            screen.Contains("SQL Database--SQL PR #5415, 4 files") && screen.Contains("LINKED PULL REQUESTS NOT BUILT (4) Public--Applications #191 Public--Applications pull request #191 is not merged yet") &&
-            screen.Contains("━━ SQL Meyer-Fixture/Database--SQL, SQL scripts") && screen.Contains("SQL SCRIPTS (4)") &&
-            screen.Contains("Building writes 4 SQL scripts, as main has them. Nothing is built or run.") && screen.Contains("━━ PUBLIC--APPLICATIONS Meyer-Fixture/Public--Applications, built from master") &&
-            !screen[screen.IndexOf("━━ SQL Meyer", StringComparison.Ordinal)..screen.IndexOf("SQL SCRIPTS (4)", StringComparison.Ordinal)].Contains("DLLS TO BUILD") &&
-            screen.Contains("Enter build"),
-            "the preview of several repositories starts with the ticket folder, each subfolder and the skipped links, then each repository's own preview");
+        Check(screen.Contains("LINKED PULL REQUESTS NOT BUILT (4) Public--Applications #191 Public--Applications pull request #191 is not merged yet") &&
+            screen.IndexOf("LINKED PULL REQUESTS NOT BUILT", StringComparison.Ordinal) < screen.IndexOf("━━ MYMEYER PR #10: 39126 - Remove price levels", StringComparison.Ordinal) &&
+            screen.Contains("━━ PUBLIC--APPLICATIONS PR #190: 39126 - Sales portal DLLS TO BUILD (1) SalesPortal.dll") &&
+            screen.Contains("FRONTEND FILES (1) SalesPortal/SalesPortal.aspx") && screen.Contains("━━ SQL PR #5415: 39187 - Procedures") && screen.Contains("SQL SCRIPTS (4)") &&
+            !screen[screen.IndexOf("━━ SQL PR", StringComparison.Ordinal)..screen.IndexOf("SQL SCRIPTS (4)", StringComparison.Ordinal)].Contains("DLLS TO BUILD") &&
+            !screen.Contains("TICKET FOLDER") && !screen.Contains("One subfolder per repository") && !screen.Contains("linked pull requests it lists") &&
+            !screen.Contains("Database--SQL, SQL scripts") && !screen.Contains(", built from master") && !screen.Contains("Building writes") &&
+            !screen.Contains("BUILT FIRST") && !screen.Contains("SalesCore") && !screen.Contains("ALREADY IN THE FOLDER") && screen.Contains("Enter build"),
+            "the preview of several repositories starts with the skipped links, then each repository under its name alone and its pull request, listing only what it releases");
         var paging = new ReleasePreview(preview, ReleaseScreen.Removables(preview));
         var fits = true;
         for (var page = 0; page < 40; page++)
