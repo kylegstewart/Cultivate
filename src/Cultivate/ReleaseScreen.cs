@@ -276,7 +276,13 @@ internal sealed class ReleaseScreen(Settings settings, GitRepository git, Func<s
                     (release.Written ? Muted(TicketWorkspaces.Count(release.Files.Count, "file")) : $"[{Danger}]not written[/]")));
             rows.Add(new Markup($"[bold {TerminalStyle.Accent}]{Terminal.Escape(release.PullRequest.Label)}[/]"));
             if (release.Written) rows.AddRange(Details(release, columns));
-            else rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
+            else
+            {
+                rows.Add(new Text(release.Failure ?? "Not written.", new Style(Color.FromHex(Danger))));
+                // A failed build's warnings are lost with it, so a base branch that could not be pulled is said here.
+                if (release.Pull is { Outcome: ReleasePullOutcome.LocalCommits or ReleasePullOutcome.NotUpdated } pull)
+                    rows.Add(new Text(pull.Detail, new Style(Color.FromHex(TerminalStyle.Gold))));
+            }
         }
         if (run.Skipped.Count != 0)
         {

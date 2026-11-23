@@ -443,12 +443,16 @@ internal static partial class SelfTest
                 "4 files written  in 54 s", @"C:\fixture\Documents\27220", "",
                 "━━ MYMEYER  2 files", "PR #21: 27220 Stop Pay Removed", "DLLS (1)", Row("CustomerMatrix.dll", "58 KB"), "FRONTEND FILES (1)", Row("ClassIDMatrix.ascx", "15 KB"), "",
                 "━━ SQL  2 files", "PR #5323: 27220 Extend the matrix queue", "SQL SCRIPTS (2)", Row(longest, " 2 KB"), Row("Queue.sql", " 1 KB  replaced"), "",
-                "━━ SHOP  not written", "PR #30: 27220 Shop totals", "Build: error CS0029: Cannot implicitly convert type 'int' to 'string'.", "",
+                "━━ SHOP  not written", "PR #30: 27220 Shop totals", "Build: error CS0029: Cannot implicitly convert type 'int' to 'string'.",
+                "Did not pull master: its files were not built.", "",
                 "LINKED PULL REQUESTS NOT BUILT (1)", "  Reports #40  Reports pull request #40 is closed without being merged."]),
             "several repositories' result gives the files written, the ticket folder, then each repository under its name with its file count or 'not written' " +
-            "and its failure, then the linked pull requests not built");
-        Check(several.Count(line => line.Contains(@"C:\fixture\Documents\27220")) == 1 && !gone.Any(severalCaptured.Contains) && !severalCaptured.Contains("Did not pull") &&
-            Spaced(several), "several repositories' result names the ticket folder once, with no folder, note or pull line per repository and no doubled or trailing blank line");
+            "and its failure, with a master that could not be pulled, then the linked pull requests not built");
+        Check(several.Count(line => line.Contains(@"C:\fixture\Documents\27220")) == 1 && !gone.Any(severalCaptured.Contains) &&
+            Spaced(several), "several repositories' result names the ticket folder once, with no folder or note per repository and no doubled or trailing blank line");
+        run.Releases[2].Pull = run.Releases[2].Pull! with { Outcome = ReleasePullOutcome.Pulled, Detail = "Pulled master: 2 new commit(s)." };
+        Check(!Capture(ReleaseScreen.ResultCard(run), 120, 60).Contains("Pulled master"), "a repository that was not written says nothing of a routine pull");
+        run.Releases[2].Pull = run.Releases[2].Pull! with { Outcome = ReleasePullOutcome.NotUpdated, Detail = "Did not pull master: its files were not built." };
         var ends = SizeEnds(several);
         var wide = SizeEnds(Lines(Capture(ReleaseScreen.ResultCard(run), 200, 60)));
         Check(ends.Count == 4 && ends.All(end => end == 2 + longest.Length + 2 + "58 KB".Length) && wide.SequenceEqual(ends),
