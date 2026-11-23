@@ -5,6 +5,12 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Improvement: the result shown after **Build release files** now reads like the preview, so what was built is quick to check.
+  Under each repository's pull request it lists what was written, grouped as DLLs, changed packages, frontend files and SQL
+  scripts, with each file's size beside its name and "replaced" on a file that replaced one. The table of files, each
+  repository's own folder, the notes about uploading or releasing the files, and the routine note about pulling master are gone;
+  a master that could not be pulled is still among the warnings.
+
 ## 1.3.2 — 2026-11-23
 
 - Improvement: the **Build release files** preview now shows only what is released, so it is quick to check. Under each
