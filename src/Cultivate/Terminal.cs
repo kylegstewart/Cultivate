@@ -257,6 +257,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             var choice = menu.Show("Which repository's main worktree?");
             if (choice is null || choice.Back) return false;
             var root = roots[choices.IndexOf(choice)];
+            if (Editor() is not { } editor) continue;
             // Pulling never stops the solution from opening; a warning stays on screen until a key is pressed.
             var pull = await AnsiConsole.Status().StartAsync("Pulling the main worktree...", async context =>
             {
@@ -266,9 +267,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             });
             AnsiConsole.MarkupLine($"[{(pull.Warning ? TerminalStyle.Gold : TerminalStyle.Muted)}]{Escape(pull.Detail)}[/]");
             if (SelectSolution(root) is not { } mainSolution) continue;
-            var ide = await Settings.FindVisualStudio()
-                ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution.");
-            await Open(ide, mainSolution, [], "Opening the main worktree solution...", pull.Warning);
+            await Open(editor, mainSolution, root, [], "Opening the main worktree solution...", pull.Warning);
             return true;
         }
     }
@@ -276,18 +275,18 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
     /// <summary>
     /// Opens a checkout's solution with its changed source files. A MyMeyer checkout opens the files of its deployment plan;
     /// one from another repository has no plan, so <paramref name="otherRepository"/> opens every changed source file under its solution.
-    /// Returns false, having opened nothing, when Esc or Back leaves the choice of solution.
+    /// It opens with <paramref name="editor"/>, or asks first which editor to use. Returns false, having opened nothing, when Esc or Back
+    /// leaves the choice of editor or solution.
     /// </summary>
-    internal async Task<bool> OpenTarget(Target target, bool otherRepository)
+    internal async Task<bool> OpenTarget(Target target, bool otherRepository, Editor? editor = null)
     {
-        var visualStudio = await Settings.FindVisualStudio()
-            ?? throw new InvalidOperationException("Visual Studio IDE was not found. Install Visual Studio to open the solution and its changed files.");
-        string solution;
+        if ((editor ?? Editor()) is not { } chosenEditor) return false;
+        string solution, root;
         List<string> files;
         if (otherRepository)
         {
             // Another repository has no deployment plan, so every changed source file under its solution opens.
-            var root = target.Worktree!;
+            root = target.Worktree!;
             if (SelectSolution(root) is not { } chosen) return false;
             solution = chosen;
             var changes = await AnsiConsole.Status().StartAsync("Finding changed source files to open...", async _ =>
@@ -297,19 +296,19 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         else
         {
             solution = await AnsiConsole.Status().StartAsync("Locating the solution...", _ => git.Solution(target));
-            var root = Path.GetDirectoryName(solution)!;
+            root = Path.GetDirectoryName(solution)!;
             // Opening needs no webfarm destinations, so skip the Code Release Manager lookup; unmapped markup still opens.
             var plan = await AnsiConsole.Status().StartAsync("Finding actionable changes to open...", _ =>
                 new Planner(settings, git, bridge).Create(target with { Worktree = root }, _ => Task.FromResult(new Dictionary<string, string>())));
             files = SolutionOpener.FilesToOpen(root, solution, ChangesToOpen(plan));
         }
-        await Open(visualStudio, solution, files, "Opening the solution and changed source files...");
+        await Open(chosenEditor, solution, root, files, "Opening the solution and changed source files...");
         return true;
     }
 
-    /// <summary>Fills in the solution's missing ignored references first, so Visual Studio loads its projects with them resolved.
+    /// <summary>Fills in the solution's missing ignored references first, so the editor loads its projects with them resolved.
     /// <paramref name="pause"/> waits for a key afterwards even without warnings, so one shown before stays readable.</summary>
-    private async Task Open(string visualStudio, string solution, List<string> files, string status, bool pause = false)
+    private async Task Open(Editor editor, string solution, string root, List<string> files, string status, bool pause = false)
     {
         SolutionDependencies.Result prepared;
         try
@@ -322,7 +321,7 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
             // Missing references only cost IntelliSense, so they never stop the solution from opening.
             prepared = new(0, 0, 0, ["Could not prepare the solution's dependencies: " + exception.Message]);
         }
-        await AnsiConsole.Status().StartAsync(status, _ => SolutionOpener.Open(visualStudio, solution, files));
+        await AnsiConsole.Status().StartAsync(status, _ => SolutionOpener.Open(editor, solution, root, files));
         if (prepared.Warnings.Count == 0)
         {
             if (pause) Pause();
@@ -331,6 +330,30 @@ internal sealed class Terminal(Settings settings, GitRepository git, Bridge brid
         if (prepared.Summary is { } summary) AnsiConsole.MarkupLine($"[{TerminalStyle.Muted}]{Escape(summary)}[/]");
         foreach (var warning in prepared.Warnings) AnsiConsole.MarkupLine($"[{TerminalStyle.Gold}]{Escape(warning)}[/]");
         Pause();
+    }
+
+    /// <summary>The editor to open a solution with, asking when the setting says to; null when Esc or Back leaves the question.</summary>
+    internal Editor? Editor() => ChooseEditor(settings.OpenWith, Editors.Installed, AnsiConsole.Console, KeyScreen.ReadKey);
+
+    // The editor last chosen when asked, highlighted the next time the question is asked in this run.
+    private static string? lastEditor;
+
+    /// <summary>
+    /// The editor <paramref name="openWith"/> names (see <see cref="Editors.Configured"/>), or for Ask the one chosen from the
+    /// <paramref name="installed"/> editors; with only one installed it is used without asking. Null when Esc or Back leaves the question.
+    /// </summary>
+    internal static Editor? ChooseEditor(string openWith, InstalledEditors installed, IAnsiConsole console, Func<int, ConsoleKeyInfo?> readKey)
+    {
+        if (Editors.Configured(openWith, installed) is { } configured) return configured;
+        var editors = installed.All;
+        if (editors.Count == 0) throw new InvalidOperationException("Neither Visual Studio nor VS Code was found. Install one to open solutions.");
+        if (editors.Count == 1) return editors[0];
+        var choices = editors.Select(editor => new MenuAction(editor.Name, editor.Path))
+            .Append(new("Back", "Return without opening a solution.", Back: true)).ToList();
+        var choice = new ActionPicker(choices, highlight: lastEditor).Show("Open with which editor?", console, readKey);
+        if (choice is null || choice.Back) return null;
+        lastEditor = choice.Label;
+        return editors[choices.IndexOf(choice)];
     }
 
     /// <summary>The solution to open in <paramref name="root"/>, asking when it has several; null when Esc or Back leaves the question.</summary>

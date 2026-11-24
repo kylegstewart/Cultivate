@@ -30,15 +30,16 @@ internal static partial class SelfTest
         var enter = Press(ConsoleKey.Enter, '\r');
         var escape = Press(ConsoleKey.Escape);
         var clear = new ConsoleKeyInfo('\u0015', ConsoleKey.U, false, false, true);
-        Check(Fixture().Problems().Count == 0 && SettingField.All.Count == 15, "the settings fixture has no problems and there are fifteen settings");
+        Check(Fixture().Problems().Count == 0 && SettingField.All.Count == 16, "the settings fixture has no problems and there are sixteen settings");
 
         var settings = Fixture();
         var screen = new SettingsScreen(settings, null, path);
         screen.Checking.Wait();
         var names = SettingField.All.Select(field => field.Name).ToList();
         var large = Capture(screen.Render(160, 50), 160, 50);
-        Check(names.All(large.Contains) && large.Split('\n').Length <= 50 && large.Contains("none") && large.Contains("Esc back"),
-            "the Settings screen lists every setting with its value, and a blank optional one as none, on a large terminal");
+        Check(names.All(large.Contains) && large.Split('\n').Length <= 50 && large.Contains("none") && large.Contains("Esc back") &&
+            large.Split('\n').Any(line => line.Contains("Open solutions with") && line.Contains(Editors.AutomaticLabel)),
+            "the Settings screen lists every setting with its value, a blank optional one as none and a choice by its label, on a large terminal");
         var fits = true;
         var reached = new HashSet<string>();
         foreach (var _ in names)
@@ -117,7 +118,7 @@ internal static partial class SelfTest
         Check(settings.WebfarmRoot == @"\\localhost\cultivate-fixture\MyMeyer" && settings.SiteUrl == "http://localhost/" && Saved()?.SiteUrl == "http://localhost/",
             "changing the webfarm root suggests the site address again");
         Check(Capture(screen.Render(100, 30), 100, 30).Contains(SettingField.NotReachable), "a webfarm root that cannot be reached is noted on its card");
-        for (var index = 0; index < 5; index++) screen.HandleKey(Press(ConsoleKey.DownArrow), pageSize);
+        for (var index = 0; index < 6; index++) screen.HandleKey(Press(ConsoleKey.DownArrow), pageSize);
         foreach (var key in new[] { enter, clear, enter }) screen.HandleKey(key, pageSize);
         screen.HandleKey(Press(ConsoleKey.DownArrow), pageSize);
         var unused = Capture(screen.Render(100, 30), 100, 30);
@@ -146,7 +147,70 @@ internal static partial class SelfTest
         Check(broken.BaseBranch == "master-2" && File.Exists(activePath), "a change that adds no problem is saved even when the settings already have one");
         File.Delete(activePath);
 
+        CheckOpenWithSetting(root, Fixture());
         CheckFirstRun(root, repository, farm, msbuild);
+    }
+
+    /// <summary>The Open solutions with setting on the Settings screen, against fixture editors.</summary>
+    private static void CheckOpenWithSetting(string root, Settings settings)
+    {
+        var path = Path.Combine(root, "open-with.json");
+        Settings? Saved() => File.Exists(path) ? JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), Files.Json) : null;
+        string Devenv(string folder)
+        {
+            var devenv = Path.Combine(root, "editors", folder, "devenv.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(devenv)!);
+            File.WriteAllText(devenv, "");
+            return devenv;
+        }
+        var newest = new Editor("Visual Studio Professional 2026", Devenv("18"));
+        var older = new Editor("Visual Studio Professional 2022", Devenv("17"));
+        var code = new Editor("VS Code", Path.Combine(root, "editors", "code.cmd"), VSCode: true);
+        var field = SettingField.All.Single(setting => setting.Name == "Open solutions with");
+        var pageSize = SettingsScreen.PageSize(24);
+        Check(SettingField.All.ToList().IndexOf(field) == SettingField.All.ToList().FindIndex(setting => setting.Name == "Worktrees folder") + 1 &&
+            field.Choice && SettingField.Wrap(field.Description, 76).Count <= 3,
+            "Open solutions with is a choice setting right after Worktrees folder, explained in three lines at 80 columns");
+
+        Editors.Use(new([newest, older], code));
+        var screen = new SettingsScreen(settings, null, path);
+        screen.Checking.Wait();
+        while (screen.Highlighted != field) screen.HandleKey(Press(ConsoleKey.DownArrow), pageSize);
+        var shown = new List<string>();
+        var saved = new List<string?>();
+        foreach (var key in new[] { Press(ConsoleKey.Enter, '\r'), Press(ConsoleKey.Spacebar, ' '), Press(ConsoleKey.Enter, '\r'), Press(ConsoleKey.Spacebar, ' '),
+            Press(ConsoleKey.Enter, '\r') })
+        {
+            screen.HandleKey(key, pageSize);
+            var lines = Capture(screen.Render(80, 24), 80, 24).Split('\n');
+            shown.Add(lines.FirstOrDefault(line => line.Contains("> Open solutions with"))?.Trim() ?? "");
+            saved.Add(Saved()?.OpenWith);
+        }
+        Check(saved.SequenceEqual([newest.Path, older.Path, "VSCode", "Ask", ""]) && settings.OpenWith == "" &&
+            shown.Zip(new[] { newest.Name, older.Name, "VS Code", "Ask each time", Editors.AutomaticLabel }).All(pair => pair.First.EndsWith(pair.Second)) &&
+            Capture(screen.Render(80, 24), 80, 24).Split('\n')[^1].Contains("Enter/Space next choice") && screen.Notice == "Saved Open solutions with.",
+            "Enter and Space step through every editor, each particular Visual Studio by name, and back to the first, saving each at once");
+
+        Editors.Use(new([newest], code));
+        Check(field.Choices!(settings).Select(choice => choice.Label).SequenceEqual([Editors.AutomaticLabel, "VS Code", "Ask each time"]),
+            "with one Visual Studio installed there is no particular one to choose");
+
+        settings.OpenWith = Path.Combine(root, "editors", "uninstalled", "devenv.exe");
+        screen = new SettingsScreen(settings, null, path);
+        screen.Checking.Wait();
+        while (screen.Highlighted != field) screen.HandleKey(Press(ConsoleKey.DownArrow), pageSize);
+        var stale = Capture(screen.Render(100, 30), 100, 30);
+        Check(stale.Contains("uninstalled") && stale.Contains("That Visual Studio is no longer installed, so the newest installed one opens instead."),
+            "a Visual Studio that is no longer installed shows as its path, with a note that the newest opens instead");
+        screen.HandleKey(Press(ConsoleKey.Enter, '\r'), pageSize);
+        Check(settings.OpenWith == "" && Saved()?.OpenWith == "", "the next choice after a value that is none of them is the first");
+
+        Editors.Use(new([newest], null));
+        settings.OpenWith = "VSCode";
+        Check(new SettingsScreen(settings, null, path).Checking.Result[SettingField.All.ToList().IndexOf(field)] ==
+            "VS Code was not found. Install it before opening a solution.", "VS Code chosen but not installed is noted");
+        Editors.Use(new([], null));
+        File.Delete(path);
     }
 
     private static void CheckFirstRun(string root, string repository, string farm, string msbuild)
@@ -160,7 +224,7 @@ internal static partial class SelfTest
         var screen = new FirstRunScreen(Blank(), null, true, path);
         var lines = Capture(screen.Render(80, 24), 80, 24).Split('\n');
         Check(lines.Length <= 24 && lines.All(line => line.Length <= 80) && lines[^1].Contains("Esc leave setup") && lines.Any(line => line.Contains("Step 1 of 15")),
-            "the first run asks its first question at 80x24, and Esc there leaves setup");
+            "the first run asks fifteen questions, leaving the choice of editor at its default, and its first fits 80x24 with Esc leaving setup");
         foreach (var key in Typed(repository).Cast<ConsoleKeyInfo>().Append(enter)) screen.HandleKey(key);
         Check(screen.Step == 1 && Capture(screen.Render(80, 24), 80, 24).Split('\n')[^1].Contains("Esc previous question"),
             "Enter accepts a typed answer and asks the next question");

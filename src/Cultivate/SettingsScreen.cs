@@ -5,7 +5,7 @@ namespace Cultivate;
 
 /// <summary>
 /// The Settings screen: every setting with its value, the highlighted one explained in a card below. Enter edits a text setting in place
-/// or turns a yes/no one the other way, and each accepted change is saved at once; Esc leaves.
+/// or turns a yes/no one the other way or a choice one to its next choice, and each accepted change is saved at once; Esc leaves.
 /// </summary>
 internal sealed class SettingsScreen
 {
@@ -73,10 +73,10 @@ internal sealed class SettingsScreen
             case ConsoleKey.End:
                 Move(last);
                 break;
-            case ConsoleKey.Enter or ConsoleKey.Spacebar when field.YesNo && field.Applies(settings):
+            case ConsoleKey.Enter or ConsoleKey.Spacebar when (field.YesNo || field.Choice) && field.Applies(settings):
                 Error = Save(field.Toggled(settings));
                 break;
-            case ConsoleKey.Enter when !field.YesNo:
+            case ConsoleKey.Enter when !field.YesNo && !field.Choice:
                 (Field, Error, Notice) = (new TextField(field.Read(settings)), null, null);
                 break;
         }
@@ -193,7 +193,7 @@ internal sealed class SettingsScreen
         string Key(string key, string action) => $"[{TerminalStyle.Gold}]{key}[/] {action}   ";
         if (Field is not null) return Key("Enter", "save") + Key("Ctrl+U", "clear") + Key("Esc", "cancel").TrimEnd();
         var field = Highlighted;
-        var change = field.YesNo ? field.Applies(settings) ? Key("Enter/Space", "toggle") : "" : Key("Enter", "edit");
+        var change = field.YesNo ? field.Applies(settings) ? Key("Enter/Space", "toggle") : "" : field.Choice ? Key("Enter/Space", "next choice") : Key("Enter", "edit");
         return Key("arrows", "move") + Key("PgUp/PgDn", "page") + change + Key("Esc", "back").TrimEnd();
     }
 

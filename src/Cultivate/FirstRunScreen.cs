@@ -13,7 +13,8 @@ internal sealed class FirstRunScreen
     private readonly DeploymentState? active;
     private readonly bool firstRun;
     private readonly string path;
-    private readonly IReadOnlyList<SettingField> fields = SettingField.All;
+    // A choice setting is not asked: its default suits a new user, and the Settings screen changes it.
+    private readonly IReadOnlyList<SettingField> fields = SettingField.All.Where(field => !field.Choice).ToList();
     internal Settings Draft { get; }
     internal int Step { get; private set; }
     internal SettingField Question => fields[Step];

@@ -113,6 +113,8 @@ internal static class Doctor
                 ? "No dev site address, so deployments are not followed by a warm-up. Set one with 'cultivate setup --site-url URL'."
                 : $"Dev site: {settings.SiteUrl} (warm-up after deployments {(settings.WarmUpAfterDeploy ? "on" : "off")})");
         }
+        var (opens, editor) = Editors.Doctor(settings.OpenWith, Editors.Installed);
+        Report(opens ? "ok" : "warn", editor);
 
         if (Process.GetProcessesByName("WebfarmFileSync").Length != 0)
             Report("warn", "The old WebfarmFileSync watcher is running and could overwrite deployments. " + (settings.StopLegacyWatcher

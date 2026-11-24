@@ -5,6 +5,14 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+- Feature: choose what opens a solution under **Settings → Open solutions with**: the newest installed Visual Studio (the
+  default), one Visual Studio in particular when you have several, VS Code, or a question each time. VS Code opens the
+  checkout's folder with the same changed files Visual Studio would open. Open solution, opening a main worktree's solution
+  and Ticket workspaces all follow it, and `cultivate setup --open-with visual-studio|vscode|ask|PATH` sets it from the command
+  line.
+- Improvement: with several versions of Visual Studio installed, the newest release now opens rather than a newer preview. A
+  preview opens only when no release is installed.
+
 ## 1.3.3 — 2026-11-23
 
 - Improvement: the result shown after **Build release files** now reads like the preview, so what was built is quick to check.

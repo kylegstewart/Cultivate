@@ -38,7 +38,64 @@ internal static class SolutionOpener
         return requested.Select(Files.Full).Where(seen.Add).ToList();
     }
 
-    public static Task Open(string visualStudio, string solution, List<string> files)
+    /// <summary>Opens <paramref name="solution"/> in Visual Studio, or the checkout's <paramref name="root"/> folder in VS Code, with <paramref name="files"/>.</summary>
+    public static Task Open(Editor editor, string solution, string root, List<string> files) =>
+        editor.VSCode ? OpenFolder(editor.Path, root, files) : OpenSolution(editor.Path, solution, files);
+
+    /// <summary>
+    /// Runs <paramref name="code"/> once per command <see cref="CodeCommands"/> makes. VS Code opens the folder in a window, or focuses the one
+    /// that has it, and opens the files there. Its output is neither redirected nor read, so a VS Code left running can never hold Cultivate.
+    /// </summary>
+    internal static async Task OpenFolder(string code, string root, List<string> files)
+    {
+        try
+        {
+            foreach (var arguments in CodeCommands(code, Files.Full(root), files))
+            {
+                using var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
+                {
+                    Arguments = arguments, UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root
+                }) ?? throw new InvalidOperationException("VS Code could not be started.");
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                try { await process.WaitForExitAsync(timeout.Token); }
+                catch (OperationCanceledException) { continue; } // Still starting after a minute: it was started.
+                if (process.ExitCode != 0) throw new InvalidOperationException($"{Path.GetFileName(code)} exited with code {process.ExitCode}.");
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+        {
+            throw new InvalidOperationException("VS Code could not open the folder: " + exception.Message, exception);
+        }
+    }
+
+    internal const int CommandLimit = 7000;
+
+    /// <summary>
+    /// cmd.exe arguments that run <paramref name="code"/> with <paramref name="root"/> and the <paramref name="files"/>, as few commands as fit
+    /// within <paramref name="limit"/> characters each, well under cmd's 8,191. .NET quotes only arguments with spaces, so cmd would split a
+    /// path such as R&amp;D at its &amp;; every argument here is in double quotes instead, and a path cmd cannot quote, with " or %, is refused.
+    /// </summary>
+    internal static List<string> CodeCommands(string code, string root, IReadOnlyList<string> files, int limit = CommandLimit)
+    {
+        if (files.Prepend(root).Prepend(code).FirstOrDefault(path => path.Contains('"') || path.Contains('%')) is { } unsafePath)
+            throw new InvalidOperationException($"A path containing \" or % cannot be passed to VS Code: {unsafePath}");
+        string Command(IEnumerable<string> batch) => $"/d /s /c \"\"{code}\" {string.Join(" ", batch.Prepend(root).Select(path => $"\"{path}\""))}\"";
+        var commands = new List<string>();
+        var batch = new List<string>();
+        foreach (var file in files)
+        {
+            if (batch.Count != 0 && Command(batch.Append(file)).Length > limit)
+            {
+                commands.Add(Command(batch));
+                batch.Clear();
+            }
+            batch.Add(file);
+        }
+        commands.Add(Command(batch));
+        return commands;
+    }
+
+    private static Task OpenSolution(string visualStudio, string solution, List<string> files)
     {
         if (!OperatingSystem.IsWindows()) throw new InvalidOperationException("Opening Visual Studio requires Windows.");
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
