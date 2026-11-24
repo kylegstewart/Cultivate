@@ -5,6 +5,8 @@ version it publishes, and the notes appear on the GitHub release and in `cultiva
 
 ## Unreleased
 
+## 1.3.4 — 2026-11-24
+
 - Feature: choose what opens a solution under **Settings → Open solutions with**: the newest installed Visual Studio (the
   default), one Visual Studio in particular when you have several, VS Code, or a question each time. VS Code opens the
   checkout's folder with the same changed files Visual Studio would open. Open solution, opening a main worktree's solution
