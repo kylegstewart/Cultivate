@@ -15,14 +15,15 @@ internal static class Setup
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
                 throw new InvalidOperationException($"{name} needs a value.");
             var value = args[index + 1].Trim().Trim('"');
-            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--stop-legacy-watcher" or "--library-repositories" or "--cleanup-days") &&
-                !Path.IsPathFullyQualified(value))
+            if (name is not ("--base-branch" or "--watch" or "--site-url" or "--warmup" or "--stop-legacy-watcher" or "--library-repositories" or "--cleanup-days" or
+                "--open-with") && !Path.IsPathFullyQualified(value))
                 throw new InvalidOperationException($"{name} needs an absolute path, not '{value}'.");
             return value;
         }
         var settings = await Settings.Read();
         var options = new[] { "--repository", "--webfarm", "--base-branch", "--mapping-assembly", "--msbuild", "--watch", "--worktrees",
-            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days", "--release-root", "--meyeronline" };
+            "--site-url", "--warmup", "--sql-mirror", "--stop-legacy-watcher", "--library-repositories", "--cleanup-days", "--release-root", "--meyeronline",
+            "--open-with" };
         if (!options.Any(args.Contains))
         {
             if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -56,6 +57,7 @@ internal static class Setup
         if (Option("--cleanup-days") is { } cleanupDays)
             settings.CleanupDays = int.TryParse(cleanupDays, out var days) && days >= 1 ? days : throw new InvalidOperationException("--cleanup-days expects a whole number of days, 1 or more.");
         if (Option("--release-root") is { } releaseRoot) settings.ReleaseRoot = Files.Full(releaseRoot);
+        if (Option("--open-with") is { } openWith) settings.OpenWith = Editors.FromOption(openWith);
         GuardActive(active, previousFarm, settings.WebfarmRoot);
         var problems = settings.Problems();
         if (problems.Count != 0) throw new InvalidOperationException("Settings were not saved:\n  " + string.Join("\n  ", problems));

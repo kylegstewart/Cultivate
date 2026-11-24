@@ -121,11 +121,13 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
     }
 
     /// <summary>
-    /// Opens each checkout's solution in turn; one that fails is reported and the rest still open. Esc or Back when asked which solution
-    /// to open stops there and returns to the workspace at once.
+    /// Opens each checkout's solution in turn, all with the editor chosen once first; one that fails is reported and the rest still open.
+    /// Esc or Back when asked which editor or solution to open stops there and returns to the workspace at once.
     /// </summary>
     private async Task OpenSolutions(IReadOnlyList<TicketCheckout> checkouts)
     {
+        // Outside the loop, so an editor that is not installed is one error, not the same note for every checkout.
+        if (terminal.Editor() is not { } editor) return;
         var notes = new List<string>();
         var opened = 0;
         foreach (var checkout in checkouts)
@@ -138,7 +140,7 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
             }
             try
             {
-                if (!await terminal.OpenTarget(checkout.Checkout.ToTarget(), !checkout.MyMeyer))
+                if (!await terminal.OpenTarget(checkout.Checkout.ToTarget(), !checkout.MyMeyer, editor))
                     return;
 
                 notes.Add($"[{TerminalStyle.Accent}]Opened {Terminal.Escape(name)}.[/]");
@@ -176,7 +178,7 @@ internal sealed class TicketWorkspaces(Settings settings, GitRepository git, Bri
         if (solutions != 0)
         {
             var skipped = details.Checkouts.Count - solutions;
-            actions.Add(new(OpenAll, $"Open {Count(solutions, "solution")} in Visual Studio with changed files" +
+            actions.Add(new(OpenAll, $"Open {Count(solutions, "solution")} {Editors.Where(settings.OpenWith)} with changed files" +
                 (skipped == 0 ? "." : $"; {Count(skipped, "checkout")} without one {(skipped == 1 ? "is" : "are")} skipped.")));
         }
         if (solutions > 1) actions.Add(new(OpenOne, "Choose one checkout and open its solution with its changed files."));

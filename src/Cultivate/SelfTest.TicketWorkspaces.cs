@@ -286,6 +286,11 @@ internal static partial class SelfTest
             actions[0].Description.Contains("5 solutions") && actions[0].Description.Contains("2 checkouts without one are skipped") &&
             actions.Single(action => action.Label == TicketWorkspaces.OpenPullRequests).Description.Contains("1 pull request "),
             "a ticket workspace offers its solutions, a MyMeyer preview, the ticket page, and its pull requests");
+        string OpenAllWith(string openWith) => TicketWorkspaces.Actions(details, new Settings { OpenWith = openWith })[0].Description;
+        Check(OpenAllWith("").StartsWith("Open 5 solutions in Visual Studio with changed files") &&
+            OpenAllWith(@"C:\VS\17\Common7\IDE\devenv.exe").StartsWith("Open 5 solutions in Visual Studio ") &&
+            OpenAllWith("VSCode").StartsWith("Open 5 solutions in VS Code ") && OpenAllWith("ask").StartsWith("Open 5 solutions in the editor you choose "),
+            "opening all solutions says which editor they open in, following the setting");
         var branch = new TicketWorkspaceDetails(new TicketWorkspace("automation-manager", null, [details.Workspace.Checkouts[1]], null),
             [details.Checkouts[1] with { PullRequests = [] }], null);
         Check(TicketWorkspaces.Actions(branch, settings).Select(action => action.Label).SequenceEqual([TicketWorkspaces.Refresh, TicketWorkspaces.Back]) &&

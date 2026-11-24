@@ -6,7 +6,8 @@ namespace Cultivate;
 
 /// <summary>
 /// One setting as the Settings screen lists it and the first run asks for it. A text setting is read and written as text and checked by
-/// <see cref="Problem"/> once trimmed and unquoted; a yes/no setting has <see cref="Get"/> and <see cref="Set"/> instead.
+/// <see cref="Problem"/> once trimmed and unquoted; a yes/no setting has <see cref="Get"/> and <see cref="Set"/> instead; a choice setting
+/// is read and written as text too, but only ever as one of its <see cref="Choices"/>, and the first run leaves it at its default.
 /// </summary>
 internal sealed class SettingField
 {
@@ -20,12 +21,15 @@ internal sealed class SettingField
     internal Func<string, string?> Problem { get; init; } = _ => null;
     internal Func<Settings, bool>? Get { get; init; }
     internal Action<Settings, bool>? Set { get; init; }
+    /// <summary>A choice setting's values, each with the label shown for it, in the order Enter steps through them.</summary>
+    internal Func<Settings, IReadOnlyList<(string Value, string Label)>>? Choices { get; init; }
     /// <summary>Whether the setting does anything with the others as they are; one that does not is skipped and shows <see cref="Unused"/>.</summary>
     internal Func<Settings, bool> Applies { get; init; } = _ => true;
     internal string Unused { get; init; } = "";
     /// <summary>A warning about the saved value, such as a folder that cannot be reached; it never stops the value being saved.</summary>
     internal Func<Settings, string?>? Note { get; init; }
     internal bool YesNo => Get is not null;
+    internal bool Choice => Choices is not null;
 
     internal const string NotReachable = "Not reachable right now. Check your VPN/share access before deploying.";
     internal const string NotBuilt = "Not built yet. Frontend deployments need it; build MeyerObjects in your normal checkout.";
@@ -94,6 +98,14 @@ internal sealed class SettingField
         },
         new()
         {
+            Name = "Open solutions with",
+            Description = "What opens a solution: the newest installed Visual Studio, one Visual Studio in particular, VS Code (which opens " +
+                "the checkout's folder), or a question each time.",
+            Read = settings => settings.OpenWith, Write = (settings, value) => settings.OpenWith = value,
+            Choices = _ => Editors.Choices(Editors.Installed), Note = settings => Editors.Note(settings.OpenWith, Editors.Installed)
+        },
+        new()
+        {
             Name = "Dev site address", Optional = true,
             Description = "The dev site's address, requested after a deployment so the first page load is not the one that waits. Blank skips the warm-up.",
             Read = settings => settings.SiteUrl,
@@ -152,8 +164,10 @@ internal sealed class SettingField
     private static string? Absolute(string value) => Path.IsPathFullyQualified(value) ? null : "Enter an absolute path.";
     private static string OptionalPath(string value) => value.Length == 0 ? "" : Files.Full(value);
 
-    /// <summary>The value as the list shows it; blank for a text setting with none.</summary>
-    internal string Shown(Settings settings) => YesNo ? Get!(settings) ? "Yes" : "No" : Read(settings);
+    /// <summary>The value as the list shows it: a choice's label, or the value itself when it is none of the choices; blank for a text setting with none.</summary>
+    internal string Shown(Settings settings) => YesNo ? Get!(settings) ? "Yes" : "No" :
+        Choice && Choices!(settings).FirstOrDefault(choice => Files.Comparer.Equals(choice.Value, Read(settings))) is { Label: { } label } ? label :
+        Read(settings);
 
     /// <summary>
     /// A copy of <paramref name="settings"/> with <paramref name="input"/> written, or why it is refused: the value's problem, or a new
@@ -169,11 +183,20 @@ internal sealed class SettingField
         return Setup.MovesActive(active, settings.WebfarmRoot, changed.WebfarmRoot) ? (null, Setup.ActiveMoved) : (changed, null);
     }
 
-    /// <summary>A copy of <paramref name="settings"/> with this yes/no setting turned the other way.</summary>
+    /// <summary>
+    /// A copy of <paramref name="settings"/> with this yes/no setting turned the other way, or this choice setting at its next choice: after the
+    /// last comes the first, and so does it after a value that is none of the choices.
+    /// </summary>
     internal Settings Toggled(Settings settings)
     {
         var changed = Copy(settings);
-        Set!(changed, !Get!(settings));
+        if (YesNo) Set!(changed, !Get!(settings));
+        else
+        {
+            var choices = Choices!(settings);
+            var index = choices.Select(choice => choice.Value).ToList().FindIndex(value => Files.Comparer.Equals(value, Read(settings)));
+            Write(changed, choices[(index + 1) % choices.Count].Value);
+        }
         return changed;
     }
 

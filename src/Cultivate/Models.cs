@@ -91,6 +91,9 @@ internal sealed class Settings
     public int CleanupDays { get; set; } = 14;
     /// <summary>Folder that holds one folder of release files per ticket, built by <c>cultivate release</c>; <c>Documents\Releases</c> by default.</summary>
     public string ReleaseRoot { get; set; } = "";
+    /// <summary>What opens a solution: blank for the newest installed Visual Studio, a devenv.exe path for one in particular, VSCode, or Ask
+    /// to ask each time. Never one of the <see cref="Problems"/>, so an editor uninstalled since never stops Cultivate starting.</summary>
+    public string OpenWith { get; set; } = "";
 
     public static string FilePath => Path.Combine(Files.Home, "settings.json");
 
@@ -187,15 +190,13 @@ internal sealed class Settings
     public static Task<string?> FindMSBuild() =>
         FindVisualStudioFile(@"MSBuild\**\Bin\MSBuild.exe", "-latest", "-products", "*", "-requires", "Microsoft.Component.MSBuild");
 
-    // Search IDE products so a newer SSMS or Build Tools installation cannot hide Visual Studio.
-    public static Task<string?> FindVisualStudio() =>
-        FindVisualStudioFile(@"Common7\IDE\devenv.exe", "-sort", "-prerelease");
+    internal static string VsWhere =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio", "Installer", "vswhere.exe");
 
     private static async Task<string?> FindVisualStudioFile(string pattern, params string[] arguments)
     {
-        var vswhere = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Microsoft Visual Studio", "Installer", "vswhere.exe");
-        if (!File.Exists(vswhere)) return null;
-        var result = await Commands.Run(vswhere, arguments.Concat(["-utf8", "-find", pattern]));
+        if (!File.Exists(VsWhere)) return null;
+        var result = await Commands.Run(VsWhere, arguments.Concat(["-utf8", "-find", pattern]));
         return result.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).FirstOrDefault(File.Exists);
     }
 

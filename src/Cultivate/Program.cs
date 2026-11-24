@@ -66,7 +66,7 @@ internal static class Program
                 [--worktrees PATH] [--site-url URL] [--warmup true|false]
                 [--sql-mirror PATH] [--stop-legacy-watcher true|false]
                 [--library-repositories PATH;PATH|none] [--cleanup-days N] [--release-root PATH]
-                [--meyeronline PATH]
+                [--meyeronline PATH] [--open-with visual-studio|vscode|ask|PATH-TO-DEVENV]
           update [--check] [--version X.Y.Z] [--yes]
                                                   Install the latest (or a specific) release in place
           config                                  Show the settings file and its values

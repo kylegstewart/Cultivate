@@ -33,6 +33,8 @@ internal static partial class SelfTest
         // Activations and workers write runs, logs, requests and worker files under Files.Home: keep them in the fixture folder.
         if (File.Exists(Settings.FilePath)) File.Copy(Settings.FilePath, Path.Combine(home, "settings.json"));
         Environment.SetEnvironmentVariable("CULTIVATE_HOME", home);
+        // Nothing that opens a solution depends on the editors installed here; checks that need some set their own.
+        Editors.Use(new([], null));
         Bridge? cleanupBridge = null;
         try
         {
@@ -43,6 +45,7 @@ internal static partial class SelfTest
             CheckSettings(home);
             await CheckDiagnostics(home);
             await CheckVisualStudio();
+            await CheckEditors(home);
             CheckSolutionFiles(home);
             CheckSolutionAutomation(home);
             await CheckSolutions(home);
@@ -621,14 +624,12 @@ internal static partial class SelfTest
 
     private static async Task CheckVisualStudio()
     {
-        var vswhere = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            "Microsoft Visual Studio", "Installer", "vswhere.exe");
-        if (!File.Exists(vswhere)) return;
-        // Check product metadata independently of file discovery to catch non-IDE products masking Visual Studio.
-        var products = await Commands.Run(vswhere, ["-prerelease", "-utf8", "-property", "productPath"]);
+        if (!File.Exists(Settings.VsWhere)) return;
+        // Check product metadata independently of discovery to catch non-IDE products masking Visual Studio.
+        var products = await Commands.Run(Settings.VsWhere, ["-prerelease", "-utf8", "-property", "productPath"]);
         var installed = products.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(path => path.Trim())
             .Where(path => Files.Comparer.Equals(Path.GetFileName(path), "devenv.exe") && File.Exists(path)).ToList();
-        var found = await Settings.FindVisualStudio();
+        var found = Editors.Find().Automatic?.Path;
         Check(installed.Count == 0 ? found is null : found is not null && installed.Contains(found, Files.Comparer),
             "Visual Studio discovery matches installed IDEs even with newer non-IDE products, or returns none on Build Tools-only machines");
     }
